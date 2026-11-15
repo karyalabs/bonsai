@@ -203,7 +203,7 @@ fn clones_from_a_url_and_opens_the_result(cx: &mut TestAppContext) {
     let url = format!("file://{}", source.display());
     cx.update(|window, cx| dialog.update(cx, |dialog, cx| dialog.set_url(&url, window, cx)));
     let destination = dialog
-        .read_with(cx, |dialog, cx| dialog.destination(cx))
+        .read_with(cx, super::clone::CloneDialog::destination)
         .unwrap();
     assert_eq!(destination, parent.join("source"));
 
