@@ -702,10 +702,13 @@ name = "bonsai"
 version = "0.2.0"
 dependencies = [
  "bonsai-git",
+ "futures",
  "gpui-icons",
  "gpui-kit",
  "gpui-pre-platform",
  "gpuicn",
+ "notify",
+ "tempfile",
  "web-time",
 ]
 

@@ -79,6 +79,14 @@ impl Repository {
         Self::open(git, path)
     }
 
+    /// The same repository run through a differently configured [`Git`], for
+    /// example one that logs commands.
+    #[must_use]
+    pub fn with_git(mut self, git: Git) -> Self {
+        self.git = git;
+        self
+    }
+
     #[must_use]
     pub fn git(&self) -> &Git {
         &self.git
