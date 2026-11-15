@@ -1,6 +1,6 @@
 # 1. Build Bonsai in Rust with GPUI and gpuicn
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
 
 ## Context

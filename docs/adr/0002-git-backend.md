@@ -1,6 +1,6 @@
 # 2. Git CLI for operations, gix for hot reads
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
 
 ## Context

@@ -1,6 +1,6 @@
 # 4. Purge through git fast-export and fast-import
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
 
 ## Context

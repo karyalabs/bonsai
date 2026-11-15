@@ -1,6 +1,6 @@
 # 3. Provider layer: one trait, accounts in the Keychain, Git auth via askpass
 
-Status: Proposed
+Status: Accepted
 Date: 2026-11-15
 
 ## Context

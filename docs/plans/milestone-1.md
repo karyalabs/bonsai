@@ -1,6 +1,6 @@
 # Milestone 1: a daily-driver Git client
 
-Status: Draft for review
+Status: Approved 2026-11-15; issues filed
 Date: 2026-11-15
 
 ## Goal
@@ -78,61 +78,61 @@ filed in karyalabs/gpuicn, because reusable UI ships there first (ADR 1).
 
 ### Phase 0: foundation
 
-| # | Issue | Needs | Label |
+| ID | Issue | Needs | Label |
 | --- | --- | --- | --- |
-| B1 | Scaffold the Cargo workspace with gpuicn in crate mode, a launchable window, `make check`, and macOS CI | none | ready-for-agent |
-| B2 | `bonsai-git`: Git process runner (environment, askpass hook point, cancellation, version check, command log) and repository discover, open and init | B1 | ready-for-agent |
-| B3 | `bonsai-git`: repository snapshot (status via porcelain v2, HEAD, refs, upstreams, remotes, stashes, in-progress operation) with fixture tests | B2 | ready-for-agent |
-| B4 | App: `RepositoryModel` entity, per-repository operation queue, FSEvents watcher with debounce | B3 | ready-for-agent |
-| B5 | App shell: sidebar, resizable panes, repository tabs, native menu bar, command palette, one action table for keys, menus and palette | B1 | ready-for-agent |
-| B6 | Repository manager: welcome screen, open, drag in, init, clone from URL with progress, recents | B4, B5 | ready-for-agent |
+| B1 (#15) | Scaffold the Cargo workspace with gpuicn in crate mode, a launchable window, `make check`, and macOS CI | none | ready-for-agent |
+| B2 (#16) | `bonsai-git`: Git process runner (environment, askpass hook point, cancellation, version check, command log) and repository discover, open and init | #15 | ready-for-agent |
+| B3 (#17) | `bonsai-git`: repository snapshot (status via porcelain v2, HEAD, refs, upstreams, remotes, stashes, in-progress operation) with fixture tests | #16 | ready-for-agent |
+| B4 (#18) | App: `RepositoryModel` entity, per-repository operation queue, FSEvents watcher with debounce | #17 | ready-for-agent |
+| B5 (#19) | App shell: sidebar, resizable panes, repository tabs, native menu bar, command palette, one action table for keys, menus and palette | #15 | ready-for-agent |
+| B6 (#20) | Repository manager: welcome screen, open, drag in, init, clone from URL with progress, recents | #18, #19 | ready-for-agent |
 
 ### Phase 1: everyday Git
 
-| # | Issue | Needs | Label |
+| ID | Issue | Needs | Label |
 | --- | --- | --- | --- |
-| G1 | gpuicn: Diff component on GPUI Kit's `diff` (unified and split, syntax highlighting, hunk and line selection intents, read-only mode) | none | ready-for-agent |
-| G2 | gpuicn: Commit graph component aligned with Virtual List rows, drawing caller-supplied lanes, nodes, edges and labels | none | ready-for-agent |
-| G3 | gpuicn: Tree component on GPUI Kit's `tree` (used for the changes tree mode and the purge path picker) | none | ready-for-agent |
-| B7 | Changes view: grouped lists, stage, unstage, discard and ignore files, list and tree modes | B4, B5, G3 | ready-for-agent |
-| B8 | Diff pipeline in `bonsai-git` (work tree, index, commit and range diffs; binary and size limits) and the diff pane | B3, G1 | ready-for-agent |
-| B9 | Stage, unstage and discard hunks and lines | B7, B8 | ready-for-agent |
-| B10 | Commit composer: amend, signing from config, hook output, recent messages, empty and failed states | B7 | ready-for-agent |
-| B11 | `bonsai-graph`: lane layout plus paged history loading through gix with a CLI fallback | B3 | ready-for-agent |
-| B12 | History view: graph, ref labels, commit details, changed files, diff, search and filter | B8, B11, G2 | ready-for-agent |
-| B13 | Branches and tags in the sidebar: create, rename, delete, checkout, upstream and ahead/behind, tags | B4, B5 | ready-for-agent |
-| B14 | Remotes and sync: fetch, pull, push, publish branch, force push with lease, remote management, progress and auth errors | B13 | ready-for-agent |
-| B15 | Merge, rebase onto, cherry-pick, revert, reset; in-progress banner; basic conflict handling | B12, B13 | ready-for-agent |
-| B16 | Stashes: save with untracked, apply, pop, drop, view | B8, B13 | ready-for-agent |
-| B17 | Activity log panel and a shared error and confirmation pattern | B4 | ready-for-agent |
+| G1 (gpuicn#212) | gpuicn: Diff component on GPUI Kit's `diff` (unified and split, syntax highlighting, hunk and line selection intents, read-only mode) | none | ready-for-agent |
+| G2 (gpuicn#213) | gpuicn: Commit graph component aligned with Virtual List rows, drawing caller-supplied lanes, nodes, edges and labels | none | ready-for-agent |
+| G3 (gpuicn#214) | gpuicn: Tree component on GPUI Kit's `tree` (used for the changes tree mode and the purge path picker) | none | ready-for-agent |
+| B7 (#21) | Changes view: grouped lists, stage, unstage, discard and ignore files, list and tree modes | #18, #19, gpuicn#214 | ready-for-agent |
+| B8 (#22) | Diff pipeline in `bonsai-git` (work tree, index, commit and range diffs; binary and size limits) and the diff pane | #17, gpuicn#212 | ready-for-agent |
+| B9 (#23) | Stage, unstage and discard hunks and lines | #21, #22 | ready-for-agent |
+| B10 (#24) | Commit composer: amend, signing from config, hook output, recent messages, empty and failed states | #21 | ready-for-agent |
+| B11 (#25) | `bonsai-graph`: lane layout plus paged history loading through gix with a CLI fallback | #17 | ready-for-agent |
+| B12 (#26) | History view: graph, ref labels, commit details, changed files, diff, search and filter | #22, #25, gpuicn#213 | ready-for-agent |
+| B13 (#27) | Branches and tags in the sidebar: create, rename, delete, checkout, upstream and ahead/behind, tags | #18, #19 | ready-for-agent |
+| B14 (#28) | Remotes and sync: fetch, pull, push, publish branch, force push with lease, remote management, progress and auth errors | #27 | ready-for-agent |
+| B15 (#29) | Merge, rebase onto, cherry-pick, revert, reset; in-progress banner; basic conflict handling | #26, #27 | ready-for-agent |
+| B16 (#30) | Stashes: save with untracked, apply, pop, drop, view | #22, #27 | ready-for-agent |
+| B17 (#31) | Activity log panel and a shared error and confirmation pattern | #18 | ready-for-agent |
 
 ### Phase 2: providers
 
-| # | Issue | Needs | Label |
+| ID | Issue | Needs | Label |
 | --- | --- | --- | --- |
-| B18 | Register OAuth apps for GitHub, GitLab and Bitbucket and record the client IDs | none | ready-for-human |
-| B19 | `bonsai-keychain`: Keychain token store and the askpass entry point used by the Git runner | B2 | ready-for-agent |
-| B20 | `bonsai-providers`: `Provider` trait, `HttpClient` seam, GitHub (device flow, user, list and search repositories, create repository) | B18, B19 | ready-for-agent |
-| B21 | GitLab provider (OAuth with PKCE or personal access token) | B20 | ready-for-agent |
-| B22 | Bitbucket Cloud provider (OAuth or API token) | B20 | ready-for-agent |
-| B23 | Accounts settings: sign in, sign out, account status, per-host token use in askpass | B20 | ready-for-agent |
-| B24 | Remote repository browser: per-account lists, search, clone | B6, B23 | ready-for-agent |
-| B25 | Publish a local repository: pick account, name, visibility; create, add `origin`, push | B14, B23 | ready-for-agent |
+| B18 (#32) | Register OAuth apps for GitHub, GitLab and Bitbucket and record the client IDs | none | ready-for-human |
+| B19 (#33) | `bonsai-keychain`: Keychain token store and the askpass entry point used by the Git runner | #16 | ready-for-agent |
+| B20 (#34) | `bonsai-providers`: `Provider` trait, `HttpClient` seam, GitHub (device flow, user, list and search repositories, create repository) | #32, #33 | ready-for-agent |
+| B21 (#35) | GitLab provider (OAuth with PKCE or personal access token) | #34 | ready-for-agent |
+| B22 (#36) | Bitbucket Cloud provider (OAuth or API token) | #34 | ready-for-agent |
+| B23 (#37) | Accounts settings: sign in, sign out, account status, per-host token use in askpass | #34 | ready-for-agent |
+| B24 (#38) | Remote repository browser: per-account lists, search, clone | #20, #37 | ready-for-agent |
+| B25 (#39) | Publish a local repository: pick account, name, visibility; create, add `origin`, push | #28, #37 | ready-for-agent |
 
 ### Phase 3: purge
 
-| # | Issue | Needs | Label |
+| ID | Issue | Needs | Label |
 | --- | --- | --- | --- |
-| B26 | `bonsai-git`: purge engine (preflight, path scan, safety backup, fast-export filter with empty-commit pruning, fast-import, cleanup, verification, restore from backup) | B3 | ready-for-agent |
-| B27 | Purge flow: "Purge from history…" on any file, history-wide path search, preview of affected commits and refs, confirmation, progress, result, force-push assistant, rotate-secret reminder, restore | B12, B14, B26, G3 | ready-for-agent |
+| B26 (#40) | `bonsai-git`: purge engine (preflight, path scan, safety backup, fast-export filter with empty-commit pruning, fast-import, cleanup, verification, restore from backup) | #17 | ready-for-agent |
+| B27 (#41) | Purge flow: "Purge from history…" on any file, history-wide path search, preview of affected commits and refs, confirmation, progress, result, force-push assistant, rotate-secret reminder, restore | #26, #28, #40, gpuicn#214 | ready-for-agent |
 
 ### Phase 4: ship
 
-| # | Issue | Needs | Label |
+| ID | Issue | Needs | Label |
 | --- | --- | --- | --- |
-| B28 | Settings: Git binary, external editor and terminal, appearance, auto fetch | B5 | ready-for-agent |
-| B29 | Performance pass: agree budgets with Arya, measure on large repositories (100k+ commits, 10k+ changes), fix regressions | B12, B7 | needs-triage |
-| B30 | Release pipeline: signing, notarization and DMG, ported from `stable` | B1 | ready-for-human |
+| B28 (#42) | Settings: Git binary, external editor and terminal, appearance, auto fetch | #19 | ready-for-agent |
+| B29 (#43) | Performance pass: agree budgets with Arya, measure on large repositories (100k+ commits, 10k+ changes), fix regressions | #26, #21 | needs-triage |
+| B30 (#44) | Release pipeline: signing, notarization and DMG, ported from `stable` | #15 | ready-for-human |
 
 ## Open questions for Arya
 
@@ -147,5 +147,5 @@ filed in karyalabs/gpuicn, because reusable UI ships there first (ADR 1).
 5. **Release.** Is milestone 1 a public signed release, or a build for you
    first?
 
-Once these are settled and this plan is approved, the issues above get filed
-with these titles, dependencies and labels.
+Arya approved starting on 2026-11-15. Until told otherwise, work proceeds on
+the recommendation in each question.
