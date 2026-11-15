@@ -151,6 +151,7 @@ impl Git {
             stdin: None,
             env: Vec::new(),
             cancel: None,
+            on_stderr: None,
         }
     }
 
@@ -213,8 +214,8 @@ impl Git {
                 let _ = stdin.write_all(&bytes);
             }))
         });
-        let stdout_reader = read_to_end(child.stdout.take());
-        let stderr_reader = read_to_end(child.stderr.take());
+        let stdout_reader = read_to_end(child.stdout.take(), None);
+        let stderr_reader = read_to_end(child.stderr.take(), command.on_stderr.clone());
 
         let mut cancelled = false;
         let status = loop {
@@ -281,14 +282,56 @@ fn kill_tree(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
-fn read_to_end<R: Read + Send + 'static>(pipe: Option<R>) -> thread::JoinHandle<Vec<u8>> {
+/// Reads a pipe to its end. With a sink, each line is also passed on as it
+/// arrives; Git ends progress updates with `\r`, so both `\r` and `\n` end a
+/// line.
+fn read_to_end<R: Read + Send + 'static>(
+    pipe: Option<R>,
+    sink: Option<LineSink>,
+) -> thread::JoinHandle<Vec<u8>> {
     thread::spawn(move || {
         let mut bytes = Vec::new();
-        if let Some(mut pipe) = pipe {
+        let Some(mut pipe) = pipe else {
+            return bytes;
+        };
+        let Some(sink) = sink else {
             let _ = pipe.read_to_end(&mut bytes);
+            return bytes;
+        };
+        let mut chunk = [0_u8; 4096];
+        let mut line_start = 0;
+        loop {
+            let read = match pipe.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => read,
+            };
+            bytes.extend_from_slice(&chunk[..read]);
+            while let Some(end) = bytes[line_start..]
+                .iter()
+                .position(|b| *b == b'\r' || *b == b'\n')
+            {
+                let line = &bytes[line_start..line_start + end];
+                if !line.is_empty() {
+                    (sink.0)(&String::from_utf8_lossy(line));
+                }
+                line_start += end + 1;
+            }
+        }
+        if line_start < bytes.len() {
+            (sink.0)(&String::from_utf8_lossy(&bytes[line_start..]));
         }
         bytes
     })
+}
+
+/// Receives stderr line by line while a command runs.
+#[derive(Clone)]
+pub struct LineSink(Arc<dyn Fn(&str) + Send + Sync>);
+
+impl std::fmt::Debug for LineSink {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("LineSink")
+    }
 }
 
 /// One Git invocation, built with [`Git::command`].
@@ -299,6 +342,7 @@ pub struct GitCommand {
     stdin: Option<Vec<u8>>,
     env: Vec<(OsString, OsString)>,
     cancel: Option<CancelToken>,
+    on_stderr: Option<LineSink>,
 }
 
 impl GitCommand {
@@ -323,6 +367,14 @@ impl GitCommand {
     #[must_use]
     pub fn cancel(mut self, token: CancelToken) -> Self {
         self.cancel = Some(token);
+        self
+    }
+
+    /// Calls `sink` with each stderr line as it arrives, such as `--progress`
+    /// updates. Stderr is still returned in full.
+    #[must_use]
+    pub fn on_stderr(mut self, sink: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        self.on_stderr = Some(LineSink(Arc::new(sink)));
         self
     }
 }

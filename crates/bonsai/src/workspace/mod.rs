@@ -3,12 +3,16 @@
 
 use std::path::{Path, PathBuf};
 
+mod clone;
+
 use bonsai_git::{Git, Head, Repository, Snapshot};
+pub use clone::{CloneDialog, CloneEvent};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, ExternalPaths, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -18,11 +22,8 @@ use crate::{
     ui::{
         button::{Button, ButtonVariant},
         command::{CommandEvent, CommandItem, CommandState, command_dialog_popup},
-        dialog::{DialogHandle, dialog_with},
-        empty::{
-            Empty, EmptyContent, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant,
-            EmptyTitle,
-        },
+        dialog::{DialogHandle, dialog, dialog_popup, dialog_with},
+        empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
         resizable::{PaneLimits, Resizable},
         sidebar::{Sidebar, SidebarItem, sidebar_badge, sidebar_group_label},
         tabs::{Tab, Tabs},
@@ -53,6 +54,11 @@ pub struct Workspace {
     session: Session,
     session_path: Option<PathBuf>,
     palette: DialogHandle,
+    clone_handle: DialogHandle,
+    clone: Option<Entity<CloneDialog>>,
+    clone_events: Option<Subscription>,
+    /// Shows the welcome screen in place of the active tab (New Tab).
+    welcome: bool,
     message: Option<SharedString>,
     watch: bool,
     focus: FocusHandle,
@@ -80,6 +86,10 @@ impl Workspace {
             session: session.clone(),
             session_path,
             palette: DialogHandle::new(false),
+            clone_handle: DialogHandle::new(false),
+            clone: None,
+            clone_events: None,
+            welcome: false,
             message: None,
             watch,
             focus,
@@ -133,8 +143,16 @@ impl Workspace {
             self.next_tab_id += 1;
             self.active = self.tabs.len() - 1;
         }
+        self.welcome = false;
         if save {
-            self.save_session();
+            let root = self.tabs[self.active]
+                .model
+                .read(cx)
+                .repository()
+                .root()
+                .to_path_buf();
+            self.session.remember(&root);
+            self.sync_session_tabs(cx);
         }
         cx.notify();
         Ok(())
@@ -184,8 +202,9 @@ impl Workspace {
     }
 
     fn select_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if index < self.tabs.len() && index != self.active {
+        if index < self.tabs.len() && (index != self.active || self.welcome) {
             self.active = index;
+            self.welcome = false;
             self.save_session();
             cx.notify();
         }
@@ -215,19 +234,145 @@ impl Workspace {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
-                for path in paths {
-                    if let Err(error) = this.open_path(&path, false, cx) {
-                        this.message = Some(error);
+                this.open_paths(&paths, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Opens each path in a tab and remembers it, reporting the first failure.
+    pub fn open_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        for path in paths {
+            if let Err(error) = self.open_path(path, true, cx) {
+                self.message = Some(error);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Opens a recent repository, or explains that it moved.
+    fn open_recent(&mut self, path: &Path, cx: &mut Context<Self>) {
+        if path.exists() {
+            if let Err(error) = self.open_path(path, true, cx) {
+                self.message = Some(error);
+            }
+        } else {
+            self.message = Some(
+                format!(
+                    "{} no longer exists. Remove it from Recent, or open it from its new location.",
+                    path.display()
+                )
+                .into(),
+            );
+        }
+        cx.notify();
+    }
+
+    fn forget_recent(&mut self, path: &Path, cx: &mut Context<Self>) {
+        self.session.forget(path);
+        self.save_session();
+        cx.notify();
+    }
+
+    fn prompt_new(&mut self, cx: &mut Context<Self>) {
+        let Ok(git) = self.git.clone() else { return };
+        let directory = self
+            .session
+            .clone_parent
+            .clone()
+            .or_else(home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let path = cx.prompt_for_new_path(&directory, Some("new-repository"));
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(path))) = path.await else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                match Repository::init(&git, &path, None) {
+                    Ok(repository) => {
+                        let root = repository.root().to_path_buf();
+                        if let Err(error) = this.open_path(&root, true, cx) {
+                            this.message = Some(error);
+                        }
                     }
+                    Err(error) => this.message = Some(error.to_string().into()),
                 }
-                this.sync_session_tabs(cx);
                 cx.notify();
             });
         })
         .detach();
     }
 
+    /// Opens the Clone dialog, optionally filled with `url`.
+    pub fn show_clone(&mut self, url: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(git) = self.git.clone() else { return };
+        let parent = self
+            .session
+            .clone_parent
+            .clone()
+            .filter(|p| p.is_dir())
+            .or_else(home_dir)
+            .unwrap_or_else(|| PathBuf::from("/"));
+        let dialog = cx.new(|cx| CloneDialog::new(git, parent, window, cx));
+        if let Some(url) = url {
+            dialog.update(cx, |dialog, cx| dialog.set_url(url, window, cx));
+        }
+        self.clone_events = Some(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &CloneEvent, window, cx| match event {
+                CloneEvent::Cloned(path) => {
+                    this.clone_handle.close(window, cx);
+                    this.clone = None;
+                    if let Err(error) = this.open_path(path, true, cx) {
+                        this.message = Some(error);
+                    }
+                }
+                CloneEvent::ParentChanged(parent) => {
+                    this.session.clone_parent = Some(parent.clone());
+                    this.save_session();
+                }
+                CloneEvent::Dismissed => {
+                    this.clone_handle.close(window, cx);
+                    this.clone = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.clone = Some(dialog);
+        self.clone_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn clone_dialog(&self) -> Option<&Entity<CloneDialog>> {
+        self.clone.as_ref()
+    }
+
+    #[must_use]
+    pub fn is_showing_welcome(&self) -> bool {
+        self.welcome || self.tabs.is_empty()
+    }
+
     // Action handlers.
+
+    fn on_new(&mut self, _: &commands::NewRepository, _: &mut Window, cx: &mut Context<Self>) {
+        self.prompt_new(cx);
+    }
+
+    fn on_clone(
+        &mut self,
+        _: &commands::CloneRepository,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_clone(None, window, cx);
+    }
+
+    fn on_welcome(&mut self, _: &commands::ShowWelcome, _: &mut Window, cx: &mut Context<Self>) {
+        self.welcome = true;
+        cx.notify();
+    }
 
     fn on_open(&mut self, _: &commands::OpenRepository, _: &mut Window, cx: &mut Context<Self>) {
         self.prompt_open(cx);
@@ -239,7 +384,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.tabs.is_empty() {
+        if self.welcome && !self.tabs.is_empty() {
+            self.welcome = false;
+            cx.notify();
+        } else if self.tabs.is_empty() {
             window.remove_window();
         } else {
             self.close_tab(self.active, cx);
@@ -307,6 +455,7 @@ impl Workspace {
         let selected = self
             .tabs
             .get(self.active)
+            .filter(|_| !self.welcome)
             .map(|tab| SharedString::from(tab.id.to_string()))
             .unwrap_or_default();
         let mut tabs = Tabs::new("workspace.tabs")
@@ -557,43 +706,204 @@ impl Workspace {
     }
 
     fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
-        let theme = UiTheme::read(cx);
-        let description: SharedString = match &self.git {
-            Ok(_) => "Open a folder that contains a Git repository.".into(),
-            Err(error) => error.clone(),
-        };
-        div()
-            .size_full()
+        let theme = UiTheme::read(cx).clone();
+        let c = &theme.colors;
+        let available = self.git.is_ok();
+        let action =
+            |id: &'static str, icon: LucideIcon, label: &'static str, hint: &'static str| {
+                Button::new(id)
+                    .variant(ButtonVariant::Outline)
+                    .disabled(!available)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .child(lucide(icon).size(px(16.)).text_color(c.foreground))
+                            .child(label)
+                            .child(div().text_xs().text_color(c.muted_foreground).child(hint)),
+                    )
+            };
+        let actions = div()
             .flex()
-            .items_center()
+            .flex_wrap()
+            .gap(px(8.))
+            .child(
+                action("welcome.open", LucideIcon::FolderOpen, "Open…", "⌘O")
+                    .on_click(cx.listener(|this, _, _, cx| this.prompt_open(cx))),
+            )
+            .child(
+                action("welcome.new", LucideIcon::FolderPlus, "New…", "⌘N")
+                    .on_click(cx.listener(|this, _, _, cx| this.prompt_new(cx))),
+            )
+            .child(
+                action("welcome.clone", LucideIcon::Download, "Clone…", "⇧⌘O")
+                    .on_click(cx.listener(|this, _, window, cx| this.show_clone(None, window, cx))),
+            );
+        let recents = self.session.recents.clone();
+        let mut list = div().flex().flex_col().gap(px(2.));
+        for (index, path) in recents.iter().enumerate() {
+            let missing = !path.exists();
+            let open_path = path.clone();
+            let forget_path = path.clone();
+            let name = tab_title(path);
+            list = list.child(
+                div()
+                    .id(("welcome.recent", index))
+                    .group("recent")
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .px(px(10.))
+                    .py(px(6.))
+                    .rounded(theme.radius.md)
+                    .cursor_pointer()
+                    .hover(|this| this.bg(c.accent))
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_recent(&open_path, cx)))
+                    .child(
+                        lucide(if missing {
+                            LucideIcon::FolderX
+                        } else {
+                            LucideIcon::FolderGit2
+                        })
+                        .size(px(16.))
+                        .text_color(c.muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .when(missing, |this| this.text_color(c.muted_foreground))
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(c.muted_foreground)
+                                    .child(if missing {
+                                        format!("Missing · {}", path.display())
+                                    } else {
+                                        path.display().to_string()
+                                    }),
+                            ),
+                    )
+                    .child(
+                        Button::new(("welcome.recent.remove", index))
+                            .variant(ButtonVariant::Ghost)
+                            .aria_label(format!("Remove {} from Recent", path.display()))
+                            .child(
+                                lucide(LucideIcon::X)
+                                    .size(px(12.))
+                                    .text_color(c.muted_foreground),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.forget_recent(&forget_path, cx);
+                            })),
+                    ),
+            );
+        }
+        let header = div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .child(
+                div()
+                    .text_xl()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child("Bonsai"),
+            )
+            .child(div().text_sm().text_color(c.muted_foreground).child(match &self.git {
+                Ok(_) => SharedString::from(
+                    "Open a repository on this Mac, start a new one, or clone one from any Git server.",
+                ),
+                Err(error) => error.clone(),
+            }));
+        div()
+            .id("welcome")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
             .justify_center()
             .child(
-                Empty::new()
+                div()
                     .w_full()
-                    .max_w(px(420.))
-                    .header(
-                        EmptyHeader::new()
-                            .media(
-                                EmptyMedia::new()
-                                    .with_variant(EmptyMediaVariant::Icon)
-                                    .child(
-                                        lucide(LucideIcon::GitFork)
-                                            .size(px(16.))
-                                            .text_color(theme.colors.foreground),
-                                    ),
-                            )
-                            .title(EmptyTitle::new().child("No repository open"))
-                            .description(EmptyDescription::new().child(description)),
-                    )
-                    .content(
-                        EmptyContent::new().child(
-                            Button::new("welcome.open")
-                                .label("Open Repository…")
-                                .disabled(self.git.is_err())
-                                .on_click(cx.listener(|this, _, _, cx| this.prompt_open(cx))),
-                        ),
+                    .max_w(px(560.))
+                    .px(px(24.))
+                    .py(px(64.))
+                    .flex()
+                    .flex_col()
+                    .gap(px(24.))
+                    .child(header)
+                    .child(actions)
+                    .when(!recents.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(8.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .justify_between()
+                                        .child(
+                                            div()
+                                                .text_xs()
+                                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                                .text_color(c.muted_foreground)
+                                                .child("RECENT"),
+                                        )
+                                        .child(
+                                            Button::new("welcome.recent.clear")
+                                                .variant(ButtonVariant::Ghost)
+                                                .label("Clear")
+                                                .on_click(cx.listener(|this, _, _, cx| {
+                                                    this.session.recents.clear();
+                                                    this.save_session();
+                                                    cx.notify();
+                                                })),
+                                        ),
+                                )
+                                .child(list),
+                        )
+                    })
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child("You can also drop a repository folder onto this window."),
                     ),
             )
+    }
+
+    fn render_clone(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let content = self.clone.clone();
+        let popup = dialog_popup("workspace.clone.popup", "Clone Repository", cx)
+            .when_some(content.clone(), gpui_kit::ParentElement::child);
+        let cancel_target = content;
+        dialog("workspace.clone", &self.clone_handle, popup, window, cx).on_cancel(
+            move |_, _, cx| {
+                // Escape stops a running clone first, and closes on the next press.
+                match &cancel_target {
+                    Some(dialog) if dialog.read(cx).is_running() => {
+                        dialog.update(cx, CloneDialog::cancel);
+                        false
+                    }
+                    _ => true,
+                }
+            },
+        )
     }
 
     fn render_palette(
@@ -695,6 +1005,10 @@ fn tab_title(root: &Path) -> SharedString {
         .into()
 }
 
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -709,7 +1023,8 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
-        let body = match self.active_model().cloned() {
+        let model = self.active_model().cloned().filter(|_| !self.welcome);
+        let body = match model {
             None => self.render_welcome(cx).into_any_element(),
             Some(model) => {
                 let model = model.read(cx);
@@ -758,6 +1073,12 @@ impl Render for Workspace {
             .key_context("Workspace")
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_open))
+            .on_action(cx.listener(Self::on_new))
+            .on_action(cx.listener(Self::on_clone))
+            .on_action(cx.listener(Self::on_welcome))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.open_paths(paths.paths(), cx);
+            }))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_next_tab))
             .on_action(cx.listener(Self::on_previous_tab))
@@ -800,6 +1121,7 @@ impl Render for Workspace {
             })
             .child(div().flex_1().min_h_0().child(body))
             .child(self.render_palette(window, cx))
+            .child(self.render_clone(window, cx))
     }
 }
 

@@ -6,6 +6,8 @@ use serde::{Deserialize, Serialize};
 
 pub const DEFAULT_SIDEBAR_WIDTH: f32 = 240.;
 pub const DEFAULT_DETAIL_WIDTH: f32 = 520.;
+/// How many recently opened repositories are remembered.
+pub const MAX_RECENTS: usize = 20;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -17,6 +19,10 @@ pub struct Session {
     pub sidebar_width: f32,
     /// Width of the center list pane; the detail pane takes the rest.
     pub list_width: f32,
+    /// Recently opened repositories, most recent first.
+    pub recents: Vec<PathBuf>,
+    /// The folder the last clone went into.
+    pub clone_parent: Option<PathBuf>,
 }
 
 impl Default for Session {
@@ -27,11 +33,25 @@ impl Default for Session {
             sidebar_open: true,
             sidebar_width: DEFAULT_SIDEBAR_WIDTH,
             list_width: DEFAULT_DETAIL_WIDTH,
+            recents: Vec::new(),
+            clone_parent: None,
         }
     }
 }
 
 impl Session {
+    /// Moves `path` to the front of the recents.
+    pub fn remember(&mut self, path: &Path) {
+        self.recents.retain(|recent| recent != path);
+        self.recents.insert(0, path.to_path_buf());
+        self.recents.truncate(MAX_RECENTS);
+    }
+
+    /// Removes `path` from the recents.
+    pub fn forget(&mut self, path: &Path) {
+        self.recents.retain(|recent| recent != path);
+    }
+
     /// Reads the session, falling back to the default when the file is
     /// missing or unreadable.
     #[must_use]
@@ -78,6 +98,33 @@ mod tests {
     use super::*;
 
     #[test]
+    fn recents_are_most_recent_first_unique_and_capped() {
+        let mut session = Session::default();
+        for i in 0..25 {
+            session.remember(Path::new(&format!("/r{i}")));
+        }
+        assert_eq!(session.recents.len(), MAX_RECENTS);
+        assert_eq!(session.recents[0], PathBuf::from("/r24"));
+        session.remember(Path::new("/r10"));
+        assert_eq!(session.recents[0], PathBuf::from("/r10"));
+        assert_eq!(
+            session
+                .recents
+                .iter()
+                .filter(|p| p.as_path() == Path::new("/r10"))
+                .count(),
+            1
+        );
+        session.forget(Path::new("/r10"));
+        assert!(!session.recents.contains(&PathBuf::from("/r10")));
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session.json");
+        session.save(&path).unwrap();
+        assert_eq!(Session::load(&path).recents, session.recents);
+    }
+
+    #[test]
     fn round_trips_and_tolerates_missing_or_partial_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested/session.json");
@@ -89,6 +136,8 @@ mod tests {
             sidebar_open: false,
             sidebar_width: 300.,
             list_width: 400.,
+            recents: vec!["/b".into()],
+            clone_parent: Some("/src".into()),
         };
         session.save(&path).unwrap();
         assert_eq!(Session::load(&path), session);

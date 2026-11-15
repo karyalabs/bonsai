@@ -117,6 +117,9 @@ fn every_palette_command_is_handled_by_the_workspace() {
     // `Workspace::render`. Keep this list in step with the `on_action` calls.
     let handled = [
         "file.open",
+        "file.new",
+        "file.clone",
+        "file.new-tab",
         "file.close-tab",
         "window.next-tab",
         "window.previous-tab",
@@ -133,4 +136,88 @@ fn every_palette_command_is_handled_by_the_workspace() {
             command.id
         );
     }
+}
+
+#[gpui_kit::test]
+fn opening_remembers_recents_and_new_tab_shows_welcome(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let alpha = repository(dir.path(), "alpha");
+    let beta = repository(dir.path(), "beta");
+    let session_path = dir.path().join("session.json");
+    let (workspace, cx) = setup(cx, Session::default(), Some(session_path.clone()));
+
+    workspace.update(cx, |workspace, cx| {
+        workspace.open_paths(&[alpha.clone(), beta.clone()], cx);
+    });
+    let saved = Session::load(&session_path);
+    assert_eq!(saved.recents.len(), 2);
+    assert!(saved.recents[0].ends_with("beta"));
+
+    cx.dispatch_action(commands::ShowWelcome);
+    workspace.read_with(cx, |workspace, _| assert!(workspace.is_showing_welcome()));
+    workspace.update(cx, |workspace, cx| workspace.open_recent(&alpha, cx));
+    workspace.read_with(cx, |workspace, _| {
+        assert!(!workspace.is_showing_welcome());
+        assert_eq!(workspace.active_index(), 0);
+    });
+    assert!(Session::load(&session_path).recents[0].ends_with("alpha"));
+
+    workspace.update(cx, |workspace, cx| {
+        workspace.forget_recent(&saved.recents[0], cx);
+    });
+    assert_eq!(Session::load(&session_path).recents.len(), 1);
+}
+
+#[gpui_kit::test]
+fn clones_from_a_url_and_opens_the_result(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let source = repository(dir.path(), "source");
+    let git = Git::locate(None).unwrap();
+    std::fs::write(source.join("README.md"), "hello\n").unwrap();
+    for args in [
+        vec!["add", "."],
+        vec![
+            "-c",
+            "user.name=B",
+            "-c",
+            "user.email=b@example.com",
+            "commit",
+            "-qm",
+            "first",
+        ],
+    ] {
+        git.run(&git.command(args).cwd(&source)).unwrap();
+    }
+    let parent = dir.path().join("clones");
+    std::fs::create_dir(&parent).unwrap();
+    let session = Session {
+        clone_parent: Some(parent.clone()),
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+
+    cx.dispatch_action(commands::CloneRepository);
+    let dialog = workspace.read_with(cx, |workspace, _| {
+        workspace.clone_dialog().cloned().unwrap()
+    });
+    let url = format!("file://{}", source.display());
+    cx.update(|window, cx| dialog.update(cx, |dialog, cx| dialog.set_url(&url, window, cx)));
+    let destination = dialog
+        .read_with(cx, |dialog, cx| dialog.destination(cx))
+        .unwrap();
+    assert_eq!(destination, parent.join("source"));
+
+    dialog.update(cx, |dialog, cx| dialog.start(cx));
+    for _ in 0..200 {
+        cx.run_until_parked();
+        if workspace.read_with(cx, |workspace, _| workspace.tab_titles().len()) == 1 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    workspace.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.tab_titles(), ["source"]);
+        assert!(workspace.clone_dialog().is_none());
+    });
+    assert!(parent.join("source/README.md").exists());
 }

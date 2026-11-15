@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::{CommandRecord, GitVersion};
+use crate::{CommandRecord, GitVersion, RemoteFailure};
 
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -27,9 +27,27 @@ pub enum Error {
     Parse(String),
 }
 
+impl Error {
+    /// The recognized cause when a network operation failed.
+    #[must_use]
+    pub fn remote_failure(&self) -> Option<RemoteFailure> {
+        match self {
+            Self::Failed { record } if is_network(record) => {
+                RemoteFailure::classify(&record.stderr)
+            }
+            _ => None,
+        }
+    }
+}
+
 fn failure_message(record: &CommandRecord) -> String {
     let stderr = record.stderr.trim();
-    if stderr.is_empty() {
+    if let Some(failure) = is_network(record)
+        .then(|| RemoteFailure::classify(stderr))
+        .flatten()
+    {
+        format!("{}\n\n{stderr}", failure.message())
+    } else if stderr.is_empty() {
         format!(
             "`git {}` failed with exit code {}.",
             record.args.join(" "),
@@ -40,4 +58,14 @@ fn failure_message(record: &CommandRecord) -> String {
     } else {
         stderr.to_owned()
     }
+}
+
+/// Whether the command talks to a remote, so its failure may be a remote one.
+fn is_network(record: &CommandRecord) -> bool {
+    record.args.iter().any(|arg| {
+        matches!(
+            arg.as_str(),
+            "clone" | "fetch" | "pull" | "push" | "ls-remote"
+        )
+    })
 }

@@ -8,6 +8,9 @@ actions!(
     [
         Quit,
         OpenRepository,
+        NewRepository,
+        CloneRepository,
+        ShowWelcome,
         CloseTab,
         NextTab,
         PreviousTab,
@@ -87,6 +90,9 @@ macro_rules! command {
 pub const COMMANDS: &[CommandSpec] = &[
     command!(Quit, "app.quit", "Quit Bonsai", "Bonsai", keys: ["secondary-q"], menu: Some(MenuPlacement::App), palette: false),
     command!(OpenRepository, "file.open", "Open Repository…", "Repository", keys: ["secondary-o"], menu: Some(MenuPlacement::File), palette: true, keywords: ["add", "folder"]),
+    command!(NewRepository, "file.new", "New Repository…", "Repository", keys: ["secondary-n"], menu: Some(MenuPlacement::File), palette: true, keywords: ["init", "create"]),
+    command!(CloneRepository, "file.clone", "Clone Repository…", "Repository", keys: ["secondary-shift-o"], menu: Some(MenuPlacement::File), palette: true, keywords: ["download", "url", "remote"]),
+    command!(ShowWelcome, "file.new-tab", "New Tab", "Window", keys: ["secondary-t"], menu: Some(MenuPlacement::File), palette: true, keywords: ["welcome", "recent"]),
     command!(CloseTab, "file.close-tab", "Close Tab", "Window", keys: ["secondary-w"], menu: Some(MenuPlacement::File), palette: true, separator: true),
     command!(ShowCommandPalette, "view.command-palette", "Command Palette…", "View", keys: ["secondary-shift-p", "secondary-k"], menu: Some(MenuPlacement::View), palette: false),
     command!(ToggleSidebar, "view.toggle-sidebar", "Toggle Sidebar", "View", keys: ["secondary-ctrl-s"], menu: Some(MenuPlacement::View), palette: true, separator: true),
