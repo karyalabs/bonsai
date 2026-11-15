@@ -392,7 +392,11 @@ impl Workspace {
             )
             .child(
                 SidebarItem::new("workspace.section.changes", "Changes")
-                    .icon(lucide(LucideIcon::FilePen).size(px(16.)))
+                    .icon(
+                        lucide(LucideIcon::FilePen)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    )
                     .when(changes > 0, |item| {
                         item.trailing(sidebar_badge(changes.to_string(), cx))
                     })
@@ -404,7 +408,11 @@ impl Workspace {
             )
             .child(
                 SidebarItem::new("workspace.section.history", "History")
-                    .icon(lucide(LucideIcon::GitGraph).size(px(16.)))
+                    .icon(
+                        lucide(LucideIcon::GitGraph)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    )
                     .selected(self.section == Section::History)
                     .on_activate(cx.listener(|this, _, _, cx| {
                         this.section = Section::History;
@@ -419,7 +427,11 @@ impl Workspace {
                     SharedString::from(format!("branch:{}", branch.name)),
                     branch.name.clone(),
                 )
-                .icon(lucide(LucideIcon::GitBranch).size(px(16.)))
+                .icon(
+                    lucide(LucideIcon::GitBranch)
+                        .size(px(16.))
+                        .text_color(c.sidebar_foreground),
+                )
                 .selected(branch.is_head);
                 if let Some(upstream) = &branch.upstream
                     && (upstream.ahead > 0 || upstream.behind > 0)
@@ -463,7 +475,7 @@ impl Workspace {
                 for (index, name) in names.into_iter().enumerate() {
                     sidebar = sidebar.child(
                         SidebarItem::new(SharedString::from(format!("{label}:{index}")), name)
-                            .icon(lucide(icon).size(px(16.))),
+                            .icon(lucide(icon).size(px(16.)).text_color(c.sidebar_foreground)),
                     );
                 }
             }
