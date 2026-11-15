@@ -1,0 +1,11 @@
+[package]
+name = "bonsai-keychain"
+description = "macOS Keychain token storage and the askpass helper for Bonsai"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true

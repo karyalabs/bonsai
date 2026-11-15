@@ -1,8 +1,15 @@
-.PHONY: run check
+.PHONY: run check test fmt
 
 run:
-	cargo run
+	cargo run -p bonsai
+
+fmt:
+	cargo fmt --all
+
+test:
+	cargo test --workspace --locked --features bonsai/runtime_shaders
 
 check:
-	cargo fmt --check
-	cargo clippy --all-targets --all-features -- -D warnings
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets --locked --features bonsai/runtime_shaders -- -D warnings
+	cargo test --workspace --locked --features bonsai/runtime_shaders
