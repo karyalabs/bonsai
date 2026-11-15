@@ -207,7 +207,7 @@ fn clones_from_a_url_and_opens_the_result(cx: &mut TestAppContext) {
         .unwrap();
     assert_eq!(destination, parent.join("source"));
 
-    dialog.update(cx, |dialog, cx| dialog.start(cx));
+    dialog.update(cx, super::clone::CloneDialog::start);
     for _ in 0..200 {
         cx.run_until_parked();
         if workspace.read_with(cx, |workspace, _| workspace.tab_titles().len()) == 1 {
