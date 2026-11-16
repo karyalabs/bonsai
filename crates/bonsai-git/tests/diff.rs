@@ -136,3 +136,37 @@ fn whitespace_modes_and_size_limit() {
         .unwrap();
     assert!(matches!(limited, DiffOutput::TooLarge { bytes } if bytes > 10));
 }
+
+#[test]
+fn reads_a_file_as_each_version_has_it() {
+    use bonsai_git::FileVersion;
+    let dir = tempfile::tempdir().unwrap();
+    let git = Git::locate(None).unwrap();
+    let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+    let run = |args: &[&str]| {
+        git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+            .unwrap()
+    };
+    run(&["config", "user.name", "Ada"]);
+    run(&["config", "user.email", "ada@example.com"]);
+    std::fs::write(dir.path().join("a.bin"), [0_u8, 1, 2]).unwrap();
+    run(&["add", "."]);
+    run(&["-c", "commit.gpgsign=false", "commit", "-qm", "one"]);
+    std::fs::write(dir.path().join("a.bin"), [0_u8, 9]).unwrap();
+    run(&["add", "."]);
+    std::fs::write(dir.path().join("a.bin"), [7_u8]).unwrap();
+    let path = std::path::Path::new("a.bin");
+    let read = |version: FileVersion| repository.file_version(path, &version).unwrap();
+    assert_eq!(
+        read(FileVersion::Commit("HEAD".into())),
+        Some(vec![0, 1, 2])
+    );
+    assert_eq!(read(FileVersion::Index), Some(vec![0, 9]));
+    assert_eq!(read(FileVersion::WorkTree), Some(vec![7]));
+    assert_eq!(
+        repository
+            .file_version(std::path::Path::new("gone"), &FileVersion::Index)
+            .unwrap(),
+        None
+    );
+}

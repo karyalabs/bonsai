@@ -218,6 +218,30 @@ fn matches(line: &Line<'_>, position: LinePosition) -> bool {
     }
 }
 
+/// The first and last changed line of each hunk of `file` in `patch`, in
+/// diff order, for acting on a whole hunk with [`partial_patch`]. Empty when
+/// the file isn't in the patch or has no hunks.
+#[must_use]
+pub fn hunk_changes(patch: &str, file: &str) -> Vec<(LinePosition, LinePosition)> {
+    let Some((_, body)) = file_section(patch, file) else {
+        return Vec::new();
+    };
+    let position = |line: &Line<'_>| match line.kind {
+        Kind::Removed => Some(LinePosition::new(LineSide::Old, line.old)),
+        Kind::Added => Some(LinePosition::new(LineSide::New, line.new)),
+        Kind::Context | Kind::NoNewline => None,
+    };
+    parse_hunks(body)
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|hunk| {
+            let first = hunk.lines.iter().find_map(position)?;
+            let last = hunk.lines.iter().rev().find_map(position)?;
+            Some((first, last))
+        })
+        .collect()
+}
+
 /// Builds a patch of only the changed lines between `from` and `to` (in the
 /// order the diff lists them, either way round) in `file`'s section of
 /// `patch`. Unselected removals become context and unselected additions

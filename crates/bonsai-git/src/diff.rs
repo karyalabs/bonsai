@@ -58,7 +58,41 @@ pub enum DiffOutput {
     TooLarge { bytes: usize },
 }
 
+/// Which version of a file to read with [`Repository::file_version`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum FileVersion {
+    /// The file on disk.
+    WorkTree,
+    /// The staged file.
+    Index,
+    /// The file in a commit, or in `HEAD`.
+    Commit(String),
+}
+
 impl Repository {
+    /// The bytes of `path` as `version` has it, or `None` when it has no
+    /// such file. For previews, such as images.
+    pub fn file_version(
+        &self,
+        path: &std::path::Path,
+        version: &FileVersion,
+    ) -> Result<Option<Vec<u8>>> {
+        let spec = match version {
+            FileVersion::WorkTree => {
+                return Ok(std::fs::read(self.root().join(path)).ok());
+            }
+            FileVersion::Index => format!(":{}", path.to_string_lossy()),
+            FileVersion::Commit(rev) => format!("{rev}:{}", path.to_string_lossy()),
+        };
+        let output = self.git().run_unchecked(
+            &self
+                .git()
+                .command(["cat-file", "blob", spec.as_str()])
+                .cwd(self.root()),
+        )?;
+        Ok(output.status.success().then_some(output.stdout))
+    }
+
     /// Builds the patch for `target`.
     pub fn diff(&self, target: &DiffTarget, options: DiffOptions) -> Result<DiffOutput> {
         let mut args: Vec<OsString> = Vec::new();
