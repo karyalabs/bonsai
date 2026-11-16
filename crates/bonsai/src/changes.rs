@@ -8,27 +8,31 @@ use std::{
 };
 
 use bonsai_git::{
-    Change, ChangeKind, DiffTarget, EntryStatus, IgnoreRule, InProgress, OperationAction, Side,
-    Snapshot,
+    Change, ChangeKind, DiffTarget, EntryStatus, IgnoreRule, InProgress, LineCount, LineCounts,
+    OperationAction, Side, Snapshot,
 };
-use gpui_icons::LucideIcon;
+use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
     AppContext as _, ClipboardItem, Context, ElementId, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled,
-    Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, WeakEntity, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::{
     composer::CommitComposer,
     confirm::{self, Confirm},
+    file_icon::file_icon,
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
-        button::{Button, ButtonVariant},
+        button::{Button, ButtonSize, ButtonVariant},
         context_menu::context_menu,
         dialog::{DialogHandle, dialog},
+        input::{Input, InputEvent, InputState},
         menu::{MenuItem, MenuState},
         theme::UiTheme,
         toggle_group::{ToggleGroup, ToggleGroupItem},
+        tooltip::text_tooltip,
         tree::{Tree, TreeEvent, TreeNode, TreeRow, TreeRowKind, TreeState},
         virtual_list::{
             ListItem, ListRow, ListSelectionMode, VirtualList, VirtualListEvent, VirtualListState,
@@ -328,7 +332,39 @@ pub struct ChangesView {
     pending_discard: Targets,
     /// Built on first render, which has the window its inputs need.
     composer: Option<Entity<CommitComposer>>,
+    /// Lines added and removed per file, read after each snapshot.
+    counts: Rc<LineCounts>,
+    counts_task: Option<Task<()>>,
+    /// The filter field, built on first render.
+    filter: Option<(Entity<InputState>, Subscription)>,
+    /// Shows only paths containing this text (case-insensitive).
+    filter_text: String,
     _events: Subscription,
+}
+
+/// More changes than this skip line counts, which would cost a second
+/// full diff of the work tree.
+const MAX_COUNTED_CHANGES: usize = 5_000;
+
+/// What a row's or heading's hover button does.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RowAction {
+    Stage(Vec<PathBuf>),
+    Unstage(Vec<PathBuf>),
+    Discard(Targets),
+    StageGroup(Group),
+    UnstageAll,
+    DiscardGroup(Group),
+}
+
+/// The line counts for a row's side of its change.
+fn row_count(counts: &LineCounts, row: &ChangeRow) -> Option<LineCount> {
+    let path = &row.change.as_ref()?.path;
+    match row.group {
+        Group::Staged => counts.staged.get(path).copied(),
+        Group::Unstaged | Group::Conflicted => counts.unstaged.get(path).copied(),
+        Group::Untracked => None,
+    }
 }
 
 impl EventEmitter<ChangesEvent> for ChangesView {}
@@ -338,7 +374,10 @@ impl ChangesView {
     #[must_use]
     pub fn focused_row(&self) -> Option<&ChangeRow> {
         let focused = if self.tree_mode {
-            self.tree.focused()?
+            // Before any click the tree has a selection but no focus.
+            self.tree
+                .focused()
+                .or_else(|| self.tree.selected().into_iter().next())?
         } else {
             match self.list.focused()? {
                 ElementId::Name(name) => name,
@@ -427,6 +466,10 @@ impl ChangesView {
             discard: DialogHandle::new(false),
             pending_discard: Targets::default(),
             composer: None,
+            counts: Rc::default(),
+            counts_task: None,
+            filter: None,
+            filter_text: String::new(),
             _events: events,
         };
         this.sync(cx);
@@ -440,6 +483,13 @@ impl ChangesView {
         }
     }
 
+    /// Commits, then pushes, as Shift+Cmd+Enter does.
+    pub fn commit_and_push(&mut self, cx: &mut Context<Self>) {
+        if let Some(composer) = &self.composer {
+            composer.update(cx, CommitComposer::commit_and_push);
+        }
+    }
+
     #[must_use]
     pub fn rows(&self) -> &[ChangeRow] {
         &self.rows
@@ -450,12 +500,79 @@ impl ChangesView {
         &self.list
     }
 
+    fn ensure_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        if let Some((input, _)) = &self.filter {
+            return input.clone();
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter changed files"));
+        let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                let text = input.read(cx).value().to_string();
+                this.set_filter(&text, cx);
+            }
+        });
+        self.filter = Some((input.clone(), subscription));
+        input
+    }
+
+    /// Line counts for this row's side of the change.
+    #[must_use]
+    pub fn line_count(&self, row: &ChangeRow) -> Option<LineCount> {
+        row_count(&self.counts, row)
+    }
+
+    /// Shows only the paths that contain `text`.
+    pub fn set_filter(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.filter_text != text {
+            text.clone_into(&mut self.filter_text);
+            self.sync(cx);
+        }
+    }
+
+    fn load_counts(&mut self, cx: &mut Context<Self>) {
+        let model = self.model.read(cx);
+        let Some(snapshot) = model.snapshot() else {
+            return;
+        };
+        let tracked = snapshot
+            .changes
+            .iter()
+            .filter(|c| !matches!(c.kind, ChangeKind::Untracked))
+            .count();
+        if tracked == 0 || snapshot.changes.len() > MAX_COUNTED_CHANGES {
+            self.counts = Rc::default();
+            return;
+        }
+        let repository = model.repository().clone();
+        let task = cx.background_spawn(async move { repository.line_counts() });
+        self.counts_task = Some(cx.spawn(async move |this, cx| {
+            let Ok(counts) = task.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.counts = Rc::new(counts);
+                cx.notify();
+            });
+        }));
+    }
+
     fn sync(&mut self, cx: &mut Context<Self>) {
+        let filter = self.filter_text.trim().to_lowercase();
         let rows = self
             .model
             .read(cx)
             .snapshot()
-            .map(|snapshot: &Snapshot| group_rows(&snapshot.changes))
+            .map(|snapshot: &Snapshot| {
+                if filter.is_empty() {
+                    group_rows(&snapshot.changes)
+                } else {
+                    let matching: Vec<Change> = snapshot
+                        .changes
+                        .iter()
+                        .filter(|c| c.path.to_string_lossy().to_lowercase().contains(&filter))
+                        .cloned()
+                        .collect();
+                    group_rows(&matching)
+                }
+            })
             .unwrap_or_default();
         let items = rows
             .iter()
@@ -481,7 +598,22 @@ impl ChangesView {
                 .into_iter()
                 .filter(|folder| !self.collapsed.contains(folder)),
         );
+        // Nothing focused yet: show the first change, so the diff pane
+        // never sits empty while there is something to look at.
+        if let Some(first) = rows.iter().find(|row| row.change.is_some()) {
+            if self.tree_mode {
+                if self.tree.focused().is_none() && self.tree.selected().is_empty() {
+                    self.tree.set_selected([first.id.clone()]);
+                }
+            } else if self.list.focused().is_none() {
+                self.list.select(
+                    &ElementId::Name(first.id.clone()),
+                    crate::ui::virtual_list::ListSelectionGesture::Replace,
+                );
+            }
+        }
         self.rows = rows;
+        self.load_counts(cx);
         self.rebuild_menu(cx);
         self.emit_focus(cx);
         cx.notify();
@@ -576,6 +708,16 @@ impl ChangesView {
 
     fn ask_discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let targets = self.selection();
+        self.ask_discard_targets(targets, window, cx);
+    }
+
+    /// Asks before discarding `targets`.
+    pub fn ask_discard_targets(
+        &mut self,
+        targets: Targets,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if targets.discardable() == 0 {
             return;
         }
@@ -878,50 +1020,225 @@ impl ChangesView {
     }
 
     /// `show_folder` adds the file's folder after its name, for the flat list.
-    fn render_row(row: &ChangeRow, theme: &UiTheme, show_folder: bool) -> gpui_kit::AnyElement {
+    /// The paths of every change row in `group`.
+    fn group_paths(&self, group: Group) -> Vec<PathBuf> {
+        self.rows
+            .iter()
+            .filter(|row| row.group == group)
+            .filter_map(|row| row.change.as_ref().map(|c| c.path.clone()))
+            .collect()
+    }
+
+    /// Runs a row or heading action: stage, unstage or discard.
+    fn row_action(&mut self, action: RowAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            RowAction::Stage(paths) => self.stage(paths, cx),
+            RowAction::Unstage(paths) => self.unstage(paths, cx),
+            RowAction::Discard(targets) => self.ask_discard_targets(targets, window, cx),
+            RowAction::StageGroup(group) => {
+                let paths = self.group_paths(group);
+                if !paths.is_empty() {
+                    self.stage(paths, cx);
+                }
+            }
+            RowAction::UnstageAll => self.unstage_all(cx),
+            RowAction::DiscardGroup(group) => {
+                let targets = Targets::from_rows(self.rows.iter().filter(|r| r.group == group));
+                self.ask_discard_targets(targets, window, cx);
+            }
+        }
+    }
+
+    fn render_row(
+        row: &ChangeRow,
+        theme: &UiTheme,
+        show_folder: bool,
+        count: Option<LineCount>,
+        view: &WeakEntity<Self>,
+    ) -> gpui_kit::AnyElement {
         let c = &theme.colors;
+        let action_button =
+            |id: SharedString, icon: LucideIcon, tip: &'static str, action: RowAction| {
+                let view = view.clone();
+                let theme = theme.clone();
+                Button::new(id)
+                    .aria_label(tip)
+                    .style_with(move |button| {
+                        crate::ui::button::style_button(
+                            button,
+                            false,
+                            ButtonVariant::Ghost,
+                            ButtonSize::IconXs,
+                            &theme,
+                        )
+                        .tooltip(move |_, cx| text_tooltip(tip.into(), cx))
+                    })
+                    .child(lucide(icon).size(px(14.)).text_color(c.foreground))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        let action = action.clone();
+                        let _ = view.update(cx, |view, cx| view.row_action(action, window, cx));
+                    })
+            };
         let Some(change) = &row.change else {
+            let group = row.group;
+            let actions = div()
+                .flex()
+                .items_center()
+                .gap(px(2.))
+                .opacity(0.)
+                .group_hover("change-row", |s| s.opacity(1.))
+                .map(|this| match group {
+                    Group::Staged => this.child(action_button(
+                        "changes.heading.unstage".into(),
+                        LucideIcon::Minus,
+                        "Unstage All",
+                        RowAction::UnstageAll,
+                    )),
+                    Group::Unstaged | Group::Untracked => this
+                        .child(action_button(
+                            format!("changes.heading.discard.{}", group.key()).into(),
+                            LucideIcon::Undo2,
+                            "Discard All…",
+                            RowAction::DiscardGroup(group),
+                        ))
+                        .child(action_button(
+                            format!("changes.heading.stage.{}", group.key()).into(),
+                            LucideIcon::Plus,
+                            "Stage All",
+                            RowAction::StageGroup(group),
+                        )),
+                    Group::Conflicted => this,
+                });
             return div()
+                .id(SharedString::from(format!(
+                    "changes.heading.{}",
+                    group.key()
+                )))
+                .group("change-row")
+                .w_full()
                 .flex()
                 .items_center()
                 .gap(px(6.))
                 .text_xs()
-                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(c.muted_foreground)
                 .child(row.group.title().to_uppercase())
-                .child(row.count.to_string())
+                .child(
+                    div()
+                        .px(px(6.))
+                        .rounded(px(8.))
+                        .bg(c.muted)
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .child(row.count.to_string()),
+                )
+                .child(div().flex_1())
+                .child(actions)
                 .into_any_element();
         };
         let status = row.status().unwrap_or(' ');
         let status_color = match status {
             'A' | '?' => c.success,
             'D' => c.destructive,
-            'U' => c.warning,
             'R' | 'C' => c.info,
-            _ => c.muted_foreground,
+            _ => c.warning,
         };
         let path = change.path.to_string_lossy();
         let (folder, name) = match path.rsplit_once('/') {
             Some((folder, name)) => (Some(folder.to_owned()), name.to_owned()),
-            None => (None, path.into_owned()),
+            None => (None, path.clone().into_owned()),
         };
+        let deleted = status == 'D';
+        let key = row.id.clone();
+        let paths = vec![change.path.clone()];
+        let mut actions = div()
+            .flex()
+            .items_center()
+            .gap(px(2.))
+            .opacity(0.)
+            .group_hover("change-row", |s| s.opacity(1.));
+        match row.group {
+            Group::Staged => {
+                actions = actions.child(action_button(
+                    format!("changes.unstage.{key}").into(),
+                    LucideIcon::Minus,
+                    "Unstage",
+                    RowAction::Unstage(paths),
+                ));
+            }
+            Group::Unstaged | Group::Untracked | Group::Conflicted => {
+                if row.group != Group::Conflicted {
+                    actions = actions.child(action_button(
+                        format!("changes.discard.{key}").into(),
+                        LucideIcon::Undo2,
+                        "Discard…",
+                        RowAction::Discard(Targets::from_rows([row])),
+                    ));
+                }
+                actions = actions.child(action_button(
+                    format!("changes.stage.{key}").into(),
+                    LucideIcon::Plus,
+                    if row.group == Group::Conflicted {
+                        "Mark Resolved"
+                    } else {
+                        "Stage"
+                    },
+                    RowAction::Stage(paths),
+                ));
+            }
+        }
+        let counts = count.filter(|_| !deleted).map(|count| {
+            if count.binary {
+                div()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child("binary")
+                    .into_any_element()
+            } else {
+                div()
+                    .flex()
+                    .gap(px(4.))
+                    .text_xs()
+                    .font_family(theme.fonts.mono.clone())
+                    .when(count.added > 0, |this| {
+                        this.child(
+                            div()
+                                .text_color(c.success)
+                                .child(format!("+{}", count.added)),
+                        )
+                    })
+                    .when(count.removed > 0, |this| {
+                        this.child(
+                            div()
+                                .text_color(c.destructive)
+                                .child(format!("−{}", count.removed)),
+                        )
+                    })
+                    .into_any_element()
+            }
+        });
         div()
+            .id(SharedString::from(format!("changes.row.{key}")))
+            .group("change-row")
             .w_full()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(8.))
             .child(
-                div()
-                    .w(px(14.))
+                lucide(file_icon(&change.path))
+                    .size(px(15.))
                     .flex_shrink_0()
-                    .font_family(theme.fonts.mono.clone())
-                    .text_xs()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(status_color)
-                    .child(status.to_string()),
+                    .text_color(c.muted_foreground),
             )
-            .child(div().flex_shrink_0().child(name))
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .when(deleted, |this| {
+                        this.line_through().text_color(c.muted_foreground)
+                    })
+                    .child(name),
+            )
             .when_some(change.original_path.as_ref(), |this, original| {
                 this.child(
                     div()
@@ -931,36 +1248,64 @@ impl ChangesView {
                         .child(format!("← {}", original.to_string_lossy())),
                 )
             })
-            .when_some(folder.filter(|_| show_folder), |this, folder| {
-                this.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_xs()
-                        .text_color(c.muted_foreground)
-                        .child(folder),
-                )
-            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .when_some(
+                        folder.filter(|_| show_folder),
+                        gpui_kit::ParentElement::child,
+                    ),
+            )
+            .children(counts)
+            .child(actions)
+            .child(
+                div()
+                    .flex_shrink_0()
+                    .w(px(18.))
+                    .h(px(18.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded(px(4.))
+                    .bg(status_color.opacity(0.15))
+                    .text_color(status_color)
+                    .font_family(theme.fonts.mono.clone())
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .child(status.to_string()),
+            )
             .into_any_element()
     }
 
     fn render_tree(&self, theme: &UiTheme, cx: &mut Context<Self>) -> Tree {
+        // Group headings are the tree's top folders and share their ids.
         let rows: Rc<HashMap<SharedString, ChangeRow>> = Rc::new(
             self.rows
                 .iter()
-                .filter(|row| row.change.is_some())
                 .map(|row| (row.id.clone(), row.clone()))
                 .collect(),
         );
         let row_theme = theme.clone();
         let view = cx.entity().downgrade();
+        let row_view = view.clone();
+        let counts = self.counts.clone();
         Tree::new(
             "changes.tree",
             "Changes",
             self.tree.clone(),
             move |row: &TreeRow, _, _| {
                 if let Some(change) = rows.get(&row.id) {
-                    return Self::render_row(change, &row_theme, false);
+                    return Self::render_row(
+                        change,
+                        &row_theme,
+                        false,
+                        row_count(&counts, change),
+                        &row_view,
+                    );
                 }
                 let c = &row_theme.colors;
                 match &row.kind {
@@ -1077,21 +1422,24 @@ impl Render for ChangesView {
             .composer
             .get_or_insert_with(|| cx.new(|cx| CommitComposer::new(model, window, cx)))
             .clone();
+        let filter = self.ensure_filter(window, cx);
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
-        let staged = self
-            .rows
-            .iter()
-            .filter(|r| r.group == Group::Staged && r.change.is_some())
-            .count();
         let total = self
             .model
             .read(cx)
             .snapshot()
             .map_or(0, |s| s.changes.len());
+        let empty = if total == 0 {
+            "No changes. The work tree matches the last commit."
+        } else {
+            "No changed paths match the filter."
+        };
         let rows = self.rows.clone();
         let row_theme = theme.clone();
         let view = cx.entity().downgrade();
+        let row_view = view.clone();
+        let counts = self.counts.clone();
         let list = VirtualList::new(
             "changes.list",
             "Changes",
@@ -1099,7 +1447,7 @@ impl Render for ChangesView {
             move |row: &ListRow, _, _| {
                 rows.get(row.index).map_or_else(
                     || div().into_any_element(),
-                    |r| Self::render_row(r, &row_theme, true),
+                    |r| Self::render_row(r, &row_theme, true, row_count(&counts, r), &row_view),
                 )
             },
         )
@@ -1108,7 +1456,7 @@ impl Render for ChangesView {
                 .p(px(16.))
                 .text_sm()
                 .text_color(c.muted_foreground)
-                .child("No changes. The work tree matches the last commit."),
+                .child(empty),
         )
         .on_event(move |event, _, cx| {
             let _ = view.update(cx, |view, cx| match event {
@@ -1141,7 +1489,6 @@ impl Render for ChangesView {
                 div()
                     .flex()
                     .items_center()
-                    .justify_between()
                     .gap(px(8.))
                     .px(px(12.))
                     .py(px(8.))
@@ -1149,56 +1496,44 @@ impl Render for ChangesView {
                     .border_color(c.border)
                     .child(
                         div()
-                            .text_sm()
-                            .text_color(c.muted_foreground)
-                            .child(format!("{total} changed · {staged} staged")),
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&filter).aria_label("Filter changes")),
                     )
                     .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(4.))
-                            .child(
-                                ToggleGroup::new("changes.mode")
-                                    .aria_label("Show changes as")
-                                    .segmented(true)
-                                    .value([if self.tree_mode { "tree" } else { "list" }])
-                                    .item(
-                                        ToggleGroupItem::new("changes.mode.list", "list")
-                                            .aria_label("List")
-                                            .child("List"),
-                                    )
-                                    .item(
-                                        ToggleGroupItem::new("changes.mode.tree", "tree")
-                                            .aria_label("Tree")
-                                            .child("Tree"),
-                                    )
-                                    .on_change({
-                                        let view = cx.entity().downgrade();
-                                        move |values, _, cx| {
-                                            if let Some(value) = values.first() {
-                                                let tree = value == "tree";
-                                                let _ = view.update(cx, |view, cx| {
-                                                    view.set_tree_mode(tree, cx);
-                                                });
-                                            }
-                                        }
-                                    }),
+                        ToggleGroup::new("changes.mode")
+                            .aria_label("Show changes as")
+                            .segmented(true)
+                            .value([if self.tree_mode { "tree" } else { "list" }])
+                            .item(
+                                ToggleGroupItem::new("changes.mode.list", "list")
+                                    .aria_label("List")
+                                    .child(
+                                        lucide(LucideIcon::List)
+                                            .size(px(14.))
+                                            .text_color(c.foreground),
+                                    ),
                             )
-                            .child(
-                                Button::new("changes.unstage-all")
-                                    .variant(ButtonVariant::Ghost)
-                                    .label("Unstage All")
-                                    .disabled(staged == 0)
-                                    .on_click(cx.listener(|this, _, _, cx| this.unstage_all(cx))),
+                            .item(
+                                ToggleGroupItem::new("changes.mode.tree", "tree")
+                                    .aria_label("Tree")
+                                    .child(
+                                        lucide(LucideIcon::FolderTree)
+                                            .size(px(14.))
+                                            .text_color(c.foreground),
+                                    ),
                             )
-                            .child(
-                                Button::new("changes.stage-all")
-                                    .variant(ButtonVariant::Outline)
-                                    .label("Stage All")
-                                    .disabled(total == staged)
-                                    .on_click(cx.listener(|this, _, _, cx| this.stage_all(cx))),
-                            ),
+                            .on_change({
+                                let view = cx.entity().downgrade();
+                                move |values, _, cx| {
+                                    if let Some(value) = values.first() {
+                                        let tree = value == "tree";
+                                        let _ = view.update(cx, |view, cx| {
+                                            view.set_tree_mode(tree, cx);
+                                        });
+                                    }
+                                }
+                            }),
                     ),
             )
             .child(
@@ -1369,6 +1704,56 @@ mod tests {
         use gpui_kit::TestAppContext;
 
         use super::super::*;
+
+        #[gpui_kit::test]
+        fn counts_lines_filters_and_focuses_the_first_change(cx: &mut TestAppContext) {
+            cx.update(crate::ui::theme::init);
+            let dir = tempfile::tempdir().unwrap();
+            let git = Git::locate(None).unwrap();
+            let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+            let run = |args: &[&str]| {
+                let mut full = vec![
+                    "-c",
+                    "user.name=Ada",
+                    "-c",
+                    "user.email=ada@example.com",
+                    "-c",
+                    "commit.gpgsign=false",
+                ];
+                full.extend_from_slice(args);
+                git.run(&git.command(full).cwd(dir.path())).unwrap();
+            };
+            std::fs::create_dir(dir.path().join("src")).unwrap();
+            std::fs::write(dir.path().join("src/a.rs"), "one\ntwo\n").unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-qm", "base"]);
+            std::fs::write(dir.path().join("src/a.rs"), "one\nthree\nfour\n").unwrap();
+            std::fs::write(dir.path().join("notes.md"), "n").unwrap();
+            let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+            let view = cx.new(|cx| ChangesView::new(model.clone(), cx));
+            cx.run_until_parked();
+
+            view.read_with(cx, |view, _| {
+                let row = view
+                    .rows()
+                    .iter()
+                    .find(|r| r.id.as_ref() == "unstaged:src/a.rs")
+                    .unwrap();
+                let count = view.line_count(row).unwrap();
+                assert_eq!((count.added, count.removed), (2, 1));
+                // The first change is shown without a click.
+                assert_eq!(
+                    view.focused_row().map(|r| r.id.to_string()).as_deref(),
+                    Some("unstaged:src/a.rs")
+                );
+            });
+
+            view.update(cx, |view, cx| view.set_filter("NOTES", cx));
+            view.read_with(cx, |view, _| {
+                let ids: Vec<&str> = view.rows().iter().map(|r| r.id.as_ref()).collect();
+                assert_eq!(ids, ["untracked:", "untracked:notes.md"]);
+            });
+        }
 
         #[gpui_kit::test]
         fn toggling_stages_and_unstages_the_selection(cx: &mut TestAppContext) {

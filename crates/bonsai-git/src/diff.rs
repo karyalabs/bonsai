@@ -1,6 +1,6 @@
 //! Patches for the diff pane: work tree, index, commits and ranges.
 
-use std::{ffi::OsString, path::PathBuf};
+use std::{collections::HashMap, ffi::OsString, path::PathBuf};
 
 use crate::{Error, Oid, Repository, Result};
 
@@ -141,5 +141,106 @@ impl Repository {
         }
         let patch = String::from_utf8_lossy(&output.stdout).into_owned();
         Ok(DiffOutput::Patch(patch))
+    }
+}
+
+/// Lines added and removed in one file; `None` for a binary file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LineCount {
+    pub added: u32,
+    pub removed: u32,
+    pub binary: bool,
+}
+
+/// Line counts for the work tree: staged (index against HEAD) and unstaged
+/// (work tree against the index), keyed by the path Git reports (the new
+/// path for a rename).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LineCounts {
+    pub staged: HashMap<PathBuf, LineCount>,
+    pub unstaged: HashMap<PathBuf, LineCount>,
+}
+
+/// Reads `git diff --numstat -z` output.
+#[must_use]
+pub fn parse_numstat(output: &[u8]) -> HashMap<PathBuf, LineCount> {
+    let mut counts = HashMap::new();
+    let mut fields = output.split(|b| *b == 0).peekable();
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(record);
+        let mut parts = text.splitn(3, '\t');
+        let (Some(added), Some(removed), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            continue;
+        };
+        let binary = added == "-" || removed == "-";
+        let count = LineCount {
+            added: added.parse().unwrap_or(0),
+            removed: removed.parse().unwrap_or(0),
+            binary,
+        };
+        // A rename has an empty path here, then the old and new paths.
+        let path = if path.is_empty() {
+            let _old = fields.next();
+            match fields.next() {
+                Some(new) => String::from_utf8_lossy(new).into_owned(),
+                None => continue,
+            }
+        } else {
+            path.to_owned()
+        };
+        counts.insert(PathBuf::from(path), count);
+    }
+    counts
+}
+
+impl Repository {
+    /// Counts the lines each changed file adds and removes, staged and
+    /// unstaged. Untracked files are not counted.
+    pub fn line_counts(&self) -> Result<LineCounts> {
+        let read = |cached: bool| -> Result<HashMap<PathBuf, LineCount>> {
+            let mut args = vec![
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--numstat",
+                "-z",
+                "--find-renames",
+            ];
+            if cached {
+                args.insert(1, "--cached");
+            }
+            let output = self.git().run(&self.git().command(args).cwd(self.root()))?;
+            Ok(parse_numstat(&output.stdout))
+        };
+        Ok(LineCounts {
+            staged: read(true)?,
+            unstaged: read(false)?,
+        })
+    }
+}
+
+#[cfg(test)]
+mod numstat_tests {
+    use super::*;
+
+    #[test]
+    fn reads_counts_binaries_and_renames() {
+        let output = b"3\t1\tsrc/a.rs\0-\t-\tlogo.png\x002\t0\t\0old.rs\0new.rs\0";
+        let counts = parse_numstat(output);
+        assert_eq!(
+            counts[&PathBuf::from("src/a.rs")],
+            LineCount {
+                added: 3,
+                removed: 1,
+                binary: false
+            }
+        );
+        assert!(counts[&PathBuf::from("logo.png")].binary);
+        assert_eq!(counts[&PathBuf::from("new.rs")].added, 2);
+        assert_eq!(counts.len(), 3);
     }
 }

@@ -1,21 +1,23 @@
 //! The commit composer under the Changes list: summary, body, amend, signing
 //! and recent messages (CONTEXT.md: Commit).
 
-use bonsai_git::Signing;
+use bonsai_git::{Head, Signing};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled, Subscription, Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::{
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
-        button::Button,
-        checkbox::Checkbox,
+        button::{Button, ButtonSize, ButtonVariant, style_button},
         input::{Input, InputEvent, InputState, Textarea, TextareaState},
         menu::{Menu, MenuItem, MenuState},
+        switch::Switch,
         theme::UiTheme,
+        tooltip::text_tooltip,
     },
 };
 
@@ -53,6 +55,10 @@ pub struct CommitComposer {
     signing: Option<Signing>,
     recent: Vec<String>,
     recent_menu: Entity<MenuState>,
+    /// Commit and Push, and other commit options.
+    commit_menu: Entity<MenuState>,
+    /// Push once the commit in flight lands.
+    push_after: bool,
     /// The commit operation in flight, matched against finished operations.
     pending: Option<SharedString>,
     error: Option<SharedString>,
@@ -71,9 +77,25 @@ impl CommitComposer {
                 .rows(4)
                 .placeholder("Description")
         });
-        let recent_menu = cx.new(|cx| MenuState::new(Vec::new(), cx));
+        let recent_menu = cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(360.)));
+        let this = cx.entity().downgrade();
+        let commit_menu = cx.new(|cx| {
+            MenuState::new(
+                [MenuItem::new("composer.commit-push", "Commit and Push")
+                    .icon(LucideIcon::Upload)
+                    .shortcut("secondary-shift-enter")
+                    .on_click(move |_, _, cx| {
+                        let _ = this.update(cx, CommitComposer::commit_and_push);
+                    })],
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.subscribe_in(&summary, window, |this, _, event, window, cx| match event {
+                InputEvent::PressEnter {
+                    secondary: true,
+                    shift: true,
+                } => this.commit_and_push(cx),
                 InputEvent::PressEnter {
                     secondary: true, ..
                 } => this.commit(cx),
@@ -89,10 +111,15 @@ impl CommitComposer {
             }),
             cx.subscribe_in(&body, window, |this, _, event, _, cx| {
                 if let InputEvent::PressEnter {
-                    secondary: true, ..
+                    secondary: true,
+                    shift,
                 } = event
                 {
-                    this.commit(cx);
+                    if *shift {
+                        this.commit_and_push(cx);
+                    } else {
+                        this.commit(cx);
+                    }
                 }
             }),
             cx.subscribe_in(&model, window, |this, _, event, window, cx| match event {
@@ -100,11 +127,15 @@ impl CommitComposer {
                     if this.pending.as_ref() == Some(name) =>
                 {
                     this.pending = None;
+                    let push = std::mem::take(&mut this.push_after);
                     match error {
                         None => {
                             this.amend = false;
                             this.set_message("", window, cx);
                             this.load_details(cx);
+                            if push {
+                                window.dispatch_action(Box::new(crate::commands::Push), cx);
+                            }
                         }
                         Some(error) => this.error = Some(error.clone()),
                     }
@@ -122,6 +153,8 @@ impl CommitComposer {
             signing: None,
             recent: Vec::new(),
             recent_menu,
+            commit_menu,
+            push_after: false,
             pending: None,
             error: None,
             _subscriptions: subscriptions,
@@ -237,6 +270,22 @@ impl CommitComposer {
         cx.notify();
     }
 
+    /// Commits, then pushes the branch once the commit lands.
+    pub fn commit_and_push(&mut self, cx: &mut Context<Self>) {
+        if self.blocker(cx).is_some() {
+            return;
+        }
+        self.push_after = true;
+        self.commit(cx);
+    }
+
+    fn branch_name(&self, cx: &gpui_kit::App) -> Option<String> {
+        match &self.model.read(cx).snapshot()?.head {
+            Head::Branch { name, .. } => Some(name.clone()),
+            Head::Detached { .. } => None,
+        }
+    }
+
     fn set_amend(&mut self, amend: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.amend = amend;
         let last = self.recent.first().cloned();
@@ -268,11 +317,15 @@ impl Render for CommitComposer {
         };
         let blocker = self.blocker(cx);
         let staged = self.staged_count(cx);
+        let target = self
+            .branch_name(cx)
+            .map(|name| format!(" to {name}"))
+            .unwrap_or_default();
         let label = match (self.amend, staged) {
             (true, _) => "Amend Last Commit".to_owned(),
             (false, 0) => "Commit".to_owned(),
-            (false, 1) => "Commit 1 File".to_owned(),
-            (false, n) => format!("Commit {n} Files"),
+            (false, 1) => format!("Commit 1 File{target}"),
+            (false, n) => format!("Commit {n} Files{target}"),
         };
         div()
             .flex()
@@ -313,21 +366,28 @@ impl Render for CommitComposer {
                 div()
                     .flex()
                     .items_center()
-                    .gap(px(12.))
+                    .gap(px(10.))
                     .child(
                         div()
+                            .id("composer.amend.row")
                             .flex()
                             .items_center()
                             .gap(px(6.))
                             .child(
-                                Checkbox::new("composer.amend")
+                                Switch::new("composer.amend")
                                     .checked(self.amend)
                                     .aria_label("Amend the last commit")
                                     .on_change(cx.listener(|this, checked: &bool, window, cx| {
                                         this.set_amend(*checked, window, cx);
                                     })),
                             )
-                            .child(div().text_sm().child("Amend")),
+                            .child(div().text_sm().child("Amend"))
+                            .tooltip(|_, cx| {
+                                text_tooltip(
+                                    "Replace the last commit with these changes and message".into(),
+                                    cx,
+                                )
+                            }),
                     )
                     .when_some(self.signing, |this, signing| {
                         this.child(
@@ -347,26 +407,71 @@ impl Render for CommitComposer {
                     })
                     .child(div().flex_1())
                     .when(!self.recent.is_empty(), |this| {
+                        let theme = theme.clone();
                         this.child(
-                            Menu::new(&self.recent_menu, "Recent messages").trigger(
-                                lucide(LucideIcon::Clock)
-                                    .size(px(14.))
-                                    .text_color(c.foreground),
-                            ),
+                            Menu::new(&self.recent_menu, "Recent messages")
+                                .trigger_style_with(move |button| {
+                                    style_button(
+                                        button,
+                                        false,
+                                        ButtonVariant::Ghost,
+                                        ButtonSize::IconSm,
+                                        &theme,
+                                    )
+                                })
+                                .trigger(
+                                    lucide(LucideIcon::Clock)
+                                        .size(px(15.))
+                                        .text_color(c.muted_foreground),
+                                ),
                         )
                     })
                     .child(
-                        Button::new("composer.commit")
-                            .label(label)
-                            .disabled(blocker.is_some())
-                            .on_click(cx.listener(|this, _, _, cx| this.commit(cx))),
+                        div()
+                            .flex()
+                            .items_center()
+                            .child(
+                                div()
+                                    .id("composer.commit.tip")
+                                    .child(
+                                        Button::new("composer.commit")
+                                            .label(label)
+                                            .disabled(blocker.is_some())
+                                            .on_click(
+                                                cx.listener(|this, _, _, cx| this.commit(cx)),
+                                            ),
+                                    )
+                                    .tooltip(move |_, cx| {
+                                        text_tooltip(
+                                            blocker
+                                                .unwrap_or("Commit (⌘↩) · Commit and Push (⇧⌘↩)")
+                                                .into(),
+                                            cx,
+                                        )
+                                    }),
+                            )
+                            .child({
+                                let theme = theme.clone();
+                                let disabled = blocker.is_some();
+                                Menu::new(&self.commit_menu, "More commit options")
+                                    .disabled(disabled)
+                                    .trigger_style_with(move |button| {
+                                        style_button(
+                                            button,
+                                            disabled,
+                                            ButtonVariant::Default,
+                                            ButtonSize::IconSm,
+                                            &theme,
+                                        )
+                                        .ml(px(1.))
+                                    })
+                                    .trigger(
+                                        lucide(LucideIcon::ChevronDown)
+                                            .size(px(14.))
+                                            .text_color(c.primary_foreground),
+                                    )
+                            }),
                     ),
-            )
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(c.muted_foreground)
-                    .child(blocker.unwrap_or("⌘↩ commits.")),
             )
     }
 }
