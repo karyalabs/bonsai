@@ -127,6 +127,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.toggle-sidebar",
         "view.changes",
         "view.history",
+        "view.activity",
         "repository.refresh",
         "repository.commit",
         "repository.fetch",
@@ -226,4 +227,37 @@ fn clones_from_a_url_and_opens_the_result(cx: &mut TestAppContext) {
         assert!(workspace.clone_dialog().is_none());
     });
     assert!(parent.join("source/README.md").exists());
+}
+
+#[gpui_kit::test]
+fn a_failed_operation_offers_details_in_the_activity_log(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let session = Session {
+        tabs: vec![repository(dir.path(), "a")],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    let model = workspace.read_with(cx, |w, _| w.active_model().unwrap().clone());
+    model.update(cx, |model, cx| {
+        model.run(
+            "Delete a missing branch",
+            |repository| repository.delete_branch("missing", false),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    workspace.read_with(cx, |w, _| {
+        assert!(w.message.is_some());
+        assert_eq!(w.message_details, w.message);
+    });
+
+    workspace.update(cx, Workspace::show_message_details);
+    workspace.read_with(cx, |w, cx| {
+        assert_eq!(w.section(), Section::Activity);
+        let activity = w.tabs[w.active].activity.read(cx);
+        assert!(activity.selected().is_some());
+    });
+    cx.dispatch_action(commands::ShowChanges);
+    cx.dispatch_action(commands::ShowActivity);
+    workspace.read_with(cx, |w, _| assert_eq!(w.section(), Section::Activity));
 }

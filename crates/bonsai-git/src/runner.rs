@@ -40,6 +40,78 @@ pub struct CommandRecord {
     pub cancelled: bool,
 }
 
+impl CommandRecord {
+    /// Exited with status 0.
+    #[must_use]
+    pub fn succeeded(&self) -> bool {
+        self.exit_code == Some(0) && !self.cancelled
+    }
+
+    /// The command as a shell line, quoted so it can be pasted into a
+    /// terminal in the repository.
+    #[must_use]
+    pub fn command_line(&self) -> String {
+        std::iter::once("git")
+            .chain(self.args.iter().map(String::as_str))
+            .map(shell_quote)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Only reads the repository (status, log, diff and the like), so the
+    /// activity log can hide it by default.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        let Some(sub) = self.args.first().map(String::as_str) else {
+            return true;
+        };
+        let rest: Vec<&str> = self.args[1..].iter().map(String::as_str).collect();
+        match sub {
+            "status" | "log" | "diff" | "show" | "rev-parse" | "rev-list" | "for-each-ref"
+            | "cat-file" | "ls-tree" | "ls-files" | "merge-base" | "symbolic-ref" | "version"
+            | "blame" | "shortlog" | "describe" | "check-ignore" | "check-ref-format" | "var"
+            | "show-ref" | "name-rev" | "count-objects" | "diff-tree" | "diff-index"
+            | "diff-files" | "fast-export" | "grep" => true,
+            "config" => rest
+                .iter()
+                .any(|a| a.starts_with("--get") || *a == "--list" || *a == "-l"),
+            "stash" => matches!(rest.first(), Some(&"list" | &"show")),
+            "worktree" => rest.first() == Some(&"list"),
+            "remote" => {
+                rest.is_empty() || matches!(rest.first(), Some(&"-v" | &"get-url" | &"show"))
+            }
+            "branch" | "tag" => {
+                rest.is_empty()
+                    || rest.iter().any(|a| {
+                        matches!(
+                            *a,
+                            "--list"
+                                | "-l"
+                                | "--contains"
+                                | "--merged"
+                                | "--no-merged"
+                                | "--format"
+                        ) || a.starts_with("--format=")
+                    })
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Quotes one word for a POSIX shell, leaving plain words alone.
+fn shell_quote(word: &str) -> String {
+    let plain = !word.is_empty()
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_./=:@,+%^".contains(&b));
+    if plain {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    }
+}
+
 /// Set from any thread to stop a running command; the process is killed.
 #[derive(Clone, Debug, Default)]
 pub struct CancelToken(Arc<AtomicBool>);

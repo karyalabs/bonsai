@@ -10,7 +10,9 @@ const LIMIT: usize = 1_000;
 /// The commands run in this repository, oldest first, capped at 1,000.
 #[derive(Default)]
 pub struct Activity {
-    records: VecDeque<CommandRecord>,
+    /// Each record with a number that stays the same as older ones drop off.
+    records: VecDeque<(u64, CommandRecord)>,
+    next: u64,
 }
 
 impl Activity {
@@ -18,7 +20,8 @@ impl Activity {
         if self.records.len() == LIMIT {
             self.records.pop_front();
         }
-        self.records.push_back(record);
+        self.records.push_back((self.next, record));
+        self.next += 1;
     }
 
     pub fn extend(&mut self, records: impl IntoIterator<Item = CommandRecord>) {
@@ -28,7 +31,19 @@ impl Activity {
     }
 
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &CommandRecord> {
-        self.records.iter()
+        self.records.iter().map(|(_, record)| record)
+    }
+
+    /// Records with their numbers, oldest first.
+    pub fn entries(&self) -> impl DoubleEndedIterator<Item = (u64, &CommandRecord)> {
+        self.records.iter().map(|(id, record)| (*id, record))
+    }
+
+    #[must_use]
+    pub fn get(&self, id: u64) -> Option<&CommandRecord> {
+        let first = self.records.front()?.0;
+        let index = usize::try_from(id.checked_sub(first)?).ok()?;
+        self.records.get(index).map(|(_, record)| record)
     }
 
     #[must_use]

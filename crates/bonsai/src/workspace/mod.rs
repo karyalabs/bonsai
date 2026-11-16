@@ -16,6 +16,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    activity_panel::ActivityPanel,
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     diff_pane::DiffPane,
@@ -41,6 +42,7 @@ use crate::{
 pub enum Section {
     Changes,
     History,
+    Activity,
 }
 
 struct RepositoryTab {
@@ -51,6 +53,7 @@ struct RepositoryTab {
     diff: Entity<DiffPane>,
     refs: Entity<RefsPanel>,
     sync: Entity<SyncBar>,
+    activity: Entity<ActivityPanel>,
     _events: Subscription,
     _changes_events: Subscription,
     _refs_events: Subscription,
@@ -76,6 +79,9 @@ pub struct Workspace {
     /// Shows the welcome screen in place of the active tab (New Tab).
     welcome: bool,
     message: Option<SharedString>,
+    /// A message that came from a failed operation, whose command the
+    /// activity log has; the banner offers Show Details while it shows.
+    message_details: Option<SharedString>,
     watch: bool,
     focus: FocusHandle,
 }
@@ -111,6 +117,7 @@ impl Workspace {
             purge_requested: None,
             welcome: false,
             message: None,
+            message_details: None,
             watch,
             focus,
         };
@@ -151,6 +158,7 @@ impl Workspace {
                 } = event
                 {
                     this.message = Some(error.clone());
+                    this.message_details = Some(error.clone());
                 }
                 cx.notify();
             });
@@ -172,6 +180,7 @@ impl Workspace {
                     }
                 },
             );
+            let activity = cx.new(|cx| ActivityPanel::new(model.clone(), cx));
             let diff_target = diff.downgrade();
             let refs_events = cx.subscribe(&refs, move |this, _, event: &RefsEvent, cx| {
                 let RefsEvent::ShowDiff(target, title) = event;
@@ -189,6 +198,7 @@ impl Workspace {
                 diff,
                 refs,
                 sync,
+                activity,
                 _changes_events: changes_events,
                 _refs_events: refs_events,
                 _events: events,
@@ -555,6 +565,21 @@ impl Workspace {
         cx.notify();
     }
 
+    fn on_activity(&mut self, _: &commands::ShowActivity, _: &mut Window, cx: &mut Context<Self>) {
+        self.section = Section::Activity;
+        cx.notify();
+    }
+
+    /// Opens the activity log at the command behind the error banner.
+    pub fn show_message_details(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active) {
+            tab.activity
+                .update(cx, ActivityPanel::select_latest_failure);
+        }
+        self.section = Section::Activity;
+        cx.notify();
+    }
+
     fn on_commit(&mut self, _: &commands::Commit, _: &mut Window, cx: &mut Context<Self>) {
         if self.welcome {
             return;
@@ -730,6 +755,19 @@ impl Workspace {
                         this.section = Section::History;
                         cx.notify();
                     })),
+            )
+            .child(
+                SidebarItem::new("workspace.section.activity", "Activity")
+                    .icon(
+                        lucide(LucideIcon::ScrollText)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    )
+                    .selected(self.section == Section::Activity)
+                    .on_activate(cx.listener(|this, _, _, cx| {
+                        this.section = Section::Activity;
+                        cx.notify();
+                    })),
             );
         if let Some(tab) = self.tabs.get(self.active) {
             sidebar = sidebar.child(tab.refs.clone());
@@ -761,6 +799,10 @@ impl Workspace {
                 .into_any_element(),
             (Section::Changes, Some(_), _) => match self.tabs.get(self.active) {
                 Some(tab) => tab.changes.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
+            (Section::Activity, Some(_), _) => match self.tabs.get(self.active) {
+                Some(tab) => tab.activity.clone().into_any_element(),
                 None => div().into_any_element(),
             },
             (Section::History, Some(_), _) => message_panel(
@@ -1119,22 +1161,29 @@ impl Render for Workspace {
                 let model = model.read(cx);
                 let snapshot = model.snapshot().cloned();
                 let error = model.snapshot_error().cloned();
+                let activity = self.section == Section::Activity && snapshot.is_some();
                 let list = self.render_list(snapshot.as_ref(), error, cx);
                 let detail = self.render_detail(cx);
-                let panes = Resizable::new(
-                    "workspace.list-split",
-                    "Resize list and detail",
-                    px(self.session.list_width),
-                )
-                .first(list)
-                .second(detail)
-                .first_limits(PaneLimits::new(px(280.), px(1400.)))
-                .second_limits(PaneLimits::new(px(320.), px(2000.)))
-                .on_resize(cx.listener(|this, width: &gpui_kit::Pixels, _, cx| {
-                    this.session.list_width = f32::from(*width);
-                    this.save_session();
-                    cx.notify();
-                }));
+                // The activity log lays out its own list and detail.
+                let panes = if activity {
+                    div().size_full().child(list).into_any_element()
+                } else {
+                    Resizable::new(
+                        "workspace.list-split",
+                        "Resize list and detail",
+                        px(self.session.list_width),
+                    )
+                    .first(list)
+                    .second(detail)
+                    .first_limits(PaneLimits::new(px(280.), px(1400.)))
+                    .second_limits(PaneLimits::new(px(320.), px(2000.)))
+                    .on_resize(cx.listener(|this, width: &gpui_kit::Pixels, _, cx| {
+                        this.session.list_width = f32::from(*width);
+                        this.save_session();
+                        cx.notify();
+                    }))
+                    .into_any_element()
+                };
                 if self.session.sidebar_open {
                     Resizable::new(
                         "workspace.sidebar-split",
@@ -1182,6 +1231,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_push))
             .on_action(cx.listener(Self::on_purge))
             .on_action(cx.listener(Self::on_stash))
+            .on_action(cx.listener(Self::on_activity))
             .size_full()
             .flex()
             .flex_col()
@@ -1202,15 +1252,31 @@ impl Render for Workspace {
                         .py(px(6.))
                         .bg(c.muted)
                         .text_sm()
-                        .child(message)
+                        .child(div().flex_1().min_w_0().child(message.clone()))
                         .child(
-                            Button::new("workspace.message.dismiss")
-                                .variant(ButtonVariant::Ghost)
-                                .label("Dismiss")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.message = None;
-                                    cx.notify();
-                                })),
+                            div()
+                                .flex()
+                                .flex_shrink_0()
+                                .gap(px(4.))
+                                .when(self.message_details.as_ref() == Some(&message), |this| {
+                                    this.child(
+                                        Button::new("workspace.message.details")
+                                            .variant(ButtonVariant::Ghost)
+                                            .label("Show Details")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.show_message_details(cx);
+                                            })),
+                                    )
+                                })
+                                .child(
+                                    Button::new("workspace.message.dismiss")
+                                        .variant(ButtonVariant::Ghost)
+                                        .label("Dismiss")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.message = None;
+                                            cx.notify();
+                                        })),
+                                ),
                         ),
                 )
             })
