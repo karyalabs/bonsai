@@ -476,13 +476,10 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
         number: u64,
     ) -> BoxFuture<'a, Result<Vec<Comment>>> {
         Box::pin(async move {
-            let path = match kind {
-                ItemKind::PullRequest => "pullrequests",
-                ItemKind::Issue => "issues",
-            };
             let url = format!(
-                "{}/{path}/{number}/comments?pagelen=100&sort=created_on",
-                repo_url(full_name)?
+                "{}/{}/{number}/comments?pagelen=100&sort=created_on",
+                repo_url(full_name)?,
+                item_path(kind)
             );
             let response = self.send(Request::get(url), Some(token)).await?;
             let page: Values<CommentBody> = parse(&response.body)?;
@@ -490,11 +487,7 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
                 .values
                 .into_iter()
                 .filter(|c| !c.deleted)
-                .map(|c| Comment {
-                    author: c.user.map(Participant::into_person).unwrap_or_default(),
-                    body: c.content.and_then(|c| c.raw).unwrap_or_default(),
-                    created_at: c.created_on,
-                })
+                .map(CommentBody::into_comment)
                 .collect())
         })
     }
@@ -544,8 +537,73 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
         })
     }
 
+    fn add_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/{}/{number}/comments",
+                repo_url(full_name)?,
+                item_path(kind)
+            );
+            let response = self
+                .send(
+                    Request::post(url, json!({ "content": { "raw": body } }).to_string())
+                        .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(parse::<CommentBody>(&response.body)?.into_comment())
+        })
+    }
+
+    fn set_open<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        open: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let repo = repo_url(full_name)?;
+            let request = match (kind, open) {
+                (ItemKind::PullRequest, false) => {
+                    Request::post(format!("{repo}/pullrequests/{number}/decline"), "{}")
+                }
+                (ItemKind::PullRequest, true) => {
+                    return Err(Error::Rejected(
+                        "Bitbucket can't reopen a declined pull request.".to_owned(),
+                    ));
+                }
+                (ItemKind::Issue, open) => Request::put(
+                    format!("{repo}/issues/{number}"),
+                    json!({ "state": if open { "open" } else { "resolved" } }).to_string(),
+                ),
+            };
+            self.send(
+                request.header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn pull_request_ref(&self, _: u64) -> Option<String> {
         None
+    }
+}
+
+fn item_path(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::PullRequest => "pullrequests",
+        ItemKind::Issue => "issues",
     }
 }
 
@@ -666,6 +724,16 @@ struct CommentBody {
     #[serde(default)]
     deleted: bool,
     created_on: String,
+}
+
+impl CommentBody {
+    fn into_comment(self) -> Comment {
+        Comment {
+            author: self.user.map(Participant::into_person).unwrap_or_default(),
+            body: self.content.and_then(|c| c.raw).unwrap_or_default(),
+            created_at: self.created_on,
+        }
+    }
 }
 
 #[derive(Deserialize)]

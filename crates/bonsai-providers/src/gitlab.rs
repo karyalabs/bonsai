@@ -412,13 +412,10 @@ impl<C: HttpClient> Provider for GitLab<C> {
         number: u64,
     ) -> BoxFuture<'a, Result<Vec<Comment>>> {
         Box::pin(async move {
-            let path = match kind {
-                ItemKind::PullRequest => "merge_requests",
-                ItemKind::Issue => "issues",
-            };
             let url = format!(
-                "{}/{path}/{number}/notes?sort=asc&order_by=created_at&per_page=100",
-                self.project_url(full_name)
+                "{}/{}/{number}/notes?sort=asc&order_by=created_at&per_page=100",
+                self.project_url(full_name),
+                item_path(kind)
             );
             let response = self.send(Request::get(url), Some(token)).await?;
             let notes: Vec<Note> = self.parse(&response.body)?;
@@ -426,11 +423,7 @@ impl<C: HttpClient> Provider for GitLab<C> {
                 .into_iter()
                 // System notes are GitLab's own ("added 1 commit").
                 .filter(|note| !note.system)
-                .map(|note| Comment {
-                    author: note.author.map(User::into_person).unwrap_or_default(),
-                    body: note.body,
-                    created_at: note.created_at,
-                })
+                .map(Note::into_comment)
                 .collect())
         })
     }
@@ -484,6 +477,56 @@ impl<C: HttpClient> Provider for GitLab<C> {
         })
     }
 
+    fn add_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/{}/{number}/notes",
+                self.project_url(full_name),
+                item_path(kind)
+            );
+            let response = self
+                .send(
+                    Request::post(url, json!({ "body": body }).to_string())
+                        .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(self.parse::<Note>(&response.body)?.into_comment())
+        })
+    }
+
+    fn set_open<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        open: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/{}/{number}",
+                self.project_url(full_name),
+                item_path(kind)
+            );
+            let event = if open { "reopen" } else { "close" };
+            self.send(
+                Request::put(url, json!({ "state_event": event }).to_string())
+                    .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn pull_request_ref(&self, number: u64) -> Option<String> {
         Some(format!("merge-requests/{number}/head"))
     }
@@ -529,6 +572,23 @@ struct Note {
     #[serde(default)]
     system: bool,
     created_at: String,
+}
+
+impl Note {
+    fn into_comment(self) -> Comment {
+        Comment {
+            author: self.author.map(User::into_person).unwrap_or_default(),
+            body: self.body,
+            created_at: self.created_at,
+        }
+    }
+}
+
+fn item_path(kind: ItemKind) -> &'static str {
+    match kind {
+        ItemKind::PullRequest => "merge_requests",
+        ItemKind::Issue => "issues",
+    }
 }
 
 #[derive(Deserialize)]

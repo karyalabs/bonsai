@@ -360,6 +360,26 @@ pub trait Provider: Send + Sync {
         new: &'a NewIssue,
     ) -> BoxFuture<'a, Result<Issue>>;
 
+    /// Adds a comment to a pull request's or issue's conversation.
+    fn add_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>>;
+
+    /// Closes (declines) or reopens a pull request or issue.
+    fn set_open<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        open: bool,
+    ) -> BoxFuture<'a, Result<()>>;
+
     /// The ref a pull request's head can be fetched from, for one from a
     /// fork, such as `pull/7/head`. `None` when the provider has none.
     fn pull_request_ref(&self, number: u64) -> Option<String>;

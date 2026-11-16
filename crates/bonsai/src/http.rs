@@ -60,11 +60,11 @@ fn config(request: &Request) -> Result<String, String> {
     ];
     match request.method {
         Method::Get => {}
-        Method::Post | Method::Put => {
-            let verb = if request.method == Method::Put {
-                "PUT"
-            } else {
-                "POST"
+        Method::Post | Method::Put | Method::Patch => {
+            let verb = match request.method {
+                Method::Put => "PUT",
+                Method::Patch => "PATCH",
+                _ => "POST",
             };
             lines.push(format!("request = \"{verb}\""));
             lines.push(format!("data-binary = {}", quote(body)));

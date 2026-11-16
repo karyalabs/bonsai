@@ -10,6 +10,7 @@ pub enum Method {
     Get,
     Post,
     Put,
+    Patch,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -35,6 +36,15 @@ impl Request {
     pub fn put(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         Self {
             method: Method::Put,
+            url: url.into(),
+            headers: Vec::new(),
+            body: body.into(),
+        }
+    }
+
+    pub fn patch(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            method: Method::Patch,
             url: url.into(),
             headers: Vec::new(),
             body: body.into(),

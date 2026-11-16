@@ -323,19 +323,48 @@ impl<C: HttpClient> GitHub<C> {
                     .as_ref()
                     .is_none_or(|u| u.kind.as_deref() != Some("Bot"))
             })
-            .map(|c| Comment {
-                author: c
-                    .user
-                    .map(|u| Person {
-                        username: u.login,
-                        display_name: None,
-                        avatar_url: u.avatar_url,
-                    })
-                    .unwrap_or_default(),
-                body: c.body.unwrap_or_default(),
-                created_at: c.created_at,
-            })
+            .map(CommentBody::into_comment)
             .collect())
+    }
+
+    async fn post_comment(
+        &self,
+        token: &str,
+        full_name: &str,
+        number: u64,
+        body: &str,
+    ) -> Result<Comment> {
+        let response = self
+            .send(
+                Request::post(
+                    format!("{}/issues/{number}/comments", self.repo_url(full_name)?),
+                    json!({ "body": body }).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+        Ok(self.parse::<CommentBody>(&response.body)?.into_comment())
+    }
+
+    async fn update_state(
+        &self,
+        token: &str,
+        full_name: &str,
+        number: u64,
+        open: bool,
+    ) -> Result<()> {
+        // The issues endpoint closes pull requests too.
+        self.send(
+            Request::patch(
+                format!("{}/issues/{number}", self.repo_url(full_name)?),
+                json!({ "state": if open { "open" } else { "closed" } }).to_string(),
+            )
+            .header("Content-Type", "application/json"),
+            Some(token),
+        )
+        .await?;
+        Ok(())
     }
 
     async fn merge(
@@ -390,6 +419,23 @@ struct CommentBody {
     user: Option<CommentUser>,
     body: Option<String>,
     created_at: String,
+}
+
+impl CommentBody {
+    fn into_comment(self) -> Comment {
+        Comment {
+            author: self
+                .user
+                .map(|u| Person {
+                    username: u.login,
+                    display_name: None,
+                    avatar_url: u.avatar_url,
+                })
+                .unwrap_or_default(),
+            body: self.body.unwrap_or_default(),
+            created_at: self.created_at,
+        }
+    }
 }
 
 fn state_param(state: StateFilter) -> &'static str {
@@ -544,6 +590,28 @@ impl<C: HttpClient> Provider for GitHub<C> {
         new: &'a NewIssue,
     ) -> BoxFuture<'a, Result<Issue>> {
         Box::pin(self.open_issue(token, full_name, new))
+    }
+
+    fn add_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        _: ItemKind,
+        number: u64,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>> {
+        Box::pin(self.post_comment(token, full_name, number, body))
+    }
+
+    fn set_open<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        _: ItemKind,
+        number: u64,
+        open: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(self.update_state(token, full_name, number, open))
     }
 
     fn pull_request_ref(&self, number: u64) -> Option<String> {

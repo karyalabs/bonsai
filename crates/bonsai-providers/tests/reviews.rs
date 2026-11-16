@@ -342,3 +342,94 @@ fn conversations_merges_and_new_issues_on_each_provider() {
     assert_eq!(comments[0].body, "Merging");
     assert!(bitbucket_client.finished());
 }
+
+#[test]
+fn comments_closes_and_reopens_on_each_provider() {
+    use bonsai_providers::{Error, ItemKind};
+    let github_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://api.github.com/repos/ada/engine/issues/7/comments",
+            json(
+                201,
+                r#"{"user":{"login":"ada","type":"User"},"body":"Thanks!","created_at":"2026-11-16T09:00:00Z"}"#,
+            ),
+        ),
+        (
+            Method::Patch,
+            "https://api.github.com/repos/ada/engine/issues/7",
+            json(200, r#"{"number":7,"state":"closed"}"#),
+        ),
+    ]);
+    let github = GitHub::new(&github_client);
+    let comment =
+        block_on(github.add_comment("t", "ada/engine", ItemKind::PullRequest, 7, "Thanks!"))
+            .unwrap();
+    assert_eq!(comment.author.username, "ada");
+    assert_eq!(comment.body, "Thanks!");
+    block_on(github.set_open("t", "ada/engine", ItemKind::PullRequest, 7, false)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&github_client.requests()[1].body).unwrap();
+    assert_eq!(sent["state"], "closed");
+    assert!(github_client.finished());
+
+    let gitlab_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/notes",
+            json(
+                201,
+                r#"{"body":"On it","system":false,"author":{"username":"ada","name":"Ada Lovelace"},"created_at":"2026-11-16T09:00:00Z"}"#,
+            ),
+        ),
+        (
+            Method::Put,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/issues/3",
+            json(200, r#"{"iid":3,"state":"opened"}"#),
+        ),
+    ]);
+    let gitlab = GitLab::new(&gitlab_client);
+    let note = block_on(gitlab.add_comment("t", "team/engine", ItemKind::PullRequest, 4, "On it"))
+        .unwrap();
+    assert_eq!(note.author.name(), "Ada Lovelace");
+    block_on(gitlab.set_open("t", "team/engine", ItemKind::Issue, 3, true)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&gitlab_client.requests()[1].body).unwrap();
+    assert_eq!(sent["state_event"], "reopen");
+    assert!(gitlab_client.finished());
+
+    let bitbucket_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments",
+            json(
+                201,
+                r#"{"user":{"display_name":"Ada Lovelace","nickname":"ada"},"content":{"raw":"Done"},"created_on":"2026-11-16T09:00:00Z"}"#,
+            ),
+        ),
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/decline",
+            json(200, r#"{"id":12,"state":"DECLINED"}"#),
+        ),
+    ]);
+    let bitbucket = Bitbucket::new(&bitbucket_client);
+    let comment = block_on(bitbucket.add_comment(
+        "t",
+        "analytical/engine",
+        ItemKind::PullRequest,
+        12,
+        "Done",
+    ))
+    .unwrap();
+    assert_eq!(comment.body, "Done");
+    let sent: serde_json::Value =
+        serde_json::from_slice(&bitbucket_client.requests()[0].body).unwrap();
+    assert_eq!(sent["content"]["raw"], "Done");
+    block_on(bitbucket.set_open("t", "analytical/engine", ItemKind::PullRequest, 12, false))
+        .unwrap();
+    let reopen =
+        block_on(bitbucket.set_open("t", "analytical/engine", ItemKind::PullRequest, 12, true));
+    assert!(matches!(reopen, Err(Error::Rejected(_))));
+    assert!(bitbucket_client.finished());
+}
