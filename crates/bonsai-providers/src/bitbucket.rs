@@ -5,10 +5,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Check, CheckState, Comment, Error, HttpClient, Issue,
-    ItemKind, ItemQuery, ItemState, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page,
-    Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request,
-    Response, Result, StateFilter, form_encode, oauth::Tokens, percent_encode,
+    Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, MergeMethod, NewIssue, NewPullRequest,
+    NewRepository, Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository,
+    RepositoryQuery, Request, Response, Result, StateFilter, form_encode, oauth::Tokens,
+    percent_encode,
 };
 
 const HOST: &str = "bitbucket.org";
@@ -537,6 +538,45 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
         })
     }
 
+    fn changed_files<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<ChangedFile>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/pullrequests/{number}/diffstat?pagelen=100",
+                repo_url(full_name)?
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let page: Values<DiffStat> = parse(&response.body)?;
+            Ok(page
+                .values
+                .into_iter()
+                .filter_map(|stat| {
+                    let old = stat.old.map(|p| p.path);
+                    let new = stat.new.map(|p| p.path);
+                    let change = match stat.status.as_str() {
+                        "added" => FileChange::Added,
+                        "removed" => FileChange::Removed,
+                        "renamed" => FileChange::Renamed,
+                        _ => FileChange::Modified,
+                    };
+                    Some(ChangedFile {
+                        path: new.clone().or_else(|| old.clone())?,
+                        old_path: (change == FileChange::Renamed).then_some(old).flatten(),
+                        change,
+                        additions: stat.lines_added,
+                        deletions: stat.lines_removed,
+                        // The diff endpoint redirects; the list is enough here.
+                        patch: None,
+                    })
+                })
+                .collect())
+        })
+    }
+
     fn checks<'a>(
         &'a self,
         token: &'a str,
@@ -629,6 +669,22 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
     fn pull_request_ref(&self, _: u64) -> Option<String> {
         None
     }
+}
+
+#[derive(Deserialize)]
+struct DiffStat {
+    status: String,
+    #[serde(default)]
+    lines_added: u32,
+    #[serde(default)]
+    lines_removed: u32,
+    old: Option<DiffPath>,
+    new: Option<DiffPath>,
+}
+
+#[derive(Deserialize)]
+struct DiffPath {
+    path: String,
 }
 
 #[derive(Deserialize)]

@@ -805,6 +805,11 @@ mod hosted {
                 (Method::Patch, "/issues/7", r#"{"number":7}"#.into()),
                 (
                     Method::Get,
+                    "/pulls/7/files",
+                    r#"[{"filename":"src/sync.rs","status":"modified","additions":2,"deletions":1,"patch":"@@ -1,2 +1,3 @@\n-old\n+new\n+more"}]"#.into(),
+                ),
+                (
+                    Method::Get,
                     "/commits/abc7/check-runs",
                     r#"{"check_runs":[{"name":"core","status":"completed","conclusion":"success","html_url":null},{"name":"macos","status":"in_progress","conclusion":null,"html_url":null}]}"#.into(),
                 ),
@@ -833,6 +838,16 @@ mod hosted {
             assert_eq!(checks.len(), 2);
             assert_eq!(checks[1].state, bonsai_providers::CheckState::Pending);
         });
+        view.update(cx, |view, cx| view.show_files(true, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let Some(crate::hosted::Files::Loaded(files)) = view.files(7) else {
+                panic!("files load");
+            };
+            assert_eq!(files[0].path, "src/sync.rs");
+            assert_eq!(files[0].additions, 2);
+        });
+        view.update(cx, |view, cx| view.show_files(false, cx));
         let composer = view
             .read_with(cx, |view, _| view.composer().cloned())
             .expect("the comment box is shown");

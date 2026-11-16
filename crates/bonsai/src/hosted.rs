@@ -13,8 +13,9 @@ use std::{
 use bonsai_git::Snapshot;
 use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
-    Check, CheckState, Comment, HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label,
-    MergeMethod, Person, Provider, ProviderKind, PullRequest, StateFilter, hosted_repository,
+    ChangedFile, Check, CheckState, Comment, FileChange, HttpClient, Issue, ItemKind, ItemQuery,
+    ItemState, Label, MergeMethod, Person, Provider, ProviderKind, PullRequest, StateFilter,
+    hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -279,6 +280,10 @@ pub struct HostedView {
     conversations: std::collections::HashMap<u64, Conversation>,
     /// Each pull request's CI checks, by number, loaded with its comments.
     checks: std::collections::HashMap<u64, Checks>,
+    /// Each pull request's changed files, loaded when Files is first shown.
+    files: std::collections::HashMap<u64, Files>,
+    /// Whether a pull request's detail shows its conversation or its files.
+    showing_files: bool,
     merge_method: MergeMethod,
     /// The pull request being merged.
     merging: Option<u64>,
@@ -298,6 +303,25 @@ pub enum Conversation {
     Loading,
     Loaded(Vec<Comment>),
     Failed(SharedString),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Files {
+    Loading,
+    Loaded(Vec<ChangedFile>),
+    Failed(SharedString),
+}
+
+/// Lines of one file's diff shown before pointing to the browser.
+const PATCH_LINES: usize = 400;
+
+fn file_icon(change: FileChange) -> LucideIcon {
+    match change {
+        FileChange::Added => LucideIcon::FilePlus,
+        FileChange::Removed => LucideIcon::FileMinus,
+        FileChange::Modified => LucideIcon::FilePen,
+        FileChange::Renamed => LucideIcon::FileSymlink,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -385,6 +409,8 @@ impl HostedView {
             started: false,
             conversations: std::collections::HashMap::new(),
             checks: std::collections::HashMap::new(),
+            files: std::collections::HashMap::new(),
+            showing_files: false,
             merge_method: MergeMethod::Merge,
             merging: None,
             action_error: None,
@@ -477,6 +503,60 @@ impl HostedView {
         self.conversations.get(&number)
     }
 
+    /// A pull request's changed files, if they have been asked for.
+    #[must_use]
+    pub fn files(&self, number: u64) -> Option<&Files> {
+        self.files.get(&number)
+    }
+
+    #[must_use]
+    pub fn showing_files(&self) -> bool {
+        self.showing_files
+    }
+
+    /// Shows the selected pull request's changed files, or its conversation.
+    pub fn show_files(&mut self, show: bool, cx: &mut Context<Self>) {
+        self.showing_files = show;
+        self.load_files(cx);
+        cx.notify();
+    }
+
+    fn load_files(&mut self, cx: &mut Context<Self>) {
+        if !self.showing_files {
+            return;
+        }
+        let Some(item) = self.selected() else {
+            return;
+        };
+        let number = item.number;
+        if item.pull.is_none() || self.files.contains_key(&number) {
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.files.insert(number, Files::Failed(error));
+                return;
+            }
+        };
+        self.files.insert(number, Files::Loading);
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider
+                .changed_files(&api, &target.full_name, number)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.files.insert(
+                    number,
+                    match result {
+                        Ok(files) => Files::Loaded(files),
+                        Err(error) => Files::Failed(error.to_string().into()),
+                    },
+                );
+                cx.notify();
+            });
+        }));
+    }
+
     /// A pull request's CI checks, if they have been asked for.
     #[must_use]
     pub fn checks(&self, number: u64) -> Option<&Checks> {
@@ -541,6 +621,7 @@ impl HostedView {
     /// Loads the selected item's comments the first time it is shown.
     pub fn load_conversation(&mut self, cx: &mut Context<Self>) {
         self.load_checks(cx);
+        self.load_files(cx);
         let Some(number) = self.selected else {
             return;
         };
@@ -1321,6 +1402,54 @@ impl HostedView {
                 list.into_any_element()
             }
         };
+        let showing_files = item.pull.is_some() && this.showing_files;
+        let files = if showing_files {
+            this.render_files(item.number, cx)
+        } else {
+            div().into_any_element()
+        };
+        let section_switch = if item.pull.is_some() {
+            let count = match this.files(item.number) {
+                Some(Files::Loaded(files)) => format!("Files ({})", files.len()),
+                _ => "Files".to_owned(),
+            };
+            let on_switch = view.clone();
+            div()
+                .pt(px(6.))
+                .flex()
+                .child(
+                    ToggleGroup::new("hosted.section")
+                        .aria_label("Show")
+                        .segmented(true)
+                        .value(Some(SharedString::from(if showing_files {
+                            "files"
+                        } else {
+                            "conversation"
+                        })))
+                        .item(
+                            ToggleGroupItem::new("hosted.section.conversation", "conversation")
+                                .aria_label("Conversation")
+                                .child(div().text_xs().child("Conversation")),
+                        )
+                        .item(
+                            ToggleGroupItem::new("hosted.section.files", "files")
+                                .aria_label("Files")
+                                .child(div().text_xs().child(count)),
+                        )
+                        .on_change(move |next, _, cx| {
+                            let files = next.first().is_some_and(|v| v.as_ref() == "files");
+                            on_switch.update(cx, |this, cx| this.show_files(files, cx));
+                        }),
+                )
+                .into_any_element()
+        } else {
+            div()
+                .pt(px(6.))
+                .text_sm()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child("Conversation")
+                .into_any_element()
+        };
         div()
             .id("hosted.detail")
             .size_full()
@@ -1440,16 +1569,140 @@ impl HostedView {
             })
             .child(div().h(px(1.)).bg(c.border))
             .child(body)
-            .child(
-                div()
-                    .pt(px(6.))
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Conversation"),
-            )
-            .child(conversation)
-            .children(reply)
+            .child(section_switch)
+            .when(showing_files, |this| this.child(files))
+            .when(!showing_files, |this| {
+                this.child(conversation).children(reply)
+            })
             .into_any_element()
+    }
+
+    fn render_files(&self, number: u64, cx: &App) -> AnyElement {
+        let theme = UiTheme::read(cx).clone();
+        let c = &theme.colors;
+        let files = match self.files(number) {
+            None | Some(Files::Loading) => {
+                return div()
+                    .text_sm()
+                    .text_color(c.muted_foreground)
+                    .child("Loading files…")
+                    .into_any_element();
+            }
+            Some(Files::Failed(error)) => {
+                return div()
+                    .text_sm()
+                    .text_color(c.destructive)
+                    .child(error.clone())
+                    .into_any_element();
+            }
+            Some(Files::Loaded(files)) => files,
+        };
+        let mut list = div().flex().flex_col().gap(px(10.));
+        for (i, file) in files.iter().enumerate() {
+            let shown_path = match &file.old_path {
+                Some(old) => format!("{old} → {}", file.path),
+                None => file.path.clone(),
+            };
+            let header = div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(10.))
+                .py(px(6.))
+                .bg(c.muted)
+                .text_xs()
+                .child(
+                    lucide(file_icon(file.change))
+                        .size(px(14.))
+                        .text_color(c.muted_foreground),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .font_family(theme.fonts.mono.clone())
+                        .child(shown_path),
+                )
+                .child(
+                    div()
+                        .text_color(c.success)
+                        .child(format!("+{}", file.additions)),
+                )
+                .child(
+                    div()
+                        .text_color(c.destructive)
+                        .child(format!("−{}", file.deletions)),
+                );
+            let body = match &file.patch {
+                Some(patch) => {
+                    let mut lines = div()
+                        .flex()
+                        .flex_col()
+                        .py(px(4.))
+                        .font_family(theme.fonts.mono.clone())
+                        .text_xs();
+                    let total = patch.lines().count();
+                    for line in patch.lines().take(PATCH_LINES) {
+                        let row = div().px(px(10.)).whitespace_nowrap();
+                        let row = if line.starts_with("@@") {
+                            row.text_color(c.muted_foreground)
+                                .bg(gpui_kit::Hsla::from(c.muted).opacity(0.5))
+                        } else if line.starts_with('+') {
+                            row.bg(gpui_kit::Hsla::from(c.success).opacity(0.12))
+                        } else if line.starts_with('-') {
+                            row.bg(gpui_kit::Hsla::from(c.destructive).opacity(0.12))
+                        } else {
+                            row
+                        };
+                        lines = lines.child(row.child(if line.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            line.to_owned()
+                        }));
+                    }
+                    if total > PATCH_LINES {
+                        lines = lines.child(
+                            div()
+                                .px(px(10.))
+                                .py(px(4.))
+                                .text_color(c.muted_foreground)
+                                .child(format!(
+                                    "{} more lines. Open in Browser to see them.",
+                                    total - PATCH_LINES
+                                )),
+                        );
+                    }
+                    lines.into_any_element()
+                }
+                None => div()
+                    .px(px(10.))
+                    .py(px(6.))
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child("No diff here. Open in Browser to see this file.")
+                    .into_any_element(),
+            };
+            list = list.child(
+                div()
+                    .id(("hosted.file", i))
+                    .flex()
+                    .flex_col()
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(c.border)
+                    .overflow_hidden()
+                    .child(header)
+                    .child(body),
+            );
+        }
+        if files.is_empty() {
+            list = list.child(
+                div()
+                    .text_sm()
+                    .text_color(c.muted_foreground)
+                    .child("No changed files."),
+            );
+        }
+        list.into_any_element()
     }
 }
 
