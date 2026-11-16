@@ -1,31 +1,142 @@
 //! The detail pane's diff: loads a patch in the background and shows it with
 //! GPUI Kit's diff, unified or side by side.
 
+use std::{path::PathBuf, sync::Arc};
+
 use bonsai_git::{
-    ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, LinePosition, LineSide,
-    SignatureStatus, Whitespace, partial_patch,
+    ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, FileVersion, LinePosition,
+    LineSide, SignatureStatus, Whitespace, hunk_changes, partial_patch,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
-    Styled, Subscription, Window,
+    AppContext as _, ClipboardItem, Context, Entity, Image, ImageFormat, IntoElement, ObjectFit,
+    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    StyledImage as _, Subscription, Window,
     component::diff::{DiffFile, DiffLineRange, DiffMode, DiffSide, DiffState},
-    div,
+    div, img,
     prelude::FluentBuilder as _,
     px,
 };
 
 use crate::{
     confirm::{self, Confirm},
+    file_icon::file_icon,
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
-        button::{Button, ButtonVariant},
+        button::{Button, ButtonSize, ButtonVariant, style_button},
         dialog::{DialogHandle, dialog},
         diff::{DiffAction, DiffIntent, DiffView},
+        menu::{Menu, MenuItem, MenuState},
         theme::UiTheme,
-        toggle_group::{ToggleGroup, ToggleGroupItem},
+        tooltip::text_tooltip,
     },
+    workspace::title_bar::ghost_trigger,
 };
+
+/// The two sides of a changed image, for a preview instead of a patch.
+#[derive(Clone, Default)]
+pub struct ImagePreview {
+    pub before: Option<Arc<Image>>,
+    pub after: Option<Arc<Image>>,
+}
+
+/// The image format for `path`'s extension, if GPUI can draw it.
+fn image_format(path: &std::path::Path) -> Option<ImageFormat> {
+    let extension = path.extension()?.to_string_lossy().to_lowercase();
+    Some(match extension.as_str() {
+        "png" => ImageFormat::Png,
+        "jpg" | "jpeg" => ImageFormat::Jpeg,
+        "webp" => ImageFormat::Webp,
+        "gif" => ImageFormat::Gif,
+        "svg" => ImageFormat::Svg,
+        "bmp" => ImageFormat::Bmp,
+        "tif" | "tiff" => ImageFormat::Tiff,
+        "ico" => ImageFormat::Ico,
+        _ => return None,
+    })
+}
+
+/// The one file `target` shows, when it shows one.
+fn single_path(target: &DiffTarget) -> Option<PathBuf> {
+    match target {
+        DiffTarget::Unstaged(paths) | DiffTarget::Staged(paths) if paths.len() == 1 => {
+            Some(paths[0].clone())
+        }
+        DiffTarget::Untracked(path) => Some(path.clone()),
+        _ => None,
+    }
+}
+
+/// Where the old and new sides of `target`'s files come from.
+fn versions(target: &DiffTarget) -> (Option<FileVersion>, FileVersion) {
+    match target {
+        DiffTarget::Unstaged(_) => (Some(FileVersion::Index), FileVersion::WorkTree),
+        DiffTarget::Staged(_) => (Some(FileVersion::Commit("HEAD".into())), FileVersion::Index),
+        DiffTarget::Untracked(_) => (None, FileVersion::WorkTree),
+        DiffTarget::Commit(oid) => (
+            Some(FileVersion::Commit(format!("{}^", oid.as_str()))),
+            FileVersion::Commit(oid.as_str().to_owned()),
+        ),
+        DiffTarget::Range { from, to } => (
+            Some(FileVersion::Commit(from.as_str().to_owned())),
+            FileVersion::Commit(to.as_str().to_owned()),
+        ),
+    }
+}
+
+/// The whole-hunk ranges of every file in `patch`, for the gutter buttons.
+fn hunk_ranges(patch: &str, files: &[DiffFile]) -> Vec<DiffLineRange> {
+    let side = |side: LineSide| match side {
+        LineSide::Old => DiffSide::Original,
+        LineSide::New => DiffSide::Modified,
+    };
+    files
+        .iter()
+        .flat_map(|file| {
+            let file_path = file.path().clone();
+            hunk_changes(patch, &file_path)
+                .into_iter()
+                .map(move |(first, last)| {
+                    DiffLineRange::new(file_path.clone(), side(first.side), first.line, last.line)
+                        .with_end_side(side(last.side))
+                })
+        })
+        .collect()
+}
+
+/// A small icon button for the diff toolbar; `active` marks a toggle that is on.
+fn tool_button(
+    id: &'static str,
+    icon: LucideIcon,
+    tip: impl Into<SharedString>,
+    active: bool,
+    theme: &UiTheme,
+) -> Button {
+    let tip: SharedString = tip.into();
+    let style_theme = theme.clone();
+    Button::new(id)
+        .aria_label(tip.clone())
+        .style_with(move |button| {
+            let tip = tip.clone();
+            style_button(
+                button,
+                false,
+                if active {
+                    ButtonVariant::Secondary
+                } else {
+                    ButtonVariant::Ghost
+                },
+                ButtonSize::IconSm,
+                &style_theme,
+            )
+            .tooltip(move |_, cx| text_tooltip(tip.clone(), cx))
+        })
+        .child(
+            lucide(icon)
+                .size(px(15.))
+                .text_color(theme.colors.foreground),
+        )
+}
 
 /// What the pane shows instead of a diff, or that a diff is shown.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -57,6 +168,15 @@ pub struct DiffPane {
     pending_discard: Option<String>,
     /// Why the last line action could not run.
     error: Option<SharedString>,
+    /// The first and last changed line of every hunk on screen.
+    hunks: Vec<DiffLineRange>,
+    /// The shown image's two sides, instead of a binary patch.
+    preview: Option<ImagePreview>,
+    /// Wraps long lines instead of scrolling sideways.
+    wrap: bool,
+    /// Shows every line of the file, not just the changes and their context.
+    full_file: bool,
+    more: Entity<MenuState>,
     /// Ignores results for a target that has since changed.
     generation: u64,
     _events: Subscription,
@@ -90,6 +210,11 @@ impl DiffPane {
             discard: DialogHandle::new(false),
             pending_discard: None,
             error: None,
+            hunks: Vec::new(),
+            preview: None,
+            wrap: false,
+            full_file: false,
+            more: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(240.))),
             generation: 0,
             _events: events,
         }
@@ -122,6 +247,7 @@ impl DiffPane {
         }
         self.target = target;
         self.title = title;
+        self.rebuild_more(cx);
         self.load(false, cx);
     }
 
@@ -156,6 +282,8 @@ impl DiffPane {
                 _ => None,
             }
         });
+        let preview_repository = repository.clone();
+        let preview_target = target.clone();
         let task = cx.background_spawn(async move {
             repository
                 .diff(&target, options)
@@ -165,6 +293,13 @@ impl DiffPane {
                         .map(|files| Ok((files, patch)))
                         .map_err(|e| format!("Bonsai could not read this diff: {e:?}")),
                     DiffOutput::TooLarge { bytes } => Ok(Err(bytes)),
+                })
+                .map(|result| {
+                    result.map(|(files, patch)| {
+                        let preview =
+                            Self::load_preview(&preview_repository, &preview_target, &files);
+                        (files, patch, preview)
+                    })
                 })
         });
         cx.spawn(async move |this, cx| {
@@ -176,14 +311,18 @@ impl DiffPane {
                 }
                 this.details = details;
                 this.patch = None;
+                this.hunks.clear();
+                this.preview = None;
                 this.status = match result {
-                    Ok(Ok((files, _))) if files.is_empty() => {
+                    Ok(Ok((files, _, _))) if files.is_empty() => {
                         this.state
                             .update(cx, |state, cx| state.set_files(Vec::new(), cx));
                         PaneStatus::Empty
                     }
-                    Ok(Ok((files, patch))) => {
+                    Ok(Ok((files, patch, preview))) => {
+                        this.hunks = hunk_ranges(&patch, &files);
                         this.patch = Some(patch);
+                        this.preview = preview;
                         this.state
                             .update(cx, |state, cx| state.set_files(files, cx));
                         PaneStatus::Ready
@@ -205,6 +344,85 @@ impl DiffPane {
         }
     }
 
+    /// Both sides of a changed image, when `files` is one binary image.
+    fn load_preview(
+        repository: &bonsai_git::Repository,
+        target: &DiffTarget,
+        files: &[DiffFile],
+    ) -> Option<ImagePreview> {
+        let [file] = files else { return None };
+        if !file.is_binary() {
+            return None;
+        }
+        let path = PathBuf::from(file.path().as_ref());
+        let format = image_format(&path)?;
+        let original = file
+            .original_path()
+            .map_or_else(|| path.clone(), |p| PathBuf::from(p.as_ref()));
+        let (before, after) = versions(target);
+        let read = |path: &std::path::Path, version: &FileVersion| {
+            repository
+                .file_version(path, version)
+                .ok()
+                .flatten()
+                .map(|bytes| Arc::new(Image::from_bytes(format, bytes)))
+        };
+        Some(ImagePreview {
+            before: before.and_then(|version| read(&original, &version)),
+            after: read(&path, &after),
+        })
+    }
+
+    #[must_use]
+    pub fn preview(&self) -> Option<&ImagePreview> {
+        self.preview.as_ref()
+    }
+
+    #[must_use]
+    pub fn hunks(&self) -> &[DiffLineRange] {
+        &self.hunks
+    }
+
+    fn set_full_file(&mut self, full: bool, cx: &mut Context<Self>) {
+        self.full_file = full;
+        self.state.update(cx, |state, cx| {
+            if full {
+                state.expand_unchanged(cx);
+            } else {
+                state.collapse_unchanged(cx);
+            }
+        });
+        cx.notify();
+    }
+
+    /// The More menu: copy, reveal and open the shown file.
+    fn rebuild_more(&mut self, cx: &mut Context<Self>) {
+        let mut items = Vec::new();
+        if let Some(path) = self.target.as_ref().and_then(single_path) {
+            let absolute = self.model.read(cx).repository().root().join(&path);
+            let copy = path.to_string_lossy().into_owned();
+            let reveal = absolute.clone();
+            items.push(
+                MenuItem::new("diff.more.copy-path", "Copy Path")
+                    .icon(LucideIcon::Copy)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                    }),
+            );
+            items.push(
+                MenuItem::new("diff.more.reveal", "Reveal in Finder")
+                    .icon(LucideIcon::FolderOpen)
+                    .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+            );
+            items.push(
+                MenuItem::new("diff.more.open", "Open in Default App")
+                    .icon(LucideIcon::ExternalLink)
+                    .on_click(move |_, _, cx| cx.open_with_system(&absolute)),
+            );
+        }
+        self.more.update(cx, |menu, cx| menu.set_items(items, cx));
+    }
+
     /// The line actions the shown diff offers: none for commits, untracked
     /// files, or while whitespace is hidden (the patch would not apply).
     fn line_actions(&self) -> Vec<DiffAction> {
@@ -222,6 +440,23 @@ impl DiffPane {
                 vec![DiffAction::new("unstage", "Unstage Lines").icon(LucideIcon::Minus)]
             }
             _ => Vec::new(),
+        }
+    }
+
+    /// The gutter button beside each hunk: Stage for unstaged changes,
+    /// Unstage for staged ones.
+    fn hunk_action(&self) -> Option<DiffAction> {
+        if self.whitespace != Whitespace::Show {
+            return None;
+        }
+        match self.target {
+            Some(DiffTarget::Unstaged(_)) => {
+                Some(DiffAction::new("stage", "Stage Hunk").icon(LucideIcon::Plus))
+            }
+            Some(DiffTarget::Staged(_)) => {
+                Some(DiffAction::new("unstage", "Unstage Hunk").icon(LucideIcon::Minus))
+            }
+            _ => None,
         }
     }
 
@@ -405,6 +640,309 @@ impl DiffPane {
             )
     }
 
+    /// The file (or commit) on the left; navigation, view options and the
+    /// More menu on the right.
+    fn render_toolbar(&self, theme: &UiTheme, cx: &mut Context<Self>) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let state = self.state.read(cx);
+        let mode = state.mode();
+        let (added, removed) = state
+            .files()
+            .iter()
+            .fold((0, 0), |(a, r), f| (a + f.additions(), r + f.deletions()));
+        let path = self.target.as_ref().and_then(single_path);
+        let title = match &path {
+            Some(path) => {
+                let text = path.to_string_lossy();
+                let (folder, name) = text
+                    .rsplit_once('/')
+                    .map_or((None, text.as_ref()), |(f, n)| (Some(f.to_owned()), n));
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .min_w_0()
+                    .child(
+                        lucide(file_icon(path))
+                            .size(px(15.))
+                            .flex_shrink_0()
+                            .text_color(c.muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(name.to_owned()),
+                    )
+                    .when_some(folder, |this, folder| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(folder),
+                        )
+                    })
+            }
+            None => div().min_w_0().flex().items_center().gap(px(6.)).child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .child(self.title.clone()),
+            ),
+        };
+        let line_stats = (self.status == PaneStatus::Ready && self.preview.is_none()).then(|| {
+            div()
+                .flex()
+                .flex_shrink_0()
+                .gap(px(6.))
+                .text_xs()
+                .font_family(theme.fonts.mono.clone())
+                .when(added > 0, |this| {
+                    this.child(div().text_color(c.success).child(format!("+{added}")))
+                })
+                .when(removed > 0, |this| {
+                    this.child(div().text_color(c.destructive).child(format!("−{removed}")))
+                })
+        });
+        let diff_tools = self.status == PaneStatus::Ready && self.preview.is_none();
+        let separator = || div().w(px(1.)).h(px(16.)).mx(px(2.)).bg(c.border);
+        let whitespace_hidden = self.whitespace != Whitespace::Show;
+        let tools = div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap(px(2.))
+            .when(diff_tools, |this| {
+                this.child(
+                    tool_button(
+                        "diff.previous",
+                        LucideIcon::ChevronUp,
+                        "Previous Change",
+                        false,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, DiffState::previous_change);
+                    })),
+                )
+                .child(
+                    tool_button(
+                        "diff.next",
+                        LucideIcon::ChevronDown,
+                        "Next Change",
+                        false,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.state.update(cx, DiffState::next_change);
+                    })),
+                )
+                .child(separator())
+                .child(
+                    tool_button(
+                        "diff.full-file",
+                        if self.full_file {
+                            LucideIcon::FoldVertical
+                        } else {
+                            LucideIcon::UnfoldVertical
+                        },
+                        if self.full_file {
+                            "Show Changes Only"
+                        } else {
+                            "Show Entire File"
+                        },
+                        self.full_file,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.set_full_file(!this.full_file, cx);
+                    })),
+                )
+                .child(
+                    tool_button(
+                        "diff.wrap",
+                        LucideIcon::TextWrap,
+                        if self.wrap {
+                            "Don't Wrap Lines"
+                        } else {
+                            "Wrap Lines"
+                        },
+                        self.wrap,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.wrap = !this.wrap;
+                        cx.notify();
+                    })),
+                )
+            })
+            .when(diff_tools || self.status == PaneStatus::Empty, |this| {
+                this.child(
+                    tool_button(
+                        "diff.whitespace",
+                        LucideIcon::Space,
+                        if whitespace_hidden {
+                            "Show Whitespace Changes"
+                        } else {
+                            "Hide Whitespace Changes"
+                        },
+                        whitespace_hidden,
+                        theme,
+                    )
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let next = match this.whitespace {
+                            Whitespace::Show => Whitespace::IgnoreAll,
+                            Whitespace::IgnoreAll | Whitespace::IgnoreChanges => Whitespace::Show,
+                        };
+                        this.set_whitespace(next, cx);
+                    })),
+                )
+            })
+            .when(diff_tools, |this| {
+                let unified = mode != DiffMode::Split;
+                this.child(separator())
+                    .child(
+                        tool_button(
+                            "diff.layout.unified",
+                            LucideIcon::Rows2,
+                            "Unified",
+                            unified,
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .update(cx, |state, cx| state.set_mode(DiffMode::Unified, cx));
+                            cx.notify();
+                        })),
+                    )
+                    .child(
+                        tool_button(
+                            "diff.layout.split",
+                            LucideIcon::Columns2,
+                            "Side by Side",
+                            !unified,
+                            theme,
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.state
+                                .update(cx, |state, cx| state.set_mode(DiffMode::Split, cx));
+                            cx.notify();
+                        })),
+                    )
+            })
+            .when(path.is_some(), |this| {
+                this.child(
+                    Menu::new(&self.more, "More")
+                        .trigger_style_with(ghost_trigger(theme, ButtonSize::IconSm))
+                        .trigger(
+                            lucide(LucideIcon::Ellipsis)
+                                .size(px(15.))
+                                .text_color(c.foreground),
+                        ),
+                )
+            });
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .h(px(40.))
+            .px(px(12.))
+            .border_b_1()
+            .border_color(c.border)
+            .child(title)
+            .children(line_stats)
+            .child(div().flex_1())
+            .child(tools)
+    }
+
+    /// A changed image: the old and new versions side by side.
+    fn render_preview(preview: &ImagePreview, theme: &UiTheme) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let byte_size = |image: &Arc<Image>| {
+            let bytes = image.bytes.len();
+            // Tenths of a unit, in integers: "4.5 KB".
+            let tenths = |unit: usize| {
+                let tenths = (bytes * 10).div_ceil(unit);
+                format!("{}.{}", tenths / 10, tenths % 10)
+            };
+            if bytes < 1024 {
+                format!("{bytes} B")
+            } else if bytes < 1024 * 1024 {
+                format!("{} KB", tenths(1024))
+            } else {
+                format!("{} MB", tenths(1024 * 1024))
+            }
+        };
+        let side = |label: &'static str, image: Option<&Arc<Image>>, color| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .child(div().text_color(color).child(label))
+                        .when_some(image, |this, image| {
+                            this.child(div().text_color(c.muted_foreground).child(byte_size(image)))
+                        }),
+                )
+                .child(
+                    div()
+                        .h(px(320.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .p(px(12.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(c.border)
+                        .bg(c.muted.opacity(0.4))
+                        .map(|this| match image {
+                            Some(image) => this.child(
+                                img(image.clone())
+                                    .max_w_full()
+                                    .max_h_full()
+                                    .object_fit(ObjectFit::Contain),
+                            ),
+                            None => this.child(
+                                div()
+                                    .text_sm()
+                                    .text_color(c.muted_foreground)
+                                    .child("No image"),
+                            ),
+                        }),
+                )
+        };
+        div()
+            .size_full()
+            .flex()
+            .gap(px(16.))
+            .p(px(16.))
+            .when(preview.before.is_some(), |this| {
+                this.child(side("Before", preview.before.as_ref(), c.destructive))
+            })
+            .child(side(
+                if preview.before.is_some() {
+                    "After"
+                } else {
+                    "Added"
+                },
+                preview.after.as_ref(),
+                c.success,
+            ))
+    }
+
     fn render_message(
         icon: LucideIcon,
         title: &str,
@@ -488,90 +1026,29 @@ impl Render for DiffPane {
                 &theme,
             )
             .into_any_element(),
+            PaneStatus::Ready if self.preview.is_some() => {
+                Self::render_preview(self.preview.as_ref().expect("checked above"), &theme)
+                    .into_any_element()
+            }
             PaneStatus::Ready => {
                 let actions = self.line_actions();
                 let view = cx.entity().downgrade();
+                let single = self.target.as_ref().and_then(single_path).is_some();
                 DiffView::new("diff.view", &self.state)
                     .read_only(actions.is_empty())
                     .selection_actions(actions)
+                    .when_some(self.hunk_action(), |view, action| {
+                        view.hunk_action(action, self.hunks.clone())
+                    })
+                    .header_visible(!single)
+                    .soft_wrap(self.wrap)
                     .on_intent(move |intent, window, cx| {
                         let _ = view.update(cx, |pane, cx| pane.act(intent, window, cx));
                     })
                     .into_any_element()
             }
         };
-        let mode = self.state.read(cx).mode();
-        let layout_state = self.state.clone();
-        let toolbar = div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .gap(px(8.))
-            .px(px(12.))
-            .py(px(6.))
-            .border_b_1()
-            .border_color(c.border)
-            .child(
-                div()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .child(self.title.clone()),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        Button::new("diff.whitespace")
-                            .variant(ButtonVariant::Ghost)
-                            .label(match self.whitespace {
-                                Whitespace::Show => "Whitespace: Shown",
-                                Whitespace::IgnoreChanges => "Whitespace: Amount Ignored",
-                                Whitespace::IgnoreAll => "Whitespace: Ignored",
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                let next = match this.whitespace {
-                                    Whitespace::Show => Whitespace::IgnoreAll,
-                                    Whitespace::IgnoreAll | Whitespace::IgnoreChanges => {
-                                        Whitespace::Show
-                                    }
-                                };
-                                this.set_whitespace(next, cx);
-                            })),
-                    )
-                    .child(
-                        ToggleGroup::new("diff.layout")
-                            .aria_label("Diff layout")
-                            .segmented(true)
-                            .value(vec![SharedString::from(if mode == DiffMode::Split {
-                                "split"
-                            } else {
-                                "unified"
-                            })])
-                            .item(
-                                ToggleGroupItem::new("diff.layout.unified", "unified")
-                                    .aria_label("Unified")
-                                    .child("Unified"),
-                            )
-                            .item(
-                                ToggleGroupItem::new("diff.layout.split", "split")
-                                    .aria_label("Side by side")
-                                    .child("Side by Side"),
-                            )
-                            .on_change(move |next, _, cx| {
-                                let Some(value) = next.first() else { return };
-                                let mode = if value == "split" {
-                                    DiffMode::Split
-                                } else {
-                                    DiffMode::Unified
-                                };
-                                layout_state.update(cx, |state, cx| state.set_mode(mode, cx));
-                            }),
-                    ),
-            );
+        let toolbar = self.render_toolbar(&theme, cx);
         div()
             .size_full()
             .flex()
@@ -681,6 +1158,8 @@ mod tests {
 
         pane.update_in(cx, |pane, window, cx| {
             assert_eq!(pane.line_actions().len(), 2);
+            assert_eq!(pane.hunks().len(), 1, "X and Y share a hunk");
+            assert!(pane.hunk_action().is_some());
             pane.act(&intent("stage", 2), window, cx);
         });
         cx.run_until_parked();
@@ -711,5 +1190,74 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(run(&["show", ":f.txt"]), "a\nb\nc\n");
+    }
+
+    #[gpui_kit::test]
+    fn previews_a_changed_image_and_stages_whole_hunks(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::locate(None).unwrap();
+        let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+        let run = |args: &[&str]| {
+            git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+                .unwrap()
+                .stdout_lossy()
+        };
+        run(&["config", "user.name", "Ada"]);
+        run(&["config", "user.email", "ada@example.com"]);
+        let lines: String = (1..=20).map(|n| n.to_string() + "\n").collect();
+        std::fs::write(dir.path().join("f.txt"), &lines).unwrap();
+        std::fs::write(dir.path().join("logo.png"), [0x89_u8, b'P', 0, 1]).unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "base"]);
+        std::fs::write(dir.path().join("logo.png"), [0x89_u8, b'P', 0, 2, 3]).unwrap();
+        let edited = lines
+            .replacen("2\n", "two\n", 1)
+            .replace("19\n", "nineteen\n");
+        std::fs::write(dir.path().join("f.txt"), &edited).unwrap();
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (pane, cx) = cx.add_window_view(|_, cx| DiffPane::new(model.clone(), cx));
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| {
+            pane.show(
+                Some(DiffTarget::Unstaged(vec!["logo.png".into()])),
+                "logo.png".into(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        pane.read_with(cx, |pane, _| {
+            let preview = pane.preview().expect("a changed image is previewed");
+            assert_eq!(preview.before.as_ref().unwrap().bytes, [0x89, b'P', 0, 1]);
+            assert_eq!(preview.after.as_ref().unwrap().bytes, [0x89, b'P', 0, 2, 3]);
+        });
+
+        pane.update(cx, |pane, cx| {
+            pane.show(
+                Some(DiffTarget::Unstaged(vec!["f.txt".into()])),
+                "f.txt".into(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let hunk = pane.read_with(cx, |pane, _| {
+            assert!(pane.preview().is_none());
+            assert_eq!(pane.hunks().len(), 2);
+            pane.hunks()[1].clone()
+        });
+        pane.update_in(cx, |pane, window, cx| {
+            let intent = DiffIntent {
+                action: "stage".into(),
+                path: "f.txt".into(),
+                range: Some(hunk),
+            };
+            pane.act(&intent, window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            run(&["show", ":f.txt"]),
+            lines.replace("19\n", "nineteen\n")
+        );
     }
 }

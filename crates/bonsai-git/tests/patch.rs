@@ -4,7 +4,7 @@ use std::path::Path;
 
 use bonsai_git::{
     ApplyMode, DiffOptions, DiffOutput, DiffTarget, Git, LinePosition, LineSide, Repository,
-    partial_patch,
+    hunk_changes, partial_patch,
 };
 
 fn git() -> Git {
@@ -184,4 +184,26 @@ fn a_selection_of_context_only_builds_nothing() {
     let diff = unstaged(&repository);
     assert!(partial_patch(&diff, "file.txt", old(1), old(2), ApplyMode::Stage).is_none());
     assert!(partial_patch(&diff, "other.txt", new(4), new(4), ApplyMode::Stage).is_none());
+}
+
+#[test]
+fn stages_one_hunk_of_several() {
+    let base: String = (1..=20).map(|n| n.to_string() + "\n").collect();
+    let (dir, repository) = repo(&base);
+    let line = |n: usize, twice: bool| match n {
+        2 if twice => "two\n".to_owned(),
+        18 => "eighteen\n".to_owned(),
+        n => format!("{n}\n"),
+    };
+    let changed: String = (1..=20).map(|n| line(n, true)).collect();
+    std::fs::write(dir.path().join("file.txt"), &changed).unwrap();
+    let diff = unstaged(&repository);
+    let hunks = hunk_changes(&diff, "file.txt");
+    assert_eq!(hunks, [(old(2), new(2)), (old(18), new(18))]);
+    assert_eq!(hunk_changes(&diff, "other.txt"), []);
+
+    let (from, to) = hunks[1];
+    apply(&repository, &diff, from, to, ApplyMode::Stage);
+    let staged: String = (1..=20).map(|n| line(n, false)).collect();
+    assert_eq!(index(dir.path()), staged.as_bytes());
 }
