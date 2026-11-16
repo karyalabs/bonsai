@@ -22,6 +22,7 @@ use crate::{
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     diff_pane::DiffPane,
+    publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     refs::{RefDialog, RefsEvent, RefsPanel},
     remote_browser::{RemoteBrowser, RemoteBrowserEvent},
@@ -80,6 +81,8 @@ pub struct Workspace {
     accounts_handle: DialogHandle,
     accounts: Option<Entity<AccountsSheet>>,
     accounts_events: Option<Subscription>,
+    publish_handle: DialogHandle,
+    publish: Option<(Entity<PublishSheet>, Subscription)>,
     /// The Welcome screen's remote repositories, built on first show and
     /// again after the accounts change.
     remote_browser: Option<(Entity<RemoteBrowser>, Subscription)>,
@@ -128,6 +131,8 @@ impl Workspace {
             accounts_handle: DialogHandle::new(false),
             accounts: None,
             accounts_events: None,
+            publish_handle: DialogHandle::new(false),
+            publish: None,
             remote_browser: None,
             purge_requested: None,
             welcome: false,
@@ -550,6 +555,79 @@ impl Workspace {
         self.remote_browser.as_ref().map(|(browser, _)| browser)
     }
 
+    /// Opens Publish for the active repository.
+    pub fn show_publish(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let accounts = Accounts::load(
+            self.accounts_path(),
+            std::sync::Arc::from(bonsai_keychain::default_store()),
+        );
+        let client = std::sync::Arc::new(crate::http::CurlClient::default());
+        self.show_publish_with(accounts, client, window, cx);
+    }
+
+    pub fn show_publish_with(
+        &mut self,
+        accounts: Accounts,
+        client: std::sync::Arc<dyn bonsai_providers::HttpClient>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.active_model().cloned().filter(|_| !self.welcome) else {
+            return;
+        };
+        let sheet = cx.new(|cx| PublishSheet::new(model, accounts, client, window, cx));
+        let events = cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &PublishEvent, window, cx| {
+                this.publish_handle.close(window, cx);
+                this.publish = None;
+                if matches!(event, PublishEvent::ManageAccounts) {
+                    this.show_accounts(window, cx);
+                }
+                cx.notify();
+            },
+        );
+        self.publish = Some((sheet, events));
+        self.publish_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn publish_sheet(&self) -> Option<&Entity<PublishSheet>> {
+        self.publish.as_ref().map(|(sheet, _)| sheet)
+    }
+
+    fn on_publish(
+        &mut self,
+        _: &commands::PublishRepository,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_publish(window, cx);
+    }
+
+    fn render_publish(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.publish.popup", "Publish Repository", cx).when_some(
+            self.publish_sheet().cloned(),
+            gpui_kit::ParentElement::child,
+        );
+        let this = cx.entity().downgrade();
+        dialog("workspace.publish", &self.publish_handle, popup, window, cx).on_cancel(
+            move |_, _, cx| {
+                let _ = this.update(cx, |workspace, cx| {
+                    workspace.publish = None;
+                    cx.notify();
+                });
+                true
+            },
+        )
+    }
+
     fn render_purge(
         &self,
         window: &mut Window,
@@ -757,7 +835,15 @@ impl Workspace {
         }
     }
 
-    fn on_push(&mut self, _: &commands::Push, _: &mut Window, cx: &mut Context<Self>) {
+    fn on_push(&mut self, _: &commands::Push, window: &mut Window, cx: &mut Context<Self>) {
+        let no_remotes = self
+            .active_model()
+            .and_then(|m| m.read(cx).snapshot())
+            .is_some_and(|s| s.remotes.is_empty());
+        if no_remotes {
+            self.show_publish(window, cx);
+            return;
+        }
         if let Some(sync) = self.active_sync() {
             let reason = sync.update(cx, SyncBar::push);
             if let Some(reason) = reason {
@@ -1381,6 +1467,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
             .on_action(cx.listener(Self::on_accounts))
+            .on_action(cx.listener(Self::on_publish))
             .size_full()
             .flex()
             .flex_col()
@@ -1434,6 +1521,7 @@ impl Render for Workspace {
             .child(self.render_clone(window, cx))
             .child(self.render_purge(window, cx))
             .child(self.render_accounts(window, cx))
+            .child(self.render_publish(window, cx))
     }
 }
 
