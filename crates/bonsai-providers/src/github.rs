@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, MergeMethod, NewIssue,
     NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
     RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
     form_encode, percent_encode,
@@ -619,6 +619,39 @@ impl<C: HttpClient> Provider for GitHub<C> {
         })
     }
 
+    fn line_comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<LineComment>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/pulls/{number}/comments?per_page=100",
+                self.repo_url(full_name)?
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let comments: Vec<ReviewComment> = self.parse(&response.body)?;
+            Ok(comments
+                .into_iter()
+                .map(|c| {
+                    let left = c.side.as_deref() == Some("LEFT");
+                    LineComment {
+                        path: c.path,
+                        line: if left { None } else { c.line },
+                        old_line: if left { c.line } else { None },
+                        comment: CommentBody {
+                            user: c.user,
+                            body: c.body,
+                            created_at: c.created_at,
+                        }
+                        .into_comment(),
+                    }
+                })
+                .collect())
+        })
+    }
+
     fn changed_files<'a>(
         &'a self,
         token: &'a str,
@@ -833,6 +866,17 @@ impl LabelBody {
             color: self.color.filter(|c| c.len() == 6),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct ReviewComment {
+    path: String,
+    /// `None` when the line is no longer in the diff.
+    line: Option<u32>,
+    side: Option<String>,
+    user: Option<CommentUser>,
+    body: Option<String>,
+    created_at: String,
 }
 
 #[derive(Deserialize)]

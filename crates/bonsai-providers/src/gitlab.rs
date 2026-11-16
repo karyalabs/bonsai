@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, MergeMethod, NewIssue,
     NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
     RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
     form_encode, github::next_link, oauth::Tokens, percent_encode,
@@ -423,7 +423,8 @@ impl<C: HttpClient> Provider for GitLab<C> {
             Ok(notes
                 .into_iter()
                 // System notes are GitLab's own ("added 1 commit").
-                .filter(|note| !note.system)
+                // Line comments show in Files.
+                .filter(|note| !note.system && note.position.is_none())
                 .map(Note::into_comment)
                 .collect())
         })
@@ -514,6 +515,44 @@ impl<C: HttpClient> Provider for GitLab<C> {
 
     fn can_request_changes(&self) -> bool {
         false
+    }
+
+    fn line_comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<LineComment>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/merge_requests/{number}/discussions?per_page=100",
+                self.project_url(full_name)
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let discussions: Vec<Discussion> = self.parse(&response.body)?;
+            Ok(discussions
+                .into_iter()
+                .flat_map(|d| d.notes)
+                .filter(|note| !note.system)
+                .filter_map(|note| {
+                    let position = note.position?;
+                    Some(LineComment {
+                        path: position.new_path.or(position.old_path)?,
+                        line: position.new_line,
+                        old_line: position
+                            .new_line
+                            .is_none()
+                            .then_some(position.old_line)
+                            .flatten(),
+                        comment: Comment {
+                            author: note.author.map(User::into_person).unwrap_or_default(),
+                            body: note.body,
+                            created_at: note.created_at,
+                        },
+                    })
+                })
+                .collect())
+        })
     }
 
     fn changed_files<'a>(
@@ -679,6 +718,7 @@ struct Note {
     #[serde(default)]
     system: bool,
     created_at: String,
+    position: Option<NotePosition>,
 }
 
 impl Note {
@@ -689,6 +729,29 @@ impl Note {
             created_at: self.created_at,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct Discussion {
+    notes: Vec<PositionedNote>,
+}
+
+#[derive(Deserialize)]
+struct PositionedNote {
+    body: String,
+    author: Option<User>,
+    #[serde(default)]
+    system: bool,
+    created_at: String,
+    position: Option<NotePosition>,
+}
+
+#[derive(Deserialize)]
+struct NotePosition {
+    old_path: Option<String>,
+    new_path: Option<String>,
+    old_line: Option<u32>,
+    new_line: Option<u32>,
 }
 
 #[derive(Deserialize)]

@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, MergeMethod, NewIssue, NewPullRequest,
-    NewRepository, Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository,
-    RepositoryQuery, Request, Response, Result, StateFilter, Verdict, form_encode, oauth::Tokens,
-    percent_encode,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, LineComment, MergeMethod, NewIssue,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
+    form_encode, oauth::Tokens, percent_encode,
 };
 
 const HOST: &str = "bitbucket.org";
@@ -487,7 +487,8 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
             Ok(page
                 .values
                 .into_iter()
-                .filter(|c| !c.deleted)
+                // Line comments show in Files.
+                .filter(|c| !c.deleted && c.inline.is_none())
                 .map(CommentBody::into_comment)
                 .collect())
         })
@@ -565,6 +566,36 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
                     .await?;
             }
             Ok(())
+        })
+    }
+
+    fn line_comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<LineComment>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/pullrequests/{number}/comments?pagelen=100&sort=created_on",
+                repo_url(full_name)?
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let page: Values<CommentBody> = parse(&response.body)?;
+            Ok(page
+                .values
+                .into_iter()
+                .filter(|c| !c.deleted)
+                .filter_map(|mut c| {
+                    let inline = c.inline.take()?;
+                    Some(LineComment {
+                        path: inline.path,
+                        line: inline.to,
+                        old_line: inline.to.is_none().then_some(inline.from).flatten(),
+                        comment: c.into_comment(),
+                    })
+                })
+                .collect())
         })
     }
 
@@ -856,6 +887,14 @@ struct CommentBody {
     #[serde(default)]
     deleted: bool,
     created_on: String,
+    inline: Option<Inline>,
+}
+
+#[derive(Deserialize)]
+struct Inline {
+    path: String,
+    from: Option<u32>,
+    to: Option<u32>,
 }
 
 impl CommentBody {

@@ -806,6 +806,11 @@ mod hosted {
                 (Method::Post, "/pulls/7/reviews", r#"{"id":1}"#.into()),
                 (
                     Method::Get,
+                    "/pulls/7/comments",
+                    r#"[{"path":"src/sync.rs","line":1,"side":"RIGHT","user":{"login":"grace"},"body":"Why?","created_at":"2026-11-12T09:00:00Z"}]"#.into(),
+                ),
+                (
+                    Method::Get,
                     "/pulls/7/files",
                     r#"[{"filename":"src/sync.rs","status":"modified","additions":2,"deletions":1,"patch":"@@ -1,2 +1,3 @@\n-old\n+new\n+more"}]"#.into(),
                 ),
@@ -847,6 +852,7 @@ mod hosted {
             };
             assert_eq!(files[0].path, "src/sync.rs");
             assert_eq!(files[0].additions, 2);
+            assert_eq!(view.line_comments(7)[0].comment.body, "Why?");
         });
         view.update(cx, |view, cx| view.show_files(false, cx));
         let composer = view
