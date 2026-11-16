@@ -806,13 +806,18 @@ mod hosted {
                 (Method::Post, "/pulls/7/reviews", r#"{"id":1}"#.into()),
                 (
                     Method::Post,
+                    "/pulls/7/comments/5/replies",
+                    r#"{"id":7,"in_reply_to_id":5,"path":"src/sync.rs","line":1,"side":"RIGHT","user":{"login":"ada"},"body":"Because","created_at":"2026-11-16T09:00:00Z"}"#.into(),
+                ),
+                (
+                    Method::Post,
                     "/pulls/7/comments",
-                    r#"{"path":"src/sync.rs","line":2,"side":"RIGHT","user":{"login":"ada"},"body":"Nice","created_at":"2026-11-16T09:00:00Z"}"#.into(),
+                    r#"{"id":6,"path":"src/sync.rs","line":2,"side":"RIGHT","user":{"login":"ada"},"body":"Nice","created_at":"2026-11-16T09:00:00Z"}"#.into(),
                 ),
                 (
                     Method::Get,
                     "/pulls/7/comments",
-                    r#"[{"path":"src/sync.rs","line":1,"side":"RIGHT","user":{"login":"grace"},"body":"Why?","created_at":"2026-11-12T09:00:00Z"}]"#.into(),
+                    r#"[{"id":5,"path":"src/sync.rs","line":1,"side":"RIGHT","user":{"login":"grace"},"body":"Why?","created_at":"2026-11-12T09:00:00Z"}]"#.into(),
                 ),
                 (
                     Method::Get,
@@ -883,6 +888,22 @@ mod hosted {
         let line_sent = client.sent.lock().unwrap().last().unwrap().1.clone();
         assert_eq!(line_sent["commit_id"], "abc7");
         assert_eq!(line_sent["line"], 2);
+        view.update(cx, |view, cx| view.set_reply_thread(Some("5".into()), cx));
+        line_composer.update_in(cx, |input, window, cx| {
+            input.set_value("Because", window, cx);
+        });
+        view.update_in(cx, HostedView::send_reply);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let comments = view.line_comments(7);
+            assert_eq!(comments.len(), 3);
+            assert_eq!(
+                comments[1].comment.body, "Because",
+                "the reply follows its thread"
+            );
+            assert_eq!(comments[1].thread, "5");
+            assert_eq!(comments[1].line, Some(1));
+        });
         view.update(cx, |view, cx| view.show_files(false, cx));
         let composer = view
             .read_with(cx, |view, _| view.composer().cloned())
@@ -903,7 +924,7 @@ mod hosted {
             composer.read_with(cx, |input, _| input.value().to_string()),
             ""
         );
-        assert_eq!(client.sent.lock().unwrap()[1].1["body"], "Looks good");
+        assert_eq!(client.sent.lock().unwrap()[2].1["body"], "Looks good");
 
         view.update_in(cx, |view, window, cx| {
             view.review(bonsai_providers::Verdict::Approve, window, cx);
@@ -912,7 +933,7 @@ mod hosted {
         view.read_with(cx, |view, _| {
             assert_eq!(view.reviewed(7), Some(bonsai_providers::Verdict::Approve));
         });
-        assert_eq!(client.sent.lock().unwrap()[2].1["event"], "APPROVE");
+        assert_eq!(client.sent.lock().unwrap()[3].1["event"], "APPROVE");
 
         view.update(cx, HostedView::toggle_open);
         cx.run_until_parked();
@@ -925,7 +946,7 @@ mod hosted {
             assert_eq!(view.selected().unwrap().state, ItemState::Open);
         });
         let sent = client.sent.lock().unwrap();
-        assert_eq!(sent[3].1["state"], "closed");
-        assert_eq!(sent[4].1["state"], "open");
+        assert_eq!(sent[4].1["state"], "closed");
+        assert_eq!(sent[5].1["state"], "open");
     }
 }

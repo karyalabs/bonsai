@@ -582,20 +582,79 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
             );
             let response = self.send(Request::get(url), Some(token)).await?;
             let page: Values<CommentBody> = parse(&response.body)?;
+            // A reply names its parent; its thread is the first comment's.
+            let parents: std::collections::HashMap<u64, Option<u64>> = page
+                .values
+                .iter()
+                .map(|c| (c.id, c.parent.as_ref().map(|p| p.id)))
+                .collect();
+            let root = |mut id: u64| {
+                for _ in 0..32 {
+                    match parents.get(&id).copied().flatten() {
+                        Some(parent) => id = parent,
+                        None => break,
+                    }
+                }
+                id
+            };
+            let places: std::collections::HashMap<u64, Place> = page
+                .values
+                .iter()
+                .filter_map(|c| {
+                    let inline = c.inline.as_ref()?;
+                    Some((
+                        c.id,
+                        Place {
+                            path: inline.path.clone(),
+                            line: inline.to,
+                            old_line: inline.to.is_none().then_some(inline.from).flatten(),
+                            resolved: c.resolution.as_ref().is_some_and(|r| !r.is_null()),
+                        },
+                    ))
+                })
+                .collect();
             Ok(page
                 .values
                 .into_iter()
                 .filter(|c| !c.deleted)
-                .filter_map(|mut c| {
-                    let inline = c.inline.take()?;
+                .filter_map(|c| {
+                    let thread = root(c.id);
+                    let place = places.get(&thread)?.clone();
                     Some(LineComment {
-                        path: inline.path,
-                        line: inline.to,
-                        old_line: inline.to.is_none().then_some(inline.from).flatten(),
+                        path: place.path,
+                        line: place.line,
+                        old_line: place.old_line,
+                        thread: thread.to_string(),
+                        resolved: place.resolved,
                         comment: c.into_comment(),
                     })
                 })
                 .collect())
+        })
+    }
+
+    fn reply_to_thread<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>> {
+        Box::pin(async move {
+            let parent: u64 = thread.parse().map_err(|_| Error::NotFound)?;
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{}/pullrequests/{number}/comments", repo_url(full_name)?),
+                        json!({ "content": { "raw": body }, "parent": { "id": parent } })
+                            .to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(parse::<CommentBody>(&response.body)?.into_comment())
         })
     }
 
@@ -634,6 +693,8 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
                     .is_none()
                     .then_some(target.old_line)
                     .flatten(),
+                thread: comment.id.to_string(),
+                resolved: false,
                 comment: comment.into_comment(),
             })
         })
@@ -922,12 +983,30 @@ impl Pull {
 
 #[derive(Deserialize)]
 struct CommentBody {
+    #[serde(default)]
+    id: u64,
+    parent: Option<CommentId>,
+    resolution: Option<serde_json::Value>,
     user: Option<Participant>,
     content: Option<Content>,
     #[serde(default)]
     deleted: bool,
     created_on: String,
     inline: Option<Inline>,
+}
+
+/// Where a thread of line comments sits.
+#[derive(Clone)]
+struct Place {
+    path: String,
+    line: Option<u32>,
+    old_line: Option<u32>,
+    resolved: bool,
+}
+
+#[derive(Deserialize)]
+struct CommentId {
+    id: u64,
 }
 
 #[derive(Deserialize)]

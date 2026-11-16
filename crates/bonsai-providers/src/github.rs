@@ -640,6 +640,8 @@ impl<C: HttpClient> Provider for GitHub<C> {
                         path: c.path,
                         line: if left { None } else { c.line },
                         old_line: if left { c.line } else { None },
+                        thread: c.in_reply_to_id.unwrap_or(c.id).to_string(),
+                        resolved: false,
                         comment: CommentBody {
                             user: c.user,
                             body: c.body,
@@ -690,6 +692,8 @@ impl<C: HttpClient> Provider for GitHub<C> {
                 path: c.path,
                 line: if left { None } else { c.line },
                 old_line: if left { c.line } else { None },
+                thread: c.in_reply_to_id.unwrap_or(c.id).to_string(),
+                resolved: false,
                 comment: CommentBody {
                     user: c.user,
                     body: c.body,
@@ -697,6 +701,39 @@ impl<C: HttpClient> Provider for GitHub<C> {
                 }
                 .into_comment(),
             })
+        })
+    }
+
+    fn reply_to_thread<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>> {
+        Box::pin(async move {
+            let id: u64 = thread.parse().map_err(|_| Error::NotFound)?;
+            let response = self
+                .send(
+                    Request::post(
+                        format!(
+                            "{}/pulls/{number}/comments/{id}/replies",
+                            self.repo_url(full_name)?
+                        ),
+                        json!({ "body": body }).to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            let c: ReviewComment = self.parse(&response.body)?;
+            Ok(CommentBody {
+                user: c.user,
+                body: c.body,
+                created_at: c.created_at,
+            }
+            .into_comment())
         })
     }
 
@@ -918,6 +955,8 @@ impl LabelBody {
 
 #[derive(Deserialize)]
 struct ReviewComment {
+    id: u64,
+    in_reply_to_id: Option<u64>,
     path: String,
     /// `None` when the line is no longer in the diff.
     line: Option<u32>,

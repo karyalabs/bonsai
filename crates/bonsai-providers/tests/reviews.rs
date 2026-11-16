@@ -532,8 +532,8 @@ fn lists_changed_files_on_each_provider() {
         "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/diffstat?pagelen=100",
         json(
             200,
-            r#"{"values":[{"status":"renamed","lines_added":1,"lines_removed":0,"old":{"path":"a.md"},"new":{"path":"b.md"}},
-                          {"status":"removed","lines_added":0,"lines_removed":9,"old":{"path":"c.md"},"new":null}]}"#,
+            r#"{"values":[{"status":"renamed","lines_added":1,"lines_removed":0,"old":{"id":101,"path":"a.md"},"new":{"id":102,"path":"b.md"}},
+                          {"status":"removed","lines_added":0,"lines_removed":9,"old":{"id":103,"path":"c.md"},"new":null}]}"#,
         ),
     )]);
     let files =
@@ -606,9 +606,9 @@ fn reads_line_comments_on_each_provider() {
         "https://api.github.com/repos/ada/engine/pulls/7/comments?per_page=100",
         json(
             200,
-            r#"[{"path":"src/a.rs","line":12,"side":"RIGHT","user":{"login":"grace"},"body":"Rename?","created_at":"2026-11-12T09:00:00Z"},
-                {"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Why remove?","created_at":"2026-11-12T09:00:00Z"},
-                {"path":"src/b.rs","line":null,"side":"RIGHT","user":{"login":"ada"},"body":"Outdated","created_at":"2026-11-12T09:00:00Z"}]"#,
+            r#"[{"id":104,"path":"src/a.rs","line":12,"side":"RIGHT","user":{"login":"grace"},"body":"Rename?","created_at":"2026-11-12T09:00:00Z"},
+                {"id":105,"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Why remove?","created_at":"2026-11-12T09:00:00Z"},
+                {"id":106,"path":"src/b.rs","line":null,"side":"RIGHT","user":{"login":"ada"},"body":"Outdated","created_at":"2026-11-12T09:00:00Z"}]"#,
         ),
     )]);
     let comments =
@@ -622,8 +622,8 @@ fn reads_line_comments_on_each_provider() {
         "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions?per_page=100",
         json(
             200,
-            r#"[{"notes":[{"body":"Looks fine","system":false,"author":{"username":"ada"},"created_at":"2026-11-12T09:00:00Z"}]},
-                {"notes":[{"body":"Off by one","system":false,"author":{"username":"grace"},"created_at":"2026-11-12T09:00:00Z",
+            r#"[{"id":"d0","notes":[{"body":"Looks fine","system":false,"author":{"username":"ada"},"created_at":"2026-11-12T09:00:00Z"}]},
+                {"id":"d2","notes":[{"body":"Off by one","system":false,"author":{"username":"grace"},"created_at":"2026-11-12T09:00:00Z",
                            "position":{"old_path":"a.rs","new_path":"a.rs","old_line":null,"new_line":7}}]}]"#,
         ),
     )]);
@@ -637,8 +637,8 @@ fn reads_line_comments_on_each_provider() {
         "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments?pagelen=100&sort=created_on",
         json(
             200,
-            r#"{"values":[{"user":{"display_name":"Ada Lovelace"},"content":{"raw":"General"},"created_on":"2026-11-12T09:00:00Z"},
-                          {"user":{"display_name":"Grace Hopper"},"content":{"raw":"Here"},"created_on":"2026-11-12T09:00:00Z","inline":{"path":"b.md","from":3,"to":null}}]}"#,
+            r#"{"values":[{"id":1,"user":{"display_name":"Ada Lovelace"},"content":{"raw":"General"},"created_on":"2026-11-12T09:00:00Z"},
+                          {"id":2,"user":{"display_name":"Grace Hopper"},"content":{"raw":"Here"},"created_on":"2026-11-12T09:00:00Z","inline":{"id":107,"path":"b.md","from":3,"to":null}}]}"#,
         ),
     )]);
     let comments =
@@ -668,7 +668,7 @@ fn comments_on_lines_on_each_provider() {
         "https://api.github.com/repos/ada/engine/pulls/7/comments",
         json(
             201,
-            r#"{"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Keep this","created_at":"2026-11-16T09:00:00Z"}"#,
+            r#"{"id":108,"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Keep this","created_at":"2026-11-16T09:00:00Z"}"#,
         ),
     )]);
     let comment = block_on(GitHub::new(&github_client).add_line_comment(
@@ -700,7 +700,7 @@ fn comments_on_lines_on_each_provider() {
             "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions",
             json(
                 201,
-                r#"{"notes":[{"body":"Nice","system":false,"author":{"username":"ada"},"created_at":"2026-11-16T09:00:00Z"}]}"#,
+                r#"{"id":"d3","notes":[{"body":"Nice","system":false,"author":{"username":"ada"},"created_at":"2026-11-16T09:00:00Z"}]}"#,
             ),
         ),
     ]);
@@ -725,7 +725,7 @@ fn comments_on_lines_on_each_provider() {
         "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments",
         json(
             201,
-            r#"{"user":{"display_name":"Ada Lovelace"},"content":{"raw":"Hm"},"created_on":"2026-11-16T09:00:00Z","inline":{"path":"src/a.rs","to":12}}"#,
+            r#"{"user":{"display_name":"Ada Lovelace"},"content":{"raw":"Hm"},"created_on":"2026-11-16T09:00:00Z","inline":{"id":109,"path":"src/a.rs","to":12}}"#,
         ),
     )]);
     block_on(Bitbucket::new(&bitbucket_client).add_line_comment(
@@ -740,4 +740,94 @@ fn comments_on_lines_on_each_provider() {
     let sent: serde_json::Value =
         serde_json::from_slice(&bitbucket_client.requests()[0].body).unwrap();
     assert_eq!(sent["inline"]["to"], 12);
+}
+
+#[test]
+fn groups_and_replies_to_threads_on_each_provider() {
+    let github_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://api.github.com/repos/ada/engine/pulls/7/comments?per_page=100",
+            json(
+                200,
+                r#"[{"id":10,"path":"a.rs","line":3,"side":"RIGHT","user":{"login":"grace"},"body":"Why?","created_at":"2026-11-12T09:00:00Z"},
+                    {"id":11,"in_reply_to_id":10,"path":"a.rs","line":3,"side":"RIGHT","user":{"login":"ada"},"body":"Speed","created_at":"2026-11-12T10:00:00Z"}]"#,
+            ),
+        ),
+        (
+            Method::Post,
+            "https://api.github.com/repos/ada/engine/pulls/7/comments/10/replies",
+            json(
+                201,
+                r#"{"id":12,"in_reply_to_id":10,"path":"a.rs","line":3,"side":"RIGHT","user":{"login":"grace"},"body":"OK","created_at":"2026-11-12T11:00:00Z"}"#,
+            ),
+        ),
+    ]);
+    let github = GitHub::new(&github_client);
+    let comments = block_on(github.line_comments("t", "ada/engine", 7)).unwrap();
+    assert_eq!(comments[0].thread, "10");
+    assert_eq!(comments[1].thread, "10");
+    let reply = block_on(github.reply_to_thread("t", "ada/engine", 7, "10", "OK")).unwrap();
+    assert_eq!(reply.body, "OK");
+
+    let gitlab_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions?per_page=100",
+            json(
+                200,
+                r#"[{"id":"d1","notes":[
+                    {"body":"Off by one","system":false,"resolved":true,"author":{"username":"grace"},"created_at":"2026-11-12T09:00:00Z","position":{"new_path":"a.rs","new_line":7}},
+                    {"body":"Fixed","system":false,"resolved":true,"author":{"username":"ada"},"created_at":"2026-11-12T10:00:00Z","position":{"new_path":"a.rs","new_line":7}}]}]"#,
+            ),
+        ),
+        (
+            Method::Post,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions/d1/notes",
+            json(
+                201,
+                r#"{"body":"Thanks","system":false,"author":{"username":"grace"},"created_at":"2026-11-12T11:00:00Z"}"#,
+            ),
+        ),
+    ]);
+    let gitlab = GitLab::new(&gitlab_client);
+    let comments = block_on(gitlab.line_comments("t", "team/engine", 4)).unwrap();
+    assert_eq!(comments.len(), 2);
+    assert!(comments.iter().all(|c| c.thread == "d1" && c.resolved));
+    block_on(gitlab.reply_to_thread("t", "team/engine", 4, "d1", "Thanks")).unwrap();
+
+    let bitbucket_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments?pagelen=100&sort=created_on",
+            json(
+                200,
+                r#"{"values":[
+                  {"id":1,"user":{"display_name":"Grace Hopper"},"content":{"raw":"Typo"},"created_on":"2026-11-12T09:00:00Z","inline":{"id":110,"path":"b.md","to":2}},
+                  {"id":2,"parent":{"id":1},"user":{"display_name":"Ada Lovelace"},"content":{"raw":"Fixed"},"created_on":"2026-11-12T10:00:00Z"},
+                  {"id":3,"user":{"display_name":"Ada Lovelace"},"content":{"raw":"General"},"created_on":"2026-11-12T10:00:00Z"}]}"#,
+            ),
+        ),
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments",
+            json(
+                201,
+                r#"{"id":4,"parent":{"id":1},"user":{"display_name":"Grace Hopper"},"content":{"raw":"Thanks"},"created_on":"2026-11-12T11:00:00Z"}"#,
+            ),
+        ),
+    ]);
+    let bitbucket = Bitbucket::new(&bitbucket_client);
+    let comments = block_on(bitbucket.line_comments("t", "analytical/engine", 12)).unwrap();
+    assert_eq!(
+        comments.len(),
+        2,
+        "the reply joins its thread; the general comment doesn't"
+    );
+    assert_eq!(comments[1].thread, "1");
+    assert_eq!(comments[1].line, Some(2));
+    block_on(bitbucket.reply_to_thread("t", "analytical/engine", 12, "1", "Thanks")).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&bitbucket_client.requests()[1].body).unwrap();
+    assert_eq!(sent["parent"]["id"], 1);
 }
