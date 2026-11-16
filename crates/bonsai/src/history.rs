@@ -37,6 +37,9 @@ pub const PAGE: usize = 500;
 /// Ref labels drawn on a row before the rest collapse into "+N".
 const MAX_LABELS: usize = 2;
 
+/// How far a jump to a commit pages in before giving up.
+const MAX_SEARCH_DEPTH: usize = 50_000;
+
 /// Rows from the end at which the next page starts loading.
 const PREFETCH: usize = 100;
 
@@ -142,6 +145,17 @@ fn graph_row(commit: &CommitInfo, row: &Row, labels: &HashMap<Oid, Vec<GraphLabe
 type RefsAction = Box<dyn Fn(&mut RefsPanel, &mut Context<RefsPanel>)>;
 type ViewAction = Box<dyn Fn(&mut HistoryView, &mut Context<HistoryView>)>;
 
+/// Where paging through the history stands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Paging {
+    /// Another page may follow.
+    More,
+    /// A page is loading.
+    Loading,
+    /// The history ended.
+    End,
+}
+
 pub struct HistoryView {
     model: Entity<RepositoryModel>,
     refs: Entity<RefsPanel>,
@@ -151,8 +165,7 @@ pub struct HistoryView {
     rows: Vec<GraphRow>,
     labels: HashMap<Oid, Vec<GraphLabel>>,
     search: Search,
-    exhausted: bool,
-    loading: bool,
+    paging: Paging,
     error: Option<SharedString>,
     /// Ignores pages for a search or refresh that has since changed.
     generation: u64,
@@ -162,6 +175,8 @@ pub struct HistoryView {
     refs_key: Option<String>,
     /// Built on first render, which has the window an input needs.
     search_input: Option<Entity<InputState>>,
+    /// Empties the search field on the next render, which has the window.
+    clear_search_field: bool,
     menu: Entity<MenuState>,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
@@ -213,13 +228,13 @@ impl HistoryView {
             rows: Vec::new(),
             labels: HashMap::new(),
             search: Search::default(),
-            exhausted: false,
-            loading: false,
+            paging: Paging::More,
             error: None,
             generation: 0,
             started: false,
             refs_key: None,
             search_input: None,
+            clear_search_field: false,
             menu,
             tasks: Vec::new(),
             subscriptions,
@@ -238,12 +253,12 @@ impl HistoryView {
 
     #[must_use]
     pub fn is_loading(&self) -> bool {
-        self.loading
+        self.paging == Paging::Loading
     }
 
     #[must_use]
     pub fn is_exhausted(&self) -> bool {
-        self.exhausted
+        self.paging == Paging::End
     }
 
     /// Loads the first page the first time the view is shown.
@@ -270,7 +285,7 @@ impl HistoryView {
 
     /// Loads the next page, unless one is loading or the history ended.
     pub fn load_more(&mut self, cx: &mut Context<Self>) {
-        if self.loading || self.exhausted || !self.started {
+        if self.paging != Paging::More || !self.started {
             return;
         }
         self.load(self.commits.len(), PAGE, cx);
@@ -279,7 +294,7 @@ impl HistoryView {
     fn load(&mut self, skip: usize, limit: usize, cx: &mut Context<Self>) {
         self.generation += 1;
         let generation = self.generation;
-        self.loading = true;
+        self.paging = Paging::Loading;
         let snapshot = self.model.read(cx).snapshot();
         self.refs_key = snapshot.map(refs_key);
         self.labels = snapshot.map(labels).unwrap_or_default();
@@ -295,11 +310,13 @@ impl HistoryView {
                 if this.generation != generation {
                     return;
                 }
-                this.loading = false;
+                this.paging = Paging::More;
                 match result {
                     Ok(page) => {
                         this.error = None;
-                        this.exhausted = page.len() < limit;
+                        if page.len() < limit {
+                            this.paging = Paging::End;
+                        }
                         this.apply(skip, page, cx);
                     }
                     Err(error) => this.error = Some(error.to_string().into()),
@@ -339,8 +356,14 @@ impl HistoryView {
         {
             self.graph.set_selected([first.id.clone()]);
         }
-        if let Some(hash) = self.search.hash.clone() {
-            self.reveal_hash(&hash, cx);
+        if let Some(hash) = self.search.hash.clone()
+            && !self.reveal_hash(&hash, cx)
+            && self.paging != Paging::End
+            && self.commits.len() < MAX_SEARCH_DEPTH
+        {
+            // Not loaded yet: keep paging until it turns up.
+            self.load(self.commits.len(), PAGE, cx);
+            return;
         }
         self.rebuild_menu(cx);
         self.emit_selection(cx);
@@ -364,6 +387,24 @@ impl HistoryView {
         true
     }
 
+    /// Selects `oid`, paging in history until it is loaded. Clears a search
+    /// that would hide it.
+    pub fn reveal(&mut self, oid: &Oid, cx: &mut Context<Self>) {
+        self.started = true;
+        self.clear_search_field = true;
+        let had_filter = !self.search.filter.is_empty();
+        self.search = Search {
+            filter: LogFilter::default(),
+            hash: Some(oid.as_str().to_owned()),
+        };
+        if had_filter || self.commits.is_empty() {
+            self.paging = Paging::More;
+            self.load(0, PAGE, cx);
+        } else if !self.reveal_hash(oid.as_str(), cx) && self.paging != Paging::End {
+            self.load(self.commits.len(), PAGE, cx);
+        }
+    }
+
     /// Applies the search field's text.
     pub fn set_search(&mut self, text: &str, cx: &mut Context<Self>) {
         let search = parse_search(text);
@@ -373,7 +414,7 @@ impl HistoryView {
         let refilter = search.filter != self.search.filter;
         self.search = search;
         if refilter {
-            self.exhausted = false;
+            self.paging = Paging::More;
             self.load(0, PAGE, cx);
         } else if let Some(hash) = self.search.hash.clone() {
             self.reveal_hash(&hash, cx);
@@ -657,6 +698,9 @@ impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start(cx);
         let search = self.ensure_search(window, cx);
+        if std::mem::take(&mut self.clear_search_field) {
+            search.update(cx, |input, cx| input.set_value("", window, cx));
+        }
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let commits = self.commits.clone();
@@ -670,7 +714,7 @@ impl Render for HistoryView {
         let row_theme = theme.clone();
         let view = cx.entity().downgrade();
         let len = commits.len();
-        let empty = if self.loading {
+        let empty = if self.paging == Paging::Loading {
             "Reading the history…"
         } else if self.search.filter.is_empty() {
             "No commits yet."
@@ -754,7 +798,7 @@ impl Render for HistoryView {
                     .p(px(4.))
                     .child(context_menu(&self.menu, "Commit actions", graph).size_full()),
             )
-            .when(!self.exhausted && len > 0, |this| {
+            .when(self.paging != Paging::End && len > 0, |this| {
                 this.child(
                     div()
                         .flex()
@@ -770,12 +814,12 @@ impl Render for HistoryView {
                         .child(
                             Button::new("history.more")
                                 .variant(ButtonVariant::Ghost)
-                                .label(if self.loading {
+                                .label(if self.paging == Paging::Loading {
                                     "Loading…"
                                 } else {
                                     "Load More"
                                 })
-                                .disabled(self.loading)
+                                .disabled(self.paging == Paging::Loading)
                                 .on_click(cx.listener(|this, _, _, cx| this.load_more(cx))),
                         ),
                 )
@@ -895,6 +939,57 @@ mod tests {
                 assert_eq!(picked.len(), 1);
                 // The selection survived the reload.
                 assert_eq!(view.selected().map(|c| c.oid.clone()), Some(feature));
+            });
+        }
+
+        #[gpui_kit::test]
+        fn showing_an_old_commit_pages_until_it_loads(cx: &mut TestAppContext) {
+            use std::fmt::Write as _;
+
+            cx.update(crate::ui::theme::init);
+            let dir = tempfile::tempdir().unwrap();
+            let git = Git::locate(None).unwrap();
+            let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+            // 1,200 commits in one fast-import stream; each continues the branch.
+            let mut stream = String::new();
+            for n in 1..=1_200 {
+                let message = format!("commit {n}");
+                let _ = write!(
+                    stream,
+                    "commit refs/heads/main\ncommitter Ada <ada@example.com> {} +0000\ndata {}\n{message}\n",
+                    1_700_000_000 + n,
+                    message.len()
+                );
+                stream.push('\n');
+            }
+            git.run(
+                &git.command(["fast-import", "--quiet"])
+                    .cwd(dir.path())
+                    .stdin(stream.into_bytes()),
+            )
+            .unwrap();
+            let oldest = git
+                .run(
+                    &git.command(["rev-list", "--max-parents=0", "main"])
+                        .cwd(dir.path()),
+                )
+                .unwrap()
+                .stdout_lossy()
+                .trim()
+                .to_owned();
+
+            let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+            let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
+            let history = cx.new(|cx| HistoryView::new(model.clone(), refs, cx));
+            cx.run_until_parked();
+            history.update(cx, |view, cx| view.reveal(&Oid::new(oldest.clone()), cx));
+            cx.run_until_parked();
+            history.read_with(cx, |view, _| {
+                assert_eq!(view.commits().len(), 1_200);
+                assert_eq!(
+                    view.selected().map(|c| c.summary.as_str()),
+                    Some("commit 1")
+                );
             });
         }
     }

@@ -261,14 +261,29 @@ impl Workspace {
                     }
                 });
             let diff_target = diff.downgrade();
-            let refs_events = cx.subscribe(&refs, move |this, _, event: &RefsEvent, cx| {
-                let RefsEvent::ShowDiff(target, title) = event;
-                this.section = Section::Changes;
-                let _ = diff_target.update(cx, |diff, cx| {
-                    diff.show(Some(target.clone()), title.clone(), cx);
+            let refs_events =
+                cx.subscribe(&refs, move |this, refs_entity, event: &RefsEvent, cx| {
+                    match event {
+                        RefsEvent::ShowDiff(target, title) => {
+                            this.section = Section::Changes;
+                            let _ = diff_target.update(cx, |diff, cx| {
+                                diff.show(Some(target.clone()), title.clone(), cx);
+                            });
+                        }
+                        RefsEvent::ShowInHistory(oid) => {
+                            if let Some(history) = this
+                                .tabs
+                                .iter()
+                                .find(|tab| tab.refs == refs_entity)
+                                .map(|tab| tab.history.clone())
+                            {
+                                history.update(cx, |history, cx| history.reveal(oid, cx));
+                                this.set_section(Section::History, cx);
+                            }
+                        }
+                    }
+                    cx.notify();
                 });
-                cx.notify();
-            });
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,

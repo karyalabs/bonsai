@@ -92,6 +92,8 @@ pub enum RefDialog {
 pub enum RefsEvent {
     /// Show this diff, with this title, in the diff pane.
     ShowDiff(DiffTarget, SharedString),
+    /// Select this commit in the History view.
+    ShowInHistory(Oid),
 }
 
 /// Something to switch to.
@@ -633,6 +635,16 @@ impl RefsPanel {
         });
     }
 
+    /// "Show in History" for a ref pointing at `oid`.
+    fn history_item(oid: Oid, cx: &mut Context<Self>) -> MenuItem {
+        let this = cx.entity().downgrade();
+        MenuItem::new("refs.show-in-history", "Show in History")
+            .icon(LucideIcon::GitGraph)
+            .on_click(move |_, _, cx| {
+                let _ = this.update(cx, |_, cx| cx.emit(RefsEvent::ShowInHistory(oid.clone())));
+            })
+    }
+
     fn local_menu(
         &self,
         branch: &Branch,
@@ -641,7 +653,7 @@ impl RefsPanel {
     ) -> Vec<MenuItem> {
         let this = cx.entity().downgrade();
         let name = branch.name.clone();
-        let mut items = Vec::new();
+        let mut items = vec![Self::history_item(branch.oid.clone(), cx)];
         if !branch.is_head {
             items.push(
                 MenuItem::new("refs.checkout", format!("Switch to {name}"))
@@ -762,7 +774,17 @@ impl RefsPanel {
         let full = format!("{remote}/{branch}");
         let target = self.remote_checkout(remote, branch, cx);
         let integrate = self.integrate_items(&full, cx);
-        let mut items = vec![
+        let oid = self.snapshot(cx).and_then(|s| {
+            s.remote_branches
+                .iter()
+                .find(|r| r.remote == remote && r.name == branch)
+                .map(|r| r.oid.clone())
+        });
+        let mut items: Vec<MenuItem> = oid
+            .map(|oid| Self::history_item(oid, cx))
+            .into_iter()
+            .collect();
+        items.extend([
             MenuItem::new(
                 "refs.remote.checkout",
                 format!("Switch to {}", target.label()),
@@ -792,7 +814,7 @@ impl RefsPanel {
                     branch: branch.to_owned(),
                 },
             )),
-        ];
+        ]);
         items.extend(integrate);
         items.push(MenuItem::separator());
         items.push(copy_item(full));
@@ -876,7 +898,16 @@ impl RefsPanel {
     fn tag_menu(&self, tag: &str, snapshot: &Snapshot, cx: &mut Context<Self>) -> Vec<MenuItem> {
         let this = cx.entity().downgrade();
         let name = tag.to_owned();
-        let mut items = vec![
+        let target = snapshot
+            .tags
+            .iter()
+            .find(|t| t.name == name)
+            .map(|t| t.target.clone());
+        let mut items: Vec<MenuItem> = target
+            .map(|oid| Self::history_item(oid, cx))
+            .into_iter()
+            .collect();
+        items.extend([
             MenuItem::new("refs.tag.checkout", "Switch to Tag (Detached)")
                 .icon(LucideIcon::Check)
                 .on_click(with(&this, {
@@ -891,7 +922,7 @@ impl RefsPanel {
                         start: Some(name.clone()),
                     },
                 )),
-        ];
+        ]);
         for (i, remote) in snapshot.remotes.iter().enumerate() {
             let remote = remote.name.clone();
             items.push(
