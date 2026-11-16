@@ -45,7 +45,7 @@ fn commits_amends_and_lists_recent_messages() {
         repository.recent_messages(5).unwrap(),
         ["Add b, better", "Add a\n\nThe first file."]
     );
-    assert!(repository.snapshot().unwrap().changes.is_empty());
+    assert_eq!(repository.snapshot().unwrap().changes.len(), 0);
 }
 
 #[test]
