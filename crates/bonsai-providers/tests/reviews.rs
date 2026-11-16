@@ -527,22 +527,34 @@ fn lists_changed_files_on_each_provider() {
     assert_eq!(files[1].change, FileChange::Removed);
     assert_eq!(files[1].patch, None);
 
-    let bitbucket_client = Recorded::new(vec![(
-        Method::Get,
-        "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/diffstat?pagelen=100",
-        json(
-            200,
-            r#"{"values":[{"status":"renamed","lines_added":1,"lines_removed":0,"old":{"id":101,"path":"a.md"},"new":{"id":102,"path":"b.md"}},
+    let bitbucket_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/diffstat?pagelen=100",
+            json(
+                200,
+                r#"{"values":[{"status":"renamed","lines_added":1,"lines_removed":0,"old":{"id":101,"path":"a.md"},"new":{"id":102,"path":"b.md"}},
                           {"status":"removed","lines_added":0,"lines_removed":9,"old":{"id":103,"path":"c.md"},"new":null}]}"#,
+            ),
         ),
-    )]);
+        (
+            Method::Get,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/diff",
+            json(
+                200,
+                "diff --git a/a.md b/b.md\nsimilarity index 90%\nrename from a.md\nrename to b.md\n--- a/a.md\n+++ b/b.md\n@@ -1 +1,2 @@\n x\n+y\ndiff --git a/c.md b/c.md\ndeleted file mode 100644\n--- a/c.md\n+++ /dev/null\n@@ -1,9 +0,0 @@\n-1\n",
+            ),
+        ),
+    ]);
     let files =
         block_on(Bitbucket::new(&bitbucket_client).changed_files("t", "analytical/engine", 12))
             .unwrap();
     assert_eq!(files[0].path, "b.md");
     assert_eq!(files[0].old_path.as_deref(), Some("a.md"));
+    assert_eq!(files[0].patch.as_deref(), Some("@@ -1 +1,2 @@\n x\n+y"));
     assert_eq!(files[1].path, "c.md");
     assert_eq!(files[1].deletions, 9);
+    assert_eq!(files[1].patch.as_deref(), Some("@@ -1,9 +0,0 @@\n-1"));
 }
 
 #[test]

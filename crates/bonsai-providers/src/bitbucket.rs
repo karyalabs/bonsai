@@ -737,6 +737,13 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
             );
             let response = self.send(Request::get(url), Some(token)).await?;
             let page: Values<DiffStat> = parse(&response.body)?;
+            // The hunks come from the unified diff, which redirects to the
+            // spec's diff. Without it the list still shows.
+            let diff_url = format!("{}/pullrequests/{number}/diff", repo_url(full_name)?);
+            let mut hunks_by_path = match self.send(Request::get(diff_url), Some(token)).await {
+                Ok(diff) => split_diff(&String::from_utf8_lossy(&diff.body)),
+                Err(_) => Vec::new(),
+            };
             Ok(page
                 .values
                 .into_iter()
@@ -749,14 +756,18 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
                         "renamed" => FileChange::Renamed,
                         _ => FileChange::Modified,
                     };
+                    let path = new.clone().or_else(|| old.clone())?;
+                    let hunks = hunks_by_path
+                        .iter()
+                        .position(|(p, _)| *p == path)
+                        .map(|i| hunks_by_path.swap_remove(i).1);
                     Some(ChangedFile {
-                        path: new.clone().or_else(|| old.clone())?,
+                        path,
                         old_path: (change == FileChange::Renamed).then_some(old).flatten(),
                         change,
                         additions: stat.lines_added,
                         deletions: stat.lines_removed,
-                        // The diff endpoint redirects; the list is enough here.
-                        patch: None,
+                        patch: hunks,
                     })
                 })
                 .collect())
@@ -1213,6 +1224,41 @@ fn strip_user(url: &str) -> String {
         }
         None => url.to_owned(),
     }
+}
+
+/// Splits a unified diff into each file's hunks, keyed by its new path (or
+/// its old path when deleted). Files with no hunks, such as binaries, are
+/// left out.
+fn split_diff(diff: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut path: Option<String> = None;
+    let mut hunks = String::new();
+    let mut flush = |path: &mut Option<String>, hunks: &mut String| {
+        if let Some(path) = path.take()
+            && !hunks.is_empty()
+        {
+            out.push((path, hunks.trim_end_matches('\n').to_owned()));
+        }
+        hunks.clear();
+    };
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            flush(&mut path, &mut hunks);
+            // `a/old b/new`; the `+++` line below names it exactly.
+            path = rest.rsplit_once(" b/").map(|(_, new)| new.to_owned());
+        } else if !hunks.is_empty() || line.starts_with("@@") {
+            hunks.push_str(line);
+            hunks.push('\n');
+        } else if let Some(new) = line.strip_prefix("+++ b/") {
+            path = Some(new.to_owned());
+        } else if line == "+++ /dev/null" {
+            // Deleted: keep the old path from the `---` line.
+        } else if let Some(old) = line.strip_prefix("--- a/") {
+            path = Some(old.to_owned());
+        }
+    }
+    flush(&mut path, &mut hunks);
+    out
 }
 
 #[cfg(test)]
