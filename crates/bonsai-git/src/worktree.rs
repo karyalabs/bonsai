@@ -66,7 +66,7 @@ fn pathspec(paths: &[PathBuf]) -> Vec<u8> {
 const PATHSPEC_ARGS: [&str; 2] = ["--pathspec-from-file=-", "--pathspec-file-nul"];
 
 impl Repository {
-    fn work_tree(&self) -> Result<&Path> {
+    pub(crate) fn work_tree(&self) -> Result<&Path> {
         self.work_dir()
             .ok_or_else(|| Error::NotARepository(self.git_dir().to_path_buf()))
     }

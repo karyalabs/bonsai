@@ -1,21 +1,27 @@
 //! The detail pane's diff: loads a patch in the background and shows it with
 //! GPUI Kit's diff, unified or side by side.
 
-use bonsai_git::{DiffOptions, DiffOutput, DiffTarget, Whitespace};
+use bonsai_git::{
+    ApplyMode, DiffOptions, DiffOutput, DiffTarget, LinePosition, LineSide, Whitespace,
+    partial_patch,
+};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
     AppContext as _, Context, Entity, IntoElement, ParentElement as _, Render, SharedString,
     Styled, Subscription, Window,
-    component::diff::{Diff, DiffFile, DiffMode, DiffState},
+    component::diff::{DiffFile, DiffLineRange, DiffMode, DiffSide, DiffState},
     div,
     prelude::FluentBuilder as _,
     px,
 };
 
 use crate::{
+    confirm::{self, Confirm},
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonVariant},
+        dialog::{DialogHandle, dialog},
+        diff::{DiffAction, DiffIntent, DiffView},
         theme::UiTheme,
         toggle_group::{ToggleGroup, ToggleGroupItem},
     },
@@ -42,6 +48,13 @@ pub struct DiffPane {
     title: SharedString,
     status: PaneStatus,
     whitespace: Whitespace,
+    /// The patch on screen, for building partial patches from a selection.
+    patch: Option<String>,
+    discard: DialogHandle,
+    /// The partial patch the open Discard Lines dialog will reverse.
+    pending_discard: Option<String>,
+    /// Why the last line action could not run.
+    error: Option<SharedString>,
     /// Ignores results for a target that has since changed.
     generation: u64,
     _events: Subscription,
@@ -70,6 +83,10 @@ impl DiffPane {
             title: SharedString::default(),
             status: PaneStatus::Nothing,
             whitespace: Whitespace::Show,
+            patch: None,
+            discard: DialogHandle::new(false),
+            pending_discard: None,
+            error: None,
             generation: 0,
             _events: events,
         }
@@ -134,7 +151,7 @@ impl DiffPane {
                 .map_err(|e| e.to_string())
                 .and_then(|output| match output {
                     DiffOutput::Patch(patch) => DiffFile::parse(&patch)
-                        .map(Ok)
+                        .map(|files| Ok((files, patch)))
                         .map_err(|e| format!("Bonsai could not read this diff: {e:?}")),
                     DiffOutput::TooLarge { bytes } => Ok(Err(bytes)),
                 })
@@ -145,13 +162,15 @@ impl DiffPane {
                 if this.generation != generation {
                     return;
                 }
+                this.patch = None;
                 this.status = match result {
-                    Ok(Ok(files)) if files.is_empty() => {
+                    Ok(Ok((files, _))) if files.is_empty() => {
                         this.state
                             .update(cx, |state, cx| state.set_files(Vec::new(), cx));
                         PaneStatus::Empty
                     }
-                    Ok(Ok(files)) => {
+                    Ok(Ok((files, patch))) => {
+                        this.patch = Some(patch);
                         this.state
                             .update(cx, |state, cx| state.set_files(files, cx));
                         PaneStatus::Ready
@@ -171,6 +190,117 @@ impl DiffPane {
             self.whitespace = whitespace;
             self.load(false, cx);
         }
+    }
+
+    /// The line actions the shown diff offers: none for commits, untracked
+    /// files, or while whitespace is hidden (the patch would not apply).
+    fn line_actions(&self) -> Vec<DiffAction> {
+        if self.whitespace != Whitespace::Show {
+            return Vec::new();
+        }
+        match self.target {
+            Some(DiffTarget::Unstaged(_)) => vec![
+                DiffAction::new("stage", "Stage Lines").icon(LucideIcon::Plus),
+                DiffAction::new("discard", "Discard Lines…")
+                    .icon(LucideIcon::Undo2)
+                    .destructive(true),
+            ],
+            Some(DiffTarget::Staged(_)) => {
+                vec![DiffAction::new("unstage", "Unstage Lines").icon(LucideIcon::Minus)]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Stages, unstages or (after confirming) discards the selected lines.
+    pub fn act(&mut self, intent: &DiffIntent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(range) = &intent.range else { return };
+        let mode = match intent.action.as_ref() {
+            "stage" => ApplyMode::Stage,
+            "unstage" => ApplyMode::Unstage,
+            "discard" => ApplyMode::Discard,
+            _ => return,
+        };
+        let Some(partial) = self.partial(range, mode) else {
+            self.error = Some("Select at least one added or removed line.".into());
+            cx.notify();
+            return;
+        };
+        self.error = None;
+        if mode == ApplyMode::Discard {
+            self.pending_discard = Some(partial);
+            self.discard.open(window, cx);
+            cx.notify();
+            return;
+        }
+        self.apply(partial, mode, cx);
+    }
+
+    fn partial(&self, range: &DiffLineRange, mode: ApplyMode) -> Option<String> {
+        let side = |side: DiffSide| match side {
+            DiffSide::Original => LineSide::Old,
+            DiffSide::Modified => LineSide::New,
+        };
+        partial_patch(
+            self.patch.as_deref()?,
+            range.path(),
+            LinePosition::new(side(range.side()), range.start()),
+            LinePosition::new(side(range.end_side()), range.end()),
+            mode,
+        )
+    }
+
+    fn apply(&mut self, partial: String, mode: ApplyMode, cx: &mut Context<Self>) {
+        let name = match mode {
+            ApplyMode::Stage => "Stage lines",
+            ApplyMode::Unstage => "Unstage lines",
+            ApplyMode::Discard => "Discard lines",
+        };
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.apply_patch(&partial, mode),
+                cx,
+            );
+        });
+    }
+
+    fn render_discard(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = confirm::popup(
+            "diff.discard",
+            "Discard these lines?",
+            "The selected changes go back to the staged or committed version. This can't be undone.",
+            cx,
+        )
+        .child(
+            Confirm::new(
+                "diff.discard",
+                "Discard",
+                |this: &mut Self, window, cx| {
+                    this.pending_discard = None;
+                    this.discard.close(window, cx);
+                },
+                |this, window, cx| {
+                    this.discard.close(window, cx);
+                    if let Some(partial) = this.pending_discard.take() {
+                        this.apply(partial, ApplyMode::Discard, cx);
+                    }
+                },
+            )
+            .footer(cx),
+        );
+        let this = cx.entity().downgrade();
+        dialog("diff.discard", &self.discard, popup, window, cx).on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |pane, cx| {
+                pane.pending_discard = None;
+                cx.notify();
+            });
+            true
+        })
     }
 
     fn render_message(
@@ -208,7 +338,7 @@ impl DiffPane {
 }
 
 impl Render for DiffPane {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let body = match &self.status {
@@ -256,7 +386,17 @@ impl Render for DiffPane {
                 &theme,
             )
             .into_any_element(),
-            PaneStatus::Ready => Diff::new(&self.state).into_any_element(),
+            PaneStatus::Ready => {
+                let actions = self.line_actions();
+                let view = cx.entity().downgrade();
+                DiffView::new("diff.view", &self.state)
+                    .read_only(actions.is_empty())
+                    .selection_actions(actions)
+                    .on_intent(move |intent, window, cx| {
+                        let _ = view.update(cx, |pane, cx| pane.act(intent, window, cx));
+                    })
+                    .into_any_element()
+            }
         };
         let mode = self.state.read(cx).mode();
         let layout_state = self.state.clone();
@@ -335,7 +475,18 @@ impl Render for DiffPane {
             .flex()
             .flex_col()
             .when(self.target.is_some(), |this| this.child(toolbar))
+            .when_some(self.error.clone(), |this, error| {
+                this.child(
+                    div()
+                        .px(px(12.))
+                        .py(px(6.))
+                        .text_sm()
+                        .text_color(c.destructive)
+                        .child(error),
+                )
+            })
             .child(div().flex_1().min_h_0().child(body))
+            .child(self.render_discard(window, cx))
     }
 }
 
@@ -384,5 +535,73 @@ mod tests {
         pane.read_with(cx, |pane, _| {
             assert_eq!(pane.status(), &PaneStatus::Nothing);
         });
+    }
+
+    #[gpui_kit::test]
+    fn stages_and_discards_selected_lines(cx: &mut TestAppContext) {
+        use crate::ui::diff::DiffIntent;
+        use gpui_kit::component::diff::{DiffLineRange, DiffSide};
+
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::locate(None).unwrap();
+        let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+        let run = |args: &[&str]| {
+            git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+                .unwrap()
+                .stdout_lossy()
+        };
+        run(&["config", "user.name", "Ada"]);
+        run(&["config", "user.email", "ada@example.com"]);
+        std::fs::write(dir.path().join("f.txt"), "a\nb\nc\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "base"]);
+        std::fs::write(dir.path().join("f.txt"), "a\nX\nb\nY\nc\n").unwrap();
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (pane, cx) = cx.add_window_view(|_, cx| DiffPane::new(model.clone(), cx));
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| {
+            pane.show(Some(DiffTarget::Unstaged(Vec::new())), "f.txt".into(), cx);
+        });
+        cx.run_until_parked();
+        let intent = |action: &str, line: usize| DiffIntent {
+            action: action.into(),
+            path: "f.txt".into(),
+            range: Some(DiffLineRange::new("f.txt", DiffSide::Modified, line, line)),
+        };
+
+        pane.update_in(cx, |pane, window, cx| {
+            assert_eq!(pane.line_actions().len(), 2);
+            pane.act(&intent("stage", 2), window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(run(&["show", ":f.txt"]), "a\nX\nb\nc\n");
+
+        // Discarding asks first, then reverts only the chosen line.
+        pane.update_in(cx, |pane, window, cx| {
+            pane.act(&intent("discard", 4), window, cx);
+            assert!(pane.pending_discard.is_some());
+            assert!(pane.discard.is_open());
+            let partial = pane.pending_discard.take().unwrap();
+            pane.apply(partial, ApplyMode::Discard, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("f.txt")).unwrap(),
+            "a\nX\nb\nc\n"
+        );
+
+        // A staged diff offers Unstage Lines only.
+        pane.update(cx, |pane, cx| {
+            pane.show(Some(DiffTarget::Staged(Vec::new())), "f.txt".into(), cx);
+        });
+        cx.run_until_parked();
+        pane.update_in(cx, |pane, window, cx| {
+            assert_eq!(pane.line_actions().len(), 1);
+            pane.act(&intent("unstage", 2), window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(run(&["show", ":f.txt"]), "a\nb\nc\n");
     }
 }
