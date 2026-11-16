@@ -19,6 +19,7 @@ use crate::{
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     diff_pane::DiffPane,
+    refs::RefsPanel,
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
     ui::{
@@ -46,6 +47,7 @@ struct RepositoryTab {
     model: Entity<RepositoryModel>,
     changes: Entity<ChangesView>,
     diff: Entity<DiffPane>,
+    refs: Entity<RefsPanel>,
     _events: Subscription,
     _changes_events: Subscription,
 }
@@ -141,6 +143,7 @@ impl Workspace {
             });
             let changes = cx.new(|cx| ChangesView::new(model.clone(), cx));
             let diff = cx.new(|cx| DiffPane::new(model.clone(), cx));
+            let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
             let diff_target = diff.downgrade();
             let changes_events = cx.subscribe(&changes, move |_, _, event: &ChangesEvent, cx| {
                 let ChangesEvent::Focused(target, title) = event;
@@ -153,6 +156,7 @@ impl Workspace {
                 model,
                 changes,
                 diff,
+                refs,
                 _changes_events: changes_events,
                 _events: events,
             });
@@ -594,65 +598,27 @@ impl Workspace {
                         cx.notify();
                     })),
             );
-        if let Some(snapshot) = snapshot {
-            sidebar = sidebar.child(div().h(px(12.)));
-            sidebar = sidebar.child(sidebar_group_label("BRANCHES", cx));
-            for branch in &snapshot.branches {
-                let mut item = SidebarItem::new(
-                    SharedString::from(format!("branch:{}", branch.name)),
-                    branch.name.clone(),
-                )
-                .icon(
-                    lucide(LucideIcon::GitBranch)
-                        .size(px(16.))
-                        .text_color(c.sidebar_foreground),
-                )
-                .selected(branch.is_head);
-                if let Some(upstream) = &branch.upstream
-                    && (upstream.ahead > 0 || upstream.behind > 0)
-                {
-                    item = item.trailing(
-                        div()
-                            .text_xs()
-                            .text_color(c.sidebar_foreground)
-                            .child(format!("↑{} ↓{}", upstream.ahead, upstream.behind)),
-                    );
-                }
-                sidebar = sidebar.child(item);
-            }
-            for (label, names, icon) in [
-                (
-                    "REMOTES",
-                    snapshot
-                        .remotes
-                        .iter()
-                        .map(|r| r.name.clone())
-                        .collect::<Vec<_>>(),
-                    LucideIcon::Cloud,
-                ),
-                (
-                    "TAGS",
-                    snapshot.tags.iter().map(|t| t.name.clone()).collect(),
-                    LucideIcon::Tag,
-                ),
-                (
-                    "STASHES",
-                    snapshot.stashes.iter().map(|s| s.message.clone()).collect(),
-                    LucideIcon::Archive,
-                ),
-            ] {
-                if names.is_empty() {
-                    continue;
-                }
-                sidebar = sidebar
-                    .child(div().h(px(12.)))
-                    .child(sidebar_group_label(label, cx));
-                for (index, name) in names.into_iter().enumerate() {
-                    sidebar = sidebar.child(
-                        SidebarItem::new(SharedString::from(format!("{label}:{index}")), name)
-                            .icon(lucide(icon).size(px(16.)).text_color(c.sidebar_foreground)),
-                    );
-                }
+        if let Some(tab) = self.tabs.get(self.active) {
+            sidebar = sidebar.child(tab.refs.clone());
+        }
+        if let Some(snapshot) = snapshot
+            && !snapshot.stashes.is_empty()
+        {
+            sidebar = sidebar
+                .child(div().h(px(12.)))
+                .child(sidebar_group_label("STASHES", cx));
+            for (index, stash) in snapshot.stashes.iter().enumerate() {
+                sidebar = sidebar.child(
+                    SidebarItem::new(
+                        SharedString::from(format!("stash:{index}")),
+                        stash.message.clone(),
+                    )
+                    .icon(
+                        lucide(LucideIcon::Archive)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    ),
+                );
             }
         }
         div().size_full().bg(c.sidebar).child(sidebar)

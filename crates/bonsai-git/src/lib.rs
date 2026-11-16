@@ -5,6 +5,7 @@
 //! they do in the user's terminal (ADR 2). Views never spawn processes; they go
 //! through [`Repository`].
 
+mod branch;
 mod clone;
 mod commit;
 mod diff;
@@ -20,6 +21,7 @@ mod snapshot;
 mod version;
 mod worktree;
 
+pub use branch::{CheckoutBlocker, is_valid_ref_name};
 pub use clone::{CloneProgress, clone_name};
 pub use commit::Signing;
 pub use diff::{DiffOptions, DiffOutput, DiffTarget, Whitespace};
