@@ -243,3 +243,102 @@ fn bitbucket_reads_pull_requests_and_issue_states() {
     assert_eq!(bitbucket.pull_request_ref(12), None);
     assert!(client.finished());
 }
+
+#[test]
+fn conversations_merges_and_new_issues_on_each_provider() {
+    use bonsai_providers::{ItemKind, MergeMethod, NewIssue};
+    let issue = NewIssue {
+        title: "Crash".into(),
+        body: "Steps".into(),
+    };
+    let github_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://api.github.com/repos/ada/engine/issues/7/comments?per_page=100",
+            json(
+                200,
+                r#"[{"user":{"login":"grace","type":"User"},"body":"Looks good","created_at":"2026-11-12T09:00:00Z"},
+                    {"user":{"login":"ci-bot","type":"Bot"},"body":"Coverage 90%","created_at":"2026-11-12T09:01:00Z"}]"#,
+            ),
+        ),
+        (
+            Method::Put,
+            "https://api.github.com/repos/ada/engine/pulls/7/merge",
+            json(200, r#"{"merged":true}"#),
+        ),
+        (
+            Method::Post,
+            "https://api.github.com/repos/ada/engine/issues",
+            json(
+                201,
+                r#"{"number":10,"title":"Crash","body":"Steps","user":{"login":"ada"},"state":"open","labels":[],"comments":0,
+                   "created_at":"2026-11-16T09:00:00Z","updated_at":"2026-11-16T09:00:00Z","html_url":"https://github.com/ada/engine/issues/10"}"#,
+            ),
+        ),
+    ]);
+    let github = GitHub::new(&github_client);
+    let comments = block_on(github.comments("t", "ada/engine", ItemKind::PullRequest, 7)).unwrap();
+    assert_eq!(comments.len(), 1, "bots are left out");
+    assert_eq!(comments[0].author.username, "grace");
+    block_on(github.merge_pull_request("t", "ada/engine", 7, MergeMethod::Squash)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&github_client.requests()[1].body).unwrap();
+    assert_eq!(sent["merge_method"], "squash");
+    let created = block_on(github.create_issue("t", "ada/engine", &issue)).unwrap();
+    assert_eq!(created.number, 10);
+    assert!(github_client.finished());
+
+    let gitlab_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/issues/3/notes?sort=asc&order_by=created_at&per_page=100",
+            json(
+                200,
+                r#"[{"body":"changed the description","system":true,"author":{"username":"ada"},"created_at":"2026-11-12T09:00:00Z"},
+                    {"body":"Can't reproduce","system":false,"author":{"username":"grace","name":"Grace Hopper"},"created_at":"2026-11-12T10:00:00Z"}]"#,
+            ),
+        ),
+        (
+            Method::Put,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/merge",
+            json(200, r#"{"iid":4}"#),
+        ),
+    ]);
+    let gitlab = GitLab::new(&gitlab_client);
+    let notes = block_on(gitlab.comments("t", "team/engine", ItemKind::Issue, 3)).unwrap();
+    assert_eq!(notes.len(), 1, "system notes are left out");
+    assert_eq!(notes[0].author.name(), "Grace Hopper");
+    block_on(gitlab.merge_pull_request("t", "team/engine", 4, MergeMethod::Squash)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&gitlab_client.requests()[1].body).unwrap();
+    assert_eq!(sent["squash"], true);
+    assert!(gitlab_client.finished());
+
+    let bitbucket_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/merge",
+            json(200, r#"{"id":12}"#),
+        ),
+        (
+            Method::Get,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments?pagelen=100&sort=created_on",
+            json(
+                200,
+                r#"{"values":[{"user":{"display_name":"Ada Lovelace","nickname":"ada"},"content":{"raw":"Merging"},"deleted":false,"created_on":"2026-11-12T09:00:00Z"},
+                              {"user":{"display_name":"Grace Hopper"},"content":{"raw":""},"deleted":true,"created_on":"2026-11-12T09:00:00Z"}]}"#,
+            ),
+        ),
+    ]);
+    let bitbucket = Bitbucket::new(&bitbucket_client);
+    block_on(bitbucket.merge_pull_request("t", "analytical/engine", 12, MergeMethod::Rebase))
+        .unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&bitbucket_client.requests()[0].body).unwrap();
+    assert_eq!(sent["merge_strategy"], "fast_forward");
+    let comments =
+        block_on(bitbucket.comments("t", "analytical/engine", ItemKind::PullRequest, 12)).unwrap();
+    assert_eq!(comments.len(), 1, "deleted comments are left out");
+    assert_eq!(comments[0].body, "Merging");
+    assert!(bitbucket_client.finished());
+}

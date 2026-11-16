@@ -58,9 +58,17 @@ fn config(request: &Request) -> Result<String, String> {
         // No Expect: 100-continue round trip.
         "header = \"Expect:\"".to_owned(),
     ];
-    if request.method == Method::Post {
-        lines.push("request = \"POST\"".to_owned());
-        lines.push(format!("data-binary = {}", quote(body)));
+    match request.method {
+        Method::Get => {}
+        Method::Post | Method::Put => {
+            let verb = if request.method == Method::Put {
+                "PUT"
+            } else {
+                "POST"
+            };
+            lines.push(format!("request = \"{verb}\""));
+            lines.push(format!("data-binary = {}", quote(body)));
+        }
     }
     for (name, value) in &request.headers {
         lines.push(format!("header = {}", quote(&format!("{name}: {value}"))));
@@ -173,7 +181,9 @@ impl HttpClient for Replay {
         let found = self
             .0
             .iter()
-            .find(|(key, _)| request.url.contains(key.as_str()))
+            .filter(|(key, _)| request.url.contains(key.as_str()))
+            // The most specific key wins: `/issues/7/comments` over `/issues`.
+            .max_by_key(|(key, _)| key.len())
             .map(|(_, body)| body.clone());
         Box::pin(async move {
             Ok(match found {

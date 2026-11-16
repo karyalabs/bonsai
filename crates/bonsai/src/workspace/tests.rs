@@ -142,6 +142,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.purge",
         "repository.publish",
         "repository.create-pull-request",
+        "repository.new-issue",
         "repository.stash",
         "repository.switch-branch",
         "repository.new-branch",
@@ -633,5 +634,144 @@ mod hosted {
         list.read_with(cx, |list, _| {
             assert_eq!(list.target().unwrap().remote, "origin");
         });
+    }
+
+    /// Answers by method and URL substring, and records what it was sent.
+    struct Routes {
+        routes: Vec<(bonsai_providers::Method, &'static str, String)>,
+        sent: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl HttpClient for Routes {
+        fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, String>> {
+            if !request.body.is_empty() {
+                self.sent.lock().unwrap().push((
+                    request.url.clone(),
+                    serde_json::from_slice(&request.body).unwrap(),
+                ));
+            }
+            let body = self
+                .routes
+                .iter()
+                .find(|(method, key, _)| *method == request.method && request.url.contains(key))
+                .map(|(_, _, body)| body.clone());
+            Box::pin(async move {
+                body.map(|body| Response {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: body.into_bytes(),
+                })
+                .ok_or_else(|| format!("unexpected request: {}", request.url))
+            })
+        }
+    }
+
+    fn ada(root: &std::path::Path, store: &Arc<dyn TokenStore>) {
+        let mut accounts = Accounts::load(accounts_path(root), store.clone());
+        accounts
+            .add(
+                Connected {
+                    account: Account {
+                        kind: ProviderKind::GitHub,
+                        host: "github.com".into(),
+                        api_url: "https://api.github.com".into(),
+                        username: "ada".into(),
+                        display_name: None,
+                        avatar_url: None,
+                    },
+                    method: SignInMethod::Token,
+                },
+                &Secret::new("t"),
+            )
+            .unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn reads_the_conversation_merges_and_opens_issues(cx: &mut TestAppContext) {
+        use bonsai_providers::Method;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let local = root.join("engine");
+        Repository::init(&Git::locate(None).unwrap(), &local, Some("main")).unwrap();
+        git(
+            &local,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/ada/engine.git",
+            ],
+        );
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+        ada(&root, &store);
+        let client = Arc::new(Routes {
+            routes: vec![
+                (Method::Get, "/pulls?", format!("[{}]", pull(7, "feature/sync", "ada/engine", false))),
+                (
+                    Method::Get,
+                    "/issues/7/comments",
+                    r#"[{"user":{"login":"grace","type":"User"},"body":"Ship it","created_at":"2026-11-12T09:00:00Z"}]"#.into(),
+                ),
+                (Method::Put, "/pulls/7/merge", r#"{"merged":true}"#.into()),
+                (Method::Get, "/issues?", "[]".into()),
+                (
+                    Method::Post,
+                    "/repos/ada/engine/issues",
+                    r#"{"number":10,"title":"Crash","body":"","user":{"login":"ada"},"state":"open","labels":[],"comments":0,"created_at":"2026-11-16T09:00:00Z","updated_at":"2026-11-16T09:00:00Z","html_url":"https://github.com/ada/engine/issues/10"}"#.into(),
+                ),
+            ],
+            sent: std::sync::Mutex::new(Vec::new()),
+        });
+        let (workspace, cx) = setup(cx, Session::default(), None);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_hosted_env(HostedEnv {
+                accounts_path: accounts_path(&root),
+                store,
+                client: client.clone(),
+            });
+            workspace.open_path(&local, true, cx).unwrap();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(commands::ShowPullRequests);
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
+        view.update(cx, HostedView::load_conversation);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let Some(crate::hosted::Conversation::Loaded(comments)) = view.conversation(7) else {
+                panic!("comments load");
+            };
+            assert_eq!(comments[0].body, "Ship it");
+        });
+
+        view.update(cx, |view, cx| {
+            view.set_merge_method(bonsai_providers::MergeMethod::Squash, cx);
+            view.merge(cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected().unwrap().state, ItemState::Merged);
+        });
+        let merged = client.sent.lock().unwrap()[0].clone();
+        assert!(merged.0.ends_with("/pulls/7/merge"));
+        assert_eq!(merged.1["merge_method"], "squash");
+
+        cx.dispatch_action(commands::NewIssue);
+        cx.run_until_parked();
+        let sheet = workspace
+            .read_with(cx, |w, _| w.new_issue_sheet().cloned())
+            .expect("the sheet opens");
+        let title = sheet.read_with(cx, |sheet, _| sheet.title_input().clone());
+        title.update_in(cx, |input, window, cx| input.set_value("Crash", window, cx));
+        sheet.update(cx, crate::new_issue_sheet::NewIssueSheet::submit);
+        cx.run_until_parked();
+        sheet.read_with(cx, |sheet, _| {
+            assert_eq!(sheet.error(), None);
+            assert!(matches!(
+                sheet.phase(),
+                crate::new_issue_sheet::Phase::Done(issue) if issue.number == 10
+            ));
+        });
+        assert_eq!(client.sent.lock().unwrap()[1].1["title"], "Crash");
     }
 }

@@ -5,10 +5,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Error, HttpClient, Issue, ItemQuery, ItemState, Label,
-    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
-    github::next_link, oauth::Tokens, percent_encode,
+    Account, BoxFuture, Capabilities, Comment, Error, HttpClient, Issue, ItemKind, ItemQuery,
+    ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
+    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result,
+    StateFilter, form_encode, github::next_link, oauth::Tokens, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -404,6 +404,86 @@ impl<C: HttpClient> Provider for GitLab<C> {
         })
     }
 
+    fn comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<Comment>>> {
+        Box::pin(async move {
+            let path = match kind {
+                ItemKind::PullRequest => "merge_requests",
+                ItemKind::Issue => "issues",
+            };
+            let url = format!(
+                "{}/{path}/{number}/notes?sort=asc&order_by=created_at&per_page=100",
+                self.project_url(full_name)
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let notes: Vec<Note> = self.parse(&response.body)?;
+            Ok(notes
+                .into_iter()
+                // System notes are GitLab's own ("added 1 commit").
+                .filter(|note| !note.system)
+                .map(|note| Comment {
+                    author: note.author.map(User::into_person).unwrap_or_default(),
+                    body: note.body,
+                    created_at: note.created_at,
+                })
+                .collect())
+        })
+    }
+
+    fn merge_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        method: MergeMethod,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            // The project decides merge commit or fast-forward; a request
+            // can only ask to squash.
+            let body = json!({ "squash": method == MergeMethod::Squash });
+            self.send(
+                Request::put(
+                    format!(
+                        "{}/merge_requests/{number}/merge",
+                        self.project_url(full_name)
+                    ),
+                    body.to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn create_issue<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewIssue,
+    ) -> BoxFuture<'a, Result<Issue>> {
+        Box::pin(async move {
+            let body = json!({ "title": new.title, "description": new.body });
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{}/issues", self.project_url(full_name)),
+                        body.to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(self.parse::<IssueBody>(&response.body)?.into_issue())
+        })
+    }
+
     fn pull_request_ref(&self, number: u64) -> Option<String> {
         Some(format!("merge-requests/{number}/head"))
     }
@@ -440,6 +520,15 @@ fn labels(names: Vec<String>) -> Vec<Label> {
         .into_iter()
         .map(|name| Label { name, color: None })
         .collect()
+}
+
+#[derive(Deserialize)]
+struct Note {
+    body: String,
+    author: Option<User>,
+    #[serde(default)]
+    system: bool,
+    created_at: String,
 }
 
 #[derive(Deserialize)]

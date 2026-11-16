@@ -9,6 +9,7 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub enum Method {
     Get,
     Post,
+    Put,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -31,6 +32,15 @@ impl Request {
     }
 
     #[must_use]
+    pub fn put(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
+        Self {
+            method: Method::Put,
+            url: url.into(),
+            headers: Vec::new(),
+            body: body.into(),
+        }
+    }
+
     pub fn post(url: impl Into<String>, body: impl Into<Vec<u8>>) -> Self {
         Self {
             method: Method::Post,
