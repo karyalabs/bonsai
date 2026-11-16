@@ -1,6 +1,7 @@
 //! The Settings sheet. Every change applies and saves at once.
 
 use bonsai_git::Git;
+use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _, Render,
     SharedString, Styled, Subscription, Window, div, prelude::FluentBuilder as _, px,
@@ -9,10 +10,11 @@ use gpui_kit::{
 use crate::{
     settings::{self, AppearanceSetting, PullSetting, Settings},
     ui::{
-        button::{Button, ButtonSize, ButtonVariant},
+        button::Button,
         dialog::{dialog_footer, dialog_title},
         input::{Input, InputEvent, InputState},
         theme::UiTheme,
+        toggle_group::{ToggleGroup, ToggleGroupItem},
     },
 };
 
@@ -115,15 +117,134 @@ impl SettingsSheet {
         &self.detected
     }
 
-    fn row(label: &'static str, cx: &mut Context<Self>) -> gpui_kit::Div {
-        let theme = UiTheme::read(cx);
-        div().flex().flex_col().gap(px(4.)).child(
-            div()
-                .text_xs()
-                .text_color(theme.colors.muted_foreground)
-                .child(label),
-        )
+    /// A settings row: the label and a line on what it does on the left,
+    /// the control on the right.
+    fn row(
+        label: &'static str,
+        caption: impl Into<SharedString>,
+        caption_color: Option<gpui_kit::Rgba>,
+        control: impl IntoElement,
+        theme: &UiTheme,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .items_center()
+            .gap(px(16.))
+            .px(px(14.))
+            .py(px(10.))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(div().text_sm().child(label))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(caption_color.unwrap_or(theme.colors.muted_foreground))
+                            .child(caption.into()),
+                    ),
+            )
+            .child(div().flex_none().child(control))
     }
+
+    /// A field row: the label and caption above a full-width input.
+    fn field_row(
+        label: &'static str,
+        caption: impl Into<SharedString>,
+        caption_color: Option<gpui_kit::Rgba>,
+        input: impl IntoElement,
+        theme: &UiTheme,
+    ) -> gpui_kit::Div {
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .px(px(14.))
+            .py(px(10.))
+            .child(div().text_sm().child(label))
+            .child(input)
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(caption_color.unwrap_or(theme.colors.muted_foreground))
+                    .child(caption.into()),
+            )
+    }
+
+    fn section(
+        title: &'static str,
+        icon: LucideIcon,
+        rows: Vec<gpui_kit::Div>,
+        theme: &UiTheme,
+    ) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(c.border);
+        for (i, row) in rows.into_iter().enumerate() {
+            card = card.child(row.when(i > 0, |row| row.border_t_1().border_color(c.border)));
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .text_color(c.muted_foreground)
+                    .child(lucide(icon).size(px(12.)).text_color(c.muted_foreground))
+                    .child(title.to_uppercase()),
+            )
+            .child(card)
+    }
+}
+
+/// A segmented control over `options`, saving the picked one with `apply`.
+fn segmented<T: Copy + PartialEq + 'static>(
+    id: &'static str,
+    label: &'static str,
+    current: T,
+    options: &[(T, &'static str)],
+    apply: impl Fn(&mut Settings, T) + Copy + 'static,
+    cx: &mut Context<SettingsSheet>,
+) -> ToggleGroup {
+    let selected = options
+        .iter()
+        .position(|(value, _)| *value == current)
+        .map(|i| SharedString::from(i.to_string()));
+    let values: Vec<T> = options.iter().map(|(value, _)| *value).collect();
+    let mut group = ToggleGroup::new(id)
+        .aria_label(label)
+        .segmented(true)
+        .value(selected);
+    for (i, (_, text)) in options.iter().enumerate() {
+        group = group.item(
+            ToggleGroupItem::new(SharedString::from(format!("{id}.{i}")), i.to_string())
+                .aria_label(*text)
+                .child(*text),
+        );
+    }
+    let this = cx.entity().downgrade();
+    group.on_change(move |next, _, cx| {
+        let Some(value) = next
+            .first()
+            .and_then(|i| i.parse::<usize>().ok())
+            .and_then(|i| values.get(i).copied())
+        else {
+            return;
+        };
+        let _ = this.update(cx, |sheet, cx| sheet.save(cx, |s| apply(s, value)));
+    })
 }
 
 impl Render for SettingsSheet {
@@ -131,94 +252,126 @@ impl Render for SettingsSheet {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let current = settings::get(cx);
-        let choice = |id: &'static str, label: &'static str, selected: bool| {
-            Button::new(id)
-                .variant(if selected {
-                    ButtonVariant::Secondary
-                } else {
-                    ButtonVariant::Ghost
-                })
-                .size(ButtonSize::Sm)
-                .label(label)
-        };
-        let appearance = div().flex().gap(px(4.)).children(
-            [
-                (
-                    AppearanceSetting::System,
-                    "System",
-                    "settings.appearance.system",
-                ),
-                (
-                    AppearanceSetting::Light,
-                    "Light",
-                    "settings.appearance.light",
-                ),
-                (AppearanceSetting::Dark, "Dark", "settings.appearance.dark"),
-            ]
-            .map(|(value, label, id)| {
-                choice(id, label, current.appearance == value).on_click(
-                    cx.listener(move |this, _, _, cx| this.save(cx, |s| s.appearance = value)),
-                )
-            }),
+        let appearance = segmented(
+            "settings.appearance",
+            "Appearance",
+            current.appearance,
+            &[
+                (AppearanceSetting::System, "System"),
+                (AppearanceSetting::Light, "Light"),
+                (AppearanceSetting::Dark, "Dark"),
+            ],
+            |s, value| s.appearance = value,
+            cx,
         );
-        let pull = div().flex().gap(px(4.)).children(
-            [
-                (PullSetting::Merge, "Merge", "settings.pull.merge"),
-                (PullSetting::Rebase, "Rebase", "settings.pull.rebase"),
-                (
-                    PullSetting::FastForwardOnly,
-                    "Fast-forward only",
-                    "settings.pull.ff",
-                ),
-            ]
-            .map(|(value, label, id)| {
-                choice(id, label, current.pull == value)
-                    .on_click(cx.listener(move |this, _, _, cx| this.save(cx, |s| s.pull = value)))
-            }),
+        let pull = segmented(
+            "settings.pull",
+            "Pull",
+            current.pull,
+            &[
+                (PullSetting::Merge, "Merge"),
+                (PullSetting::Rebase, "Rebase"),
+                (PullSetting::FastForwardOnly, "Fast-forward"),
+            ],
+            |s, value| s.pull = value,
+            cx,
         );
-        let fetch = div().flex().gap(px(4.)).children(
-            [
-                (0, "Off", "settings.fetch.off"),
-                (5, "5 min", "settings.fetch.5"),
-                (10, "10 min", "settings.fetch.10"),
-                (30, "30 min", "settings.fetch.30"),
-            ]
-            .map(|(minutes, label, id)| {
-                choice(id, label, current.auto_fetch_minutes == minutes).on_click(cx.listener(
-                    move |this, _, _, cx| this.save(cx, |s| s.auto_fetch_minutes = minutes),
-                ))
-            }),
+        let fetch = segmented(
+            "settings.fetch",
+            "Fetch in the background",
+            current.auto_fetch_minutes,
+            &[(0, "Off"), (5, "5 min"), (10, "10 min"), (30, "30 min")],
+            |s, value| s.auto_fetch_minutes = value,
+            cx,
         );
         let (detected, detected_color) = match &self.detected {
-            Ok(found) => (format!("{found}. New tabs use it."), c.muted_foreground),
-            Err(error) => (error.to_string(), c.destructive),
+            Ok(found) => (format!("{found}. New tabs use it."), None),
+            Err(error) => (error.to_string(), Some(c.destructive)),
+        };
+        let pull_caption = match current.pull {
+            PullSetting::Merge => "Merges the upstream into your branch when they diverge.",
+            PullSetting::Rebase => "Replays your commits on top of the upstream.",
+            PullSetting::FastForwardOnly => {
+                "Only moves your branch forward; stops if they diverge."
+            }
         };
         div()
             .flex()
             .flex_col()
-            .gap(px(12.))
+            .gap(px(16.))
             .child(dialog_title("settings.title", cx).child("Settings"))
-            .child(Self::row("Appearance", cx).child(appearance))
-            .child(Self::row("Pull", cx).child(pull))
-            .child(Self::row("Fetch in the background", cx).child(fetch))
-            .child(
-                Self::row("Git", cx)
-                    .child(Input::new(&self.git_path).aria_label("Git path"))
-                    .child(div().text_xs().text_color(detected_color).child(detected)),
-            )
-            .child(Self::row("Editor", cx).child(Input::new(&self.editor).aria_label("Editor")))
-            .child(
-                Self::row("Terminal", cx).child(Input::new(&self.terminal).aria_label("Terminal")),
-            )
+            .child(Self::section(
+                "General",
+                LucideIcon::SlidersHorizontal,
+                vec![Self::row(
+                    "Appearance",
+                    "Follow macOS or pick a side.",
+                    None,
+                    appearance,
+                    &theme,
+                )],
+                &theme,
+            ))
+            .child(Self::section(
+                "Syncing",
+                LucideIcon::RefreshCw,
+                vec![
+                    Self::row("Pull", pull_caption, None, pull, &theme),
+                    Self::row(
+                        "Fetch in the background",
+                        "Keeps ahead and behind counts current.",
+                        None,
+                        fetch,
+                        &theme,
+                    ),
+                ],
+                &theme,
+            ))
+            .child(Self::section(
+                "Tools",
+                LucideIcon::Wrench,
+                vec![
+                    Self::field_row(
+                        "Git",
+                        detected,
+                        detected_color,
+                        Input::new(&self.git_path).aria_label("Git path"),
+                        &theme,
+                    ),
+                    Self::field_row(
+                        "Editor",
+                        "Open in Editor uses it. Leave empty for each file's default app.",
+                        None,
+                        Input::new(&self.editor).aria_label("Editor"),
+                        &theme,
+                    ),
+                    Self::field_row(
+                        "Terminal",
+                        "Open in Terminal uses it.",
+                        None,
+                        Input::new(&self.terminal).aria_label("Terminal"),
+                        &theme,
+                    ),
+                ],
+                &theme,
+            ))
             .when_some(self.error.clone(), |this, error| {
                 this.child(div().text_xs().text_color(c.destructive).child(error))
             })
             .child(
-                dialog_footer(cx).child(
-                    Button::new("settings.done")
-                        .label("Done")
-                        .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Dismissed))),
-                ),
+                dialog_footer(cx)
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child("Changes save as you make them."),
+                    )
+                    .child(
+                        Button::new("settings.done")
+                            .label("Done")
+                            .on_click(cx.listener(|_, _, _, cx| cx.emit(SettingsEvent::Dismissed))),
+                    ),
             )
     }
 }

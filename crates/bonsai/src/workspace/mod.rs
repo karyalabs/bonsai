@@ -634,10 +634,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let popup = dialog_popup("workspace.settings.popup", "Settings", cx).when_some(
-            self.settings.as_ref().map(|(sheet, _)| sheet.clone()),
-            gpui_kit::ParentElement::child,
-        );
+        let popup = dialog_popup("workspace.settings.popup", "Settings", cx)
+            .max_w(px(560.))
+            .when_some(
+                self.settings.as_ref().map(|(sheet, _)| sheet.clone()),
+                gpui_kit::ParentElement::child,
+            );
         let this = cx.entity().downgrade();
         dialog(
             "workspace.settings",
@@ -685,6 +687,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let popup = dialog_popup("workspace.accounts.popup", "Accounts", cx)
+            .max_w(px(540.))
             .when_some(self.accounts.clone(), gpui_kit::ParentElement::child);
         let this = cx.entity().downgrade();
         dialog(
@@ -803,10 +806,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
-        let popup = dialog_popup("workspace.publish.popup", "Publish Repository", cx).when_some(
-            self.publish_sheet().cloned(),
-            gpui_kit::ParentElement::child,
-        );
+        let popup = dialog_popup("workspace.publish.popup", "Publish Repository", cx)
+            .max_w(px(520.))
+            .when_some(
+                self.publish_sheet().cloned(),
+                gpui_kit::ParentElement::child,
+            );
         let this = cx.entity().downgrade();
         dialog("workspace.publish", &self.publish_handle, popup, window, cx).on_cancel(
             move |_, _, cx| {
@@ -826,6 +831,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let content = self.purge.clone();
         let popup = dialog_popup("workspace.purge.popup", "Purge from History", cx)
+            .max_w(px(620.))
             .when_some(content.clone(), gpui_kit::ParentElement::child);
         dialog("workspace.purge", &self.purge_handle, popup, window, cx).on_cancel(
             move |_, _, cx| {
@@ -1598,6 +1604,7 @@ impl Workspace {
     ) -> impl IntoElement + use<> {
         let content = self.clone.clone();
         let popup = dialog_popup("workspace.clone.popup", "Clone Repository", cx)
+            .max_w(px(520.))
             .when_some(content.clone(), gpui_kit::ParentElement::child);
         let cancel_target = content;
         dialog("workspace.clone", &self.clone_handle, popup, window, cx).on_cancel(

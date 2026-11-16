@@ -19,8 +19,11 @@ use gpui_kit::{
     prelude::FluentBuilder as _, px,
 };
 
+use gpui_icons::{LucideIcon, lucide};
+
 use crate::{
     confirm::Confirm,
+    file_icon::file_icon,
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonVariant},
@@ -535,7 +538,7 @@ impl PurgeSheet {
         let is_pattern = query.contains(['*', '?', '[']);
         let chosen = self.selected.len() + self.patterns.len();
         let list = div()
-            .h(px(260.))
+            .h(px(300.))
             .flex()
             .flex_col()
             .border_1()
@@ -557,6 +560,7 @@ impl PurgeSheet {
             .flex_col()
             .gap(px(10.))
             .child(dialog_title("purge.title", cx).child("Purge from History"))
+            .child(stepper(0, &theme))
             .child(dialog_description("purge.description", cx).child(
                 "Remove files such as a committed .env from every commit on every branch and tag. The files stay on disk, untracked.",
             ))
@@ -645,6 +649,16 @@ impl PurgeSheet {
                             }),
                     )
                     .child(
+                        lucide(if folder {
+                            LucideIcon::Folder
+                        } else {
+                            file_icon(Path::new(row.id.as_ref()))
+                        })
+                        .size(px(14.))
+                        .flex_none()
+                        .text_color(c.muted_foreground),
+                    )
+                    .child(
                         div()
                             .min_w_0()
                             .truncate()
@@ -676,42 +690,41 @@ impl PurgeSheet {
         let name = self.repository_name(cx);
         let ready = scan.blockers.is_empty() && scan.found();
         let can_purge = ready && self.confirmed(cx);
-        let plural = |n: usize, word: &str| format!("{n} {word}{}", if n == 1 { "" } else { "s" });
-        let mut facts = vec![
-            format!(
-                "{} touch {}.",
-                plural(scan.commits.len(), "commit"),
-                scan.paths
-                    .iter()
-                    .take(5)
-                    .map(|p| p.to_string_lossy().into_owned())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-                    + if scan.paths.len() > 5 { ", …" } else { "" }
-            ),
-            format!(
-                "Rewrites {}: {}.",
-                plural(scan.refs.len(), "ref"),
-                scan.refs
-                    .iter()
-                    .take(6)
-                    .map(|r| short_ref(r))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-                    + if scan.refs.len() > 6 { ", …" } else { "" }
-            ),
-        ];
-        if !scan.stashes.is_empty() {
-            facts.push(format!(
-                "Drops {} built on the old history (kept in the backup).",
-                plural(scan.stashes.len(), "stash")
-            ));
-        }
+        let pills = |items: Vec<String>, limit: usize| {
+            let extra = items.len().saturating_sub(limit);
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(4.))
+                .children(items.into_iter().take(limit).map(|item| pill(item, &theme)))
+                .when(extra > 0, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child(format!("and {extra} more")),
+                    )
+                })
+        };
+        let label = |text: &str| {
+            div()
+                .text_xs()
+                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                .text_color(c.muted_foreground)
+                .child(text.to_uppercase())
+        };
+        let paths: Vec<String> = scan
+            .paths
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        let refs: Vec<String> = scan.refs.iter().map(|r| short_ref(r)).collect();
         div()
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(12.))
             .child(dialog_title("purge.title", cx).child("Purge from History"))
+            .child(stepper(1, &theme))
             .when(!scan.found(), |this| {
                 this.child(dialog_description("purge.none", cx).child("Nothing in this repository's history matches."))
             })
@@ -719,26 +732,40 @@ impl PurgeSheet {
                 this.child(
                     div()
                         .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .text_sm()
-                        .children(facts),
+                        .gap(px(8.))
+                        .child(stat(scan.commits.len(), "commits to rewrite", &theme))
+                        .child(stat(scan.refs.len(), "branches and tags", &theme))
+                        .child(stat(scan.stashes.len(), "stashes to drop", &theme)),
                 )
+                .child(div().flex().flex_col().gap(px(6.)).child(label("Files")).child(pills(paths, 12)))
                 .child(
                     div()
-                        .p(px(8.))
-                        .rounded(px(6.))
-                        .bg(c.muted)
-                        .text_xs()
                         .flex()
                         .flex_col()
-                        .gap(px(4.))
-                        .child("Commit hashes from the first affected commit onward change, and signatures on rewritten commits and tags are dropped.")
-                        .child("Bonsai saves a backup first and never pushes on its own. Anyone who already cloned keeps the old commits, so rotate the secret too."),
+                        .gap(px(6.))
+                        .child(label("Branches and tags"))
+                        .child(pills(refs, 12)),
                 )
+                .child(callout(
+                    LucideIcon::TriangleAlert,
+                    c.warning,
+                    &[
+                        "Commit hashes change from the first affected commit onward, and signatures on rewritten commits and tags are dropped.",
+                        "Bonsai saves a backup first and never pushes on its own. Anyone who already cloned keeps the old commits, so rotate the secret too.",
+                    ],
+                    &theme,
+                ))
             })
             .children(scan.blockers.iter().map(|b| {
-                div().text_sm().text_color(c.destructive).child(b.message())
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_sm()
+                    .text_color(c.destructive)
+                    .child(lucide(LucideIcon::CircleAlert).size(px(14.))
+.flex_none().text_color(c.destructive))
+                    .child(b.message())
             }))
             .when(ready, |this| {
                 this.child(
@@ -834,7 +861,14 @@ impl PurgeSheet {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(dialog_title("purge.title", cx).child("History Purged"))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(lucide(LucideIcon::CircleCheck).size(px(18.)).text_color(c.success))
+                    .child(dialog_title("purge.title", cx).child("History Purged")),
+            )
             .child(div().flex().flex_col().gap(px(4.)).text_sm().children(summary))
             .child(
                 div()
@@ -850,14 +884,12 @@ impl PurgeSheet {
                 )
                 .child(pushes)
             })
-            .child(
-                div()
-                    .p(px(8.))
-                    .rounded(px(6.))
-                    .bg(c.muted)
-                    .text_xs()
-                    .child("Rotate the secret now. Hosting services can keep old commits in caches, forks and pull request refs even after a force push."),
-            )
+            .child(callout(
+                LucideIcon::KeyRound,
+                c.warning,
+                &["Rotate the secret now. Hosting services can keep old commits in caches, forks and pull request refs even after a force push."],
+                &theme,
+            ))
             .child(
                 dialog_footer(cx)
                     .child(
@@ -885,6 +917,137 @@ impl PurgeSheet {
             )
             .into_any_element()
     }
+}
+
+/// The three steps across the top of the sheet, with `current` highlighted
+/// and the ones before it checked.
+fn stepper(current: usize, theme: &UiTheme) -> gpui_kit::Div {
+    let c = &theme.colors;
+    let mut row = div().flex().items_center().gap(px(8.));
+    for (i, label) in ["Choose files", "Review", "Rewrite"]
+        .into_iter()
+        .enumerate()
+    {
+        if i > 0 {
+            row = row.child(div().w(px(24.)).h(px(1.)).bg(c.border));
+        }
+        let done = i < current;
+        let active = i == current;
+        row = row.child(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_xs()
+                .text_color(if active {
+                    c.foreground
+                } else {
+                    c.muted_foreground
+                })
+                .when(active, |this| {
+                    this.font_weight(gpui_kit::FontWeight::MEDIUM)
+                })
+                .child(
+                    div()
+                        .size(px(18.))
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .when(done, |this| {
+                            this.bg(c.primary).child(
+                                lucide(LucideIcon::Check)
+                                    .size(px(10.))
+                                    .text_color(c.primary_foreground),
+                            )
+                        })
+                        .when(active, |this| {
+                            this.bg(c.primary)
+                                .text_color(c.primary_foreground)
+                                .child((i + 1).to_string())
+                        })
+                        .when(!done && !active, |this| {
+                            this.border_1()
+                                .border_color(c.border)
+                                .child((i + 1).to_string())
+                        }),
+                )
+                .child(label),
+        );
+    }
+    row
+}
+
+/// A tinted note with an icon: a warning before a rewrite, advice after.
+fn callout(
+    icon: LucideIcon,
+    tint: gpui_kit::Rgba,
+    lines: &[&str],
+    theme: &UiTheme,
+) -> gpui_kit::Div {
+    div()
+        .flex()
+        .gap(px(10.))
+        .p(px(10.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(tint.opacity(0.35))
+        .bg(tint.opacity(0.08))
+        .child(
+            lucide(icon)
+                .size(px(14.))
+                .flex_none()
+                .mt(px(1.))
+                .text_color(tint),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .text_xs()
+                .text_color(theme.colors.foreground)
+                .children(lines.iter().map(|line| (*line).to_owned())),
+        )
+}
+
+/// A big number with a label under it.
+fn stat(value: usize, label: &str, theme: &UiTheme) -> gpui_kit::Div {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .gap(px(2.))
+        .p(px(10.))
+        .rounded(px(8.))
+        .border_1()
+        .border_color(theme.colors.border)
+        .child(
+            div()
+                .text_lg()
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(value.to_string()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(theme.colors.muted_foreground)
+                .child(label.to_owned()),
+        )
+}
+
+/// A path or ref as a small monospace pill.
+fn pill(text: String, theme: &UiTheme) -> gpui_kit::Div {
+    div()
+        .px(px(6.))
+        .py(px(1.))
+        .rounded(px(4.))
+        .bg(theme.colors.muted)
+        .font_family(theme.fonts.mono.clone())
+        .text_xs()
+        .child(text)
 }
 
 fn short_ref(name: &str) -> String {
@@ -923,16 +1086,53 @@ impl Render for PurgeSheet {
             Phase::Restoring => status("Restoring the backup…".to_owned()),
             Phase::Running => {
                 let step = self.step.lock().ok().and_then(|s| *s);
-                status(
-                    match step {
-                        None => "Waiting for other operations to finish…",
-                        Some(PurgeStep::Backup) => "Saving a backup of every branch and tag…",
-                        Some(PurgeStep::Rewrite) => "Rewriting history…",
-                        Some(PurgeStep::Cleanup) => "Expiring reflogs and removing old objects…",
-                        Some(PurgeStep::Verify) => "Checking nothing still has the files…",
-                    }
-                    .to_owned(),
-                )
+                let order = [
+                    (PurgeStep::Backup, "Save a backup of every branch and tag"),
+                    (PurgeStep::Rewrite, "Rewrite history"),
+                    (PurgeStep::Cleanup, "Expire reflogs and remove old objects"),
+                    (PurgeStep::Verify, "Check nothing still has the files"),
+                ];
+                let current = step.and_then(|step| order.iter().position(|(s, _)| *s == step));
+                let mut list = div().flex().flex_col().gap(px(8.));
+                for (i, (_, label)) in order.iter().enumerate() {
+                    let (icon, color) = match current {
+                        Some(at) if i < at => (LucideIcon::CircleCheck, c.success),
+                        Some(at) if i == at => (LucideIcon::LoaderCircle, c.foreground),
+                        _ => (LucideIcon::Circle, c.muted_foreground),
+                    };
+                    list = list.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_sm()
+                            .text_color(if current.is_some_and(|at| i <= at) {
+                                c.foreground
+                            } else {
+                                c.muted_foreground
+                            })
+                            .child(lucide(icon).size(px(14.)).text_color(color))
+                            .child(*label),
+                    );
+                }
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(12.))
+                    .child(dialog_title("purge.title", cx).child("Purge from History"))
+                    .child(stepper(2, &theme))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(c.muted_foreground)
+                            .child(if step.is_none() {
+                                "Waiting for other operations to finish…"
+                            } else {
+                                "Keep Bonsai open until this finishes."
+                            }),
+                    )
+                    .child(list)
+                    .into_any_element()
             }
             Phase::Preview(scan) => self.render_preview(&scan, cx),
             Phase::Done(report) => self.render_done(&report, cx),

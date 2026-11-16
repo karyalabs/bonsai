@@ -15,7 +15,6 @@ use gpui_kit::{
 use crate::{
     accounts::{Accounts, Connected, SignInMethod, default_host, provider},
     ui::{
-        avatar::{Avatar, AvatarSize},
         button::{Button, ButtonSize, ButtonVariant},
         dialog::{dialog_description, dialog_footer, dialog_title},
         input::{Input, InputEvent, InputState},
@@ -372,131 +371,53 @@ impl AccountsSheet {
                 format!(
                     "https://{host}/settings/tokens/new?scopes=repo,read:org&description=Bonsai"
                 ),
-                "Scopes: repo and read:org.",
+                "The page opens with the scopes Bonsai needs, repo and read:org, already ticked.",
             ),
             ProviderKind::GitLab => (
                 format!(
                     "https://{host}/-/user_settings/personal_access_tokens?name=Bonsai&scopes=api,read_user,write_repository"
                 ),
-                "Scopes: api, read_user and write_repository.",
+                "The page opens with the scopes Bonsai needs, api, read_user and write_repository, already ticked.",
             ),
             ProviderKind::Bitbucket => (
                 "https://id.atlassian.com/manage-profile/security/api-tokens".to_owned(),
-                "Create an API token with scopes, and allow reading and writing repositories.",
+                "Choose Create API token with scopes, then allow reading and writing repositories.",
             ),
         }
     }
 
     fn render_list(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let theme = UiTheme::read(cx).clone();
-        let c = &theme.colors;
-        let mut list = div().flex().flex_col().gap(px(8.));
-        if self.accounts.list().is_empty() {
-            list = list.child(
-                div()
-                    .text_sm()
-                    .text_color(c.muted_foreground)
-                    .child("Connect an account to browse your repositories, clone them, and publish new ones. Git uses the account's token for HTTPS remotes on its host."),
-            );
+        let mut cards = div().flex().flex_col().gap(px(10.));
+        for kind in [
+            ProviderKind::GitHub,
+            ProviderKind::GitLab,
+            ProviderKind::Bitbucket,
+        ] {
+            cards = cards.child(self.render_provider(kind, &theme, cx));
         }
-        for (i, connected) in self.accounts.list().iter().enumerate() {
-            let key = connected.key();
-            let account = &connected.account;
-            let (status, color) = match self.statuses.get(&key) {
-                Some(Status::Connected) => ("Connected".to_owned(), c.muted_foreground),
-                Some(Status::Expired) => ("Expired".to_owned(), c.destructive),
-                Some(Status::Missing) => ("No token".to_owned(), c.destructive),
-                Some(Status::Unreachable(e)) => (e.to_string(), c.warning),
-                Some(Status::Checking) | None => ("Checking…".to_owned(), c.muted_foreground),
-            };
-            let needs_sign_in = matches!(
-                self.statuses.get(&key),
-                Some(Status::Expired | Status::Missing)
-            );
-            let name = account
-                .display_name
-                .clone()
-                .unwrap_or_else(|| account.username.clone());
-            let initials: String = name.chars().take(1).collect::<String>().to_uppercase();
-            let kind = account.kind;
-            let host = account.host.clone();
-            list = list.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(
-                        Avatar::new(("accounts.avatar", i))
-                            .size(AvatarSize::Sm)
-                            .fallback(initials)
-                            .aria_label(name.clone()),
-                    )
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .flex()
-                            .flex_col()
-                            .child(div().text_sm().child(format!(
-                                "{} · {}",
-                                account.username,
-                                kind.name()
-                            )))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(color)
-                                    .overflow_hidden()
-                                    .whitespace_nowrap()
-                                    .text_ellipsis()
-                                    .child(format!("{} · {status}", account.host)),
-                            ),
-                    )
-                    .when(needs_sign_in, |this| {
-                        this.child(
-                            Button::new(("accounts.again", i))
-                                .variant(ButtonVariant::Outline)
-                                .size(ButtonSize::Sm)
-                                .label("Sign In")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.show_add(kind, window, cx);
-                                    this.host.update(cx, |input, cx| {
-                                        input.set_value(host.clone(), window, cx);
-                                    });
-                                })),
-                        )
-                    })
-                    .child(
-                        Button::new(("accounts.sign-out", i))
-                            .variant(ButtonVariant::Ghost)
-                            .size(ButtonSize::Sm)
-                            .label("Sign Out")
-                            .on_click(cx.listener(move |this, _, _, cx| this.sign_out(&key, cx))),
-                    ),
-            );
-        }
-        let add = |kind: ProviderKind| {
-            Button::new(SharedString::from(format!("accounts.add.{}", kind.name())))
-                .variant(ButtonVariant::Outline)
-                .size(ButtonSize::Sm)
-                .label(kind.name())
-                .on_click(cx.listener(move |this, _, window, cx| this.show_add(kind, window, cx)))
-        };
         div()
             .flex()
             .flex_col()
             .gap(px(12.))
             .child(dialog_title("accounts.title", cx).child("Accounts"))
-            .child(list)
+            .child(dialog_description("accounts.description", cx).child(
+                "Browse, clone and publish repositories with your accounts. Git uses an account's token for HTTPS remotes on its host.",
+            ))
+            .child(cards)
             .child(
                 div()
                     .flex()
                     .items_center()
                     .gap(px(6.))
-                    .child(div().text_sm().mr(px(4.)).child("Add"))
-                    .child(add(ProviderKind::GitHub))
-                    .child(add(ProviderKind::GitLab))
-                    .child(add(ProviderKind::Bitbucket)),
+                    .text_xs()
+                    .text_color(theme.colors.muted_foreground)
+                    .child(
+                        lucide(LucideIcon::LockKeyhole)
+                            .size(px(12.))
+                            .text_color(theme.colors.muted_foreground),
+                    )
+                    .child("Tokens stay in your Keychain."),
             )
             .child(
                 dialog_footer(cx).child(
@@ -508,58 +429,328 @@ impl AccountsSheet {
             .into_any_element()
     }
 
+    /// One provider's card: its mark, what it covers, its connected accounts
+    /// and a button to add one.
+    fn render_provider(
+        &self,
+        kind: ProviderKind,
+        theme: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let (mark, color, caption) = match kind {
+            ProviderKind::GitHub => (
+                "GH",
+                gpui_kit::rgb(0x0024_292f),
+                "github.com or GitHub Enterprise",
+            ),
+            ProviderKind::GitLab => (
+                "GL",
+                gpui_kit::rgb(0x00e2_4329),
+                "gitlab.com or a self-managed GitLab",
+            ),
+            ProviderKind::Bitbucket => ("BB", gpui_kit::rgb(0x0000_52cc), "bitbucket.org"),
+        };
+        // GitHub's near-black mark would vanish on a dark card.
+        let github_inverted =
+            kind == ProviderKind::GitHub && theme.mode == crate::ui::theme::ThemeMode::Dark;
+        let connected: Vec<(usize, &Connected)> = self
+            .accounts
+            .list()
+            .iter()
+            .enumerate()
+            .filter(|(_, connected)| connected.account.kind == kind)
+            .collect();
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(12.))
+            .child(
+                div()
+                    .size(px(32.))
+                    .flex_none()
+                    .rounded(px(8.))
+                    .bg(if github_inverted {
+                        gpui_kit::rgb(0x00f0_f6fc)
+                    } else {
+                        color
+                    })
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_xs()
+                    .font_weight(gpui_kit::FontWeight::BOLD)
+                    .text_color(if github_inverted {
+                        color
+                    } else {
+                        gpui_kit::rgb(0x00ff_ffff)
+                    })
+                    .child(mark),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(kind.name()),
+                    )
+                    .child(div().text_xs().text_color(c.muted_foreground).child(
+                        if connected.is_empty() {
+                            caption.to_owned()
+                        } else if connected.len() == 1 {
+                            "1 account".to_owned()
+                        } else {
+                            format!("{} accounts", connected.len())
+                        },
+                    )),
+            )
+            .child(
+                Button::new(SharedString::from(format!("accounts.add.{}", kind.name())))
+                    .variant(if connected.is_empty() {
+                        ButtonVariant::Default
+                    } else {
+                        ButtonVariant::Outline
+                    })
+                    .size(ButtonSize::Sm)
+                    .label(if connected.is_empty() {
+                        "Connect"
+                    } else {
+                        "Add Another"
+                    })
+                    .on_click(
+                        cx.listener(move |this, _, window, cx| this.show_add(kind, window, cx)),
+                    ),
+            );
+        let mut card = div()
+            .flex()
+            .flex_col()
+            .rounded(px(10.))
+            .border_1()
+            .border_color(c.border)
+            .child(div().p(px(12.)).child(header));
+        for (i, connected) in connected {
+            card = card.child(self.render_account(i, connected, theme, cx));
+        }
+        card
+    }
+
+    fn render_account(
+        &self,
+        i: usize,
+        connected: &Connected,
+        theme: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let key = connected.key();
+        let account = &connected.account;
+        let (status, color, icon) = match self.statuses.get(&key) {
+            Some(Status::Connected) => ("Connected".to_owned(), c.success, LucideIcon::CircleCheck),
+            Some(Status::Expired) => (
+                "Token expired".to_owned(),
+                c.destructive,
+                LucideIcon::CircleAlert,
+            ),
+            Some(Status::Missing) => (
+                "Token missing".to_owned(),
+                c.destructive,
+                LucideIcon::CircleAlert,
+            ),
+            Some(Status::Unreachable(e)) => (e.to_string(), c.warning, LucideIcon::TriangleAlert),
+            Some(Status::Checking) | None => (
+                "Checking…".to_owned(),
+                c.muted_foreground,
+                LucideIcon::LoaderCircle,
+            ),
+        };
+        let needs_sign_in = matches!(
+            self.statuses.get(&key),
+            Some(Status::Expired | Status::Missing)
+        );
+        let name = account
+            .display_name
+            .clone()
+            .unwrap_or_else(|| account.username.clone());
+        let kind = account.kind;
+        let host = account.host.clone();
+        div()
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .px(px(12.))
+            .py(px(10.))
+            .border_t_1()
+            .border_color(c.border)
+            .child(crate::avatar::avatar(
+                &name,
+                &format!("{}@{}", account.username, account.host),
+                px(28.),
+                theme.mode == crate::ui::theme::ThemeMode::Dark,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap(px(6.))
+                            .child(div().text_sm().child(name.clone()))
+                            .when(name != account.username, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(c.muted_foreground)
+                                        .child(format!("@{}", account.username)),
+                                )
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .overflow_hidden()
+                            .whitespace_nowrap()
+                            .child(lucide(icon).size(px(11.)).flex_none().text_color(color))
+                            .child(div().text_color(color).child(status))
+                            .child(format!("· {}", account.host)),
+                    ),
+            )
+            .when(needs_sign_in, |this| {
+                this.child(
+                    Button::new(("accounts.again", i))
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Sm)
+                        .label("Sign In")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.show_add(kind, window, cx);
+                            this.host.update(cx, |input, cx| {
+                                input.set_value(host.clone(), window, cx);
+                            });
+                        })),
+                )
+            })
+            .child(
+                Button::new(("accounts.sign-out", i))
+                    .variant(ButtonVariant::Ghost)
+                    .size(ButtonSize::Sm)
+                    .label("Sign Out")
+                    .on_click(cx.listener(move |this, _, _, cx| this.sign_out(&key, cx))),
+            )
+    }
+
     fn render_add(&self, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let (page, scopes) = self.token_page(cx);
         let kind = self.kind;
-        let token_label = match &self.token {
-            Some(token) => format!(
-                "Token pasted ({} characters)",
-                token.expose().chars().count()
-            ),
-            None => "No token yet".to_owned(),
-        };
+        let pasted = self
+            .token
+            .as_ref()
+            .map(|token| token.expose().chars().count());
         let device = kind == ProviderKind::GitHub && GITHUB_CLIENT_ID.is_some();
-        div()
+        let step = |n: usize, done: bool, title: String, body: gpui_kit::AnyElement| {
+            div()
+                .flex()
+                .gap(px(12.))
+                .child(
+                    div()
+                        .size(px(22.))
+                        .flex_none()
+                        .rounded_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .when(done, |this| {
+                            this.bg(c.success).child(
+                                lucide(LucideIcon::Check)
+                                    .size(px(12.))
+                                    .text_color(c.success_foreground),
+                            )
+                        })
+                        .when(!done, |this| {
+                            this.bg(c.muted)
+                                .text_color(c.foreground)
+                                .child(n.to_string())
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .child(title),
+                        )
+                        .child(body),
+                )
+        };
+        let where_field = if kind == ProviderKind::Bitbucket {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child("Atlassian account email"),
+                )
+                .child(Input::new(&self.email).aria_label("Email"))
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(div().text_xs().text_color(c.muted_foreground).child("Host"))
+                .child(Input::new(&self.host).aria_label("Host"))
+        };
+        let create = div()
             .flex()
             .flex_col()
-            .gap(px(10.))
+            .gap(px(8.))
+            .child(div().text_xs().text_color(c.muted_foreground).child(scopes))
             .child(
-                dialog_title("accounts.add.title", cx)
-                    .child(format!("Add {} Account", kind.name())),
-            )
+                div().flex().child(
+                    Button::new("accounts.create-token")
+                        .variant(ButtonVariant::Outline)
+                        .size(ButtonSize::Sm)
+                        .label(format!("Open {} Token Page", kind.name()))
+                        .on_click(move |_, _, cx| cx.open_url(&page)),
+                ),
+            );
+        let paste = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
             .child(
-                dialog_description("accounts.add.description", cx).child(format!(
-                    "Create a token on {}, copy it, then paste it here. {scopes}",
-                    kind.name()
-                )),
-            )
-            .when(kind != ProviderKind::Bitbucket, |this| {
-                this.child(Input::new(&self.host).aria_label("Host"))
-            })
-            .when(kind == ProviderKind::Bitbucket, |this| {
-                this.child(Input::new(&self.email).aria_label("Email"))
-            })
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .child(
-                        Button::new("accounts.create-token")
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Sm)
-                            .label("Create Token…")
-                            .on_click(move |_, _, cx| cx.open_url(&page)),
-                    )
-                    .child(
-                        Button::new("accounts.paste")
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Sm)
-                            .label("Paste Token")
-                            .on_click(cx.listener(|this, _, _, cx| this.paste_token(cx))),
-                    ),
+                Button::new("accounts.paste")
+                    .variant(ButtonVariant::Outline)
+                    .size(ButtonSize::Sm)
+                    .label(if pasted.is_some() {
+                        "Paste Again"
+                    } else {
+                        "Paste Token"
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.paste_token(cx))),
             )
             .child(
                 div()
@@ -573,10 +764,55 @@ impl AccountsSheet {
                             .size(px(12.))
                             .text_color(c.muted_foreground),
                     )
-                    .child(token_label),
+                    .child(match pasted {
+                        Some(count) => format!("Token pasted, {count} characters, hidden"),
+                        None => "Bonsai reads it from the clipboard".to_owned(),
+                    }),
+            );
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(14.))
+            .child(dialog_title("accounts.add.title", cx).child(format!("Connect {}", kind.name())))
+            .child(
+                dialog_description("accounts.add.description", cx).child(format!(
+                    "Bonsai signs in to {} with {} and keeps it in your Keychain.",
+                    kind.name(),
+                    if kind == ProviderKind::Bitbucket {
+                        "an API token"
+                    } else {
+                        "a personal access token"
+                    }
+                )),
             )
+            .child(where_field)
+            .child(step(
+                1,
+                false,
+                format!("Create a token on {}", kind.name()),
+                create.into_any_element(),
+            ))
+            .child(step(
+                2,
+                pasted.is_some(),
+                "Copy it, then paste it here".to_owned(),
+                paste.into_any_element(),
+            ))
             .when_some(self.error.clone(), |this, error| {
-                this.child(div().text_xs().text_color(c.destructive).child(error))
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_xs()
+                        .text_color(c.destructive)
+                        .child(
+                            lucide(LucideIcon::CircleAlert)
+                                .size(px(12.))
+                                .text_color(c.destructive),
+                        )
+                        .child(error),
+                )
             })
             .child(
                 dialog_footer(cx)
