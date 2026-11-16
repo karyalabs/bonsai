@@ -1,5 +1,7 @@
 //! GitHub and GitHub Enterprise Server: OAuth device flow and REST v3.
 
+use std::fmt::Write as _;
+
 use serde::Deserialize;
 use serde_json::json;
 
@@ -178,7 +180,7 @@ impl<C: HttpClient> GitHub<C> {
                 user.username
             );
             for org in self.organizations(token).await? {
-                q.push_str(&format!(" org:{org}"));
+                let _ = write!(q, " org:{org}");
             }
             format!(
                 "{}/search/repositories?per_page={PER_PAGE}&sort=updated&q={}",
