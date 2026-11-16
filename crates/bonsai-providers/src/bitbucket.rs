@@ -700,6 +700,30 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
         })
     }
 
+    fn set_thread_resolved<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        resolved: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let id: u64 = thread.parse().map_err(|_| Error::NotFound)?;
+            let url = format!(
+                "{}/pullrequests/{number}/comments/{id}/resolve",
+                repo_url(full_name)?
+            );
+            let request = if resolved {
+                Request::post(url, "{}").header("Content-Type", "application/json")
+            } else {
+                Request::delete(url)
+            };
+            self.send(request, Some(token)).await?;
+            Ok(())
+        })
+    }
+
     fn changed_files<'a>(
         &'a self,
         token: &'a str,

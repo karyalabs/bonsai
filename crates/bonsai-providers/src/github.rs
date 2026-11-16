@@ -205,6 +205,72 @@ impl<C: HttpClient> GitHub<C> {
 }
 
 impl<C: HttpClient> GitHub<C> {
+    /// The GraphQL endpoint: `/graphql` beside the REST root, or
+    /// `/api/graphql` on Enterprise Server.
+    fn graphql_url(&self) -> String {
+        match self.api.strip_suffix("/api/v3") {
+            Some(host) => format!("{host}/api/graphql"),
+            None => format!("{}/graphql", self.api),
+        }
+    }
+
+    async fn graphql<T: serde::de::DeserializeOwned>(
+        &self,
+        token: &str,
+        query: &str,
+        variables: serde_json::Value,
+    ) -> Result<T> {
+        let response = self
+            .send(
+                Request::post(
+                    self.graphql_url(),
+                    json!({ "query": query, "variables": variables }).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+        let body: GraphQlResponse<T> = self.parse(&response.body)?;
+        if let Some(error) = body.errors.and_then(|e| e.into_iter().next()) {
+            return Err(Error::Rejected(error.message));
+        }
+        body.data.ok_or_else(|| Error::Parse {
+            host: self.host.clone(),
+            message: "GraphQL answered without data".to_owned(),
+        })
+    }
+
+    /// A pull request's review threads: node id, whether resolved, and the
+    /// REST id of the first comment.
+    async fn review_threads(
+        &self,
+        token: &str,
+        full_name: &str,
+        number: u64,
+    ) -> Result<Vec<ThreadInfo>> {
+        let (owner, name) = full_name.split_once('/').ok_or(Error::NotFound)?;
+        let query = "query($owner: String!, $name: String!, $number: Int!) { repository(owner: $owner, name: $name) { pullRequest(number: $number) { reviewThreads(first: 100) { nodes { id isResolved comments(first: 1) { nodes { databaseId } } } } } } }";
+        let data: ThreadsData = self
+            .graphql(
+                token,
+                query,
+                json!({ "owner": owner, "name": name, "number": number }),
+            )
+            .await?;
+        Ok(data
+            .repository
+            .and_then(|r| r.pull_request)
+            .map(|p| p.review_threads.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| ThreadInfo {
+                first_comment: t.comments.nodes.first().and_then(|c| c.database_id),
+                id: t.id,
+                resolved: t.is_resolved,
+            })
+            .collect())
+    }
+
     fn repo_url(&self, full_name: &str) -> Result<String> {
         let (owner, name) = full_name.split_once('/').ok_or(Error::NotFound)?;
         Ok(format!(
@@ -632,16 +698,30 @@ impl<C: HttpClient> Provider for GitHub<C> {
             );
             let response = self.send(Request::get(url), Some(token)).await?;
             let comments: Vec<ReviewComment> = self.parse(&response.body)?;
+            // Only GraphQL says which threads are resolved; without it they
+            // show as open.
+            let resolved: std::collections::HashSet<u64> = if comments.is_empty() {
+                std::collections::HashSet::new()
+            } else {
+                self.review_threads(token, full_name, number)
+                    .await
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter(|t| t.resolved)
+                    .filter_map(|t| t.first_comment)
+                    .collect()
+            };
             Ok(comments
                 .into_iter()
                 .map(|c| {
                     let left = c.side.as_deref() == Some("LEFT");
+                    let thread = c.in_reply_to_id.unwrap_or(c.id);
                     LineComment {
                         path: c.path,
                         line: if left { None } else { c.line },
                         old_line: if left { c.line } else { None },
-                        thread: c.in_reply_to_id.unwrap_or(c.id).to_string(),
-                        resolved: false,
+                        thread: thread.to_string(),
+                        resolved: resolved.contains(&thread),
                         comment: CommentBody {
                             user: c.user,
                             body: c.body,
@@ -734,6 +814,34 @@ impl<C: HttpClient> Provider for GitHub<C> {
                 created_at: c.created_at,
             }
             .into_comment())
+        })
+    }
+
+    fn set_thread_resolved<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        resolved: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            // Threads are GraphQL-only: find the one whose first comment
+            // is `thread`, then resolve it by its node id.
+            let threads = self.review_threads(token, full_name, number).await?;
+            let node = threads
+                .into_iter()
+                .find(|t| t.first_comment == Some(thread.parse().unwrap_or(0)))
+                .ok_or(Error::NotFound)?
+                .id;
+            let mutation = if resolved {
+                "mutation($id: ID!) { resolveReviewThread(input: {threadId: $id}) { thread { id } } }"
+            } else {
+                "mutation($id: ID!) { unresolveReviewThread(input: {threadId: $id}) { thread { id } } }"
+            };
+            self.graphql::<serde_json::Value>(token, mutation, json!({ "id": node }))
+                .await?;
+            Ok(())
         })
     }
 
@@ -951,6 +1059,59 @@ impl LabelBody {
             color: self.color.filter(|c| c.len() == 6),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct GraphQlResponse<T> {
+    data: Option<T>,
+    errors: Option<Vec<GraphQlError>>,
+}
+
+#[derive(Deserialize)]
+struct GraphQlError {
+    message: String,
+}
+
+struct ThreadInfo {
+    id: String,
+    resolved: bool,
+    first_comment: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct ThreadsData {
+    repository: Option<ThreadsRepository>,
+}
+
+#[derive(Deserialize)]
+struct ThreadsRepository {
+    #[serde(rename = "pullRequest")]
+    pull_request: Option<ThreadsPull>,
+}
+
+#[derive(Deserialize)]
+struct ThreadsPull {
+    #[serde(rename = "reviewThreads")]
+    review_threads: Nodes<ThreadNode>,
+}
+
+#[derive(Deserialize)]
+struct Nodes<T> {
+    nodes: Vec<T>,
+}
+
+#[derive(Deserialize)]
+struct ThreadNode {
+    id: String,
+    #[serde(rename = "isResolved")]
+    is_resolved: bool,
+    comments: Nodes<ThreadComment>,
+}
+
+#[derive(Deserialize)]
+struct ThreadComment {
+    #[serde(rename = "databaseId")]
+    database_id: Option<u64>,
 }
 
 #[derive(Deserialize)]

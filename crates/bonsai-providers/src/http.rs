@@ -11,6 +11,7 @@ pub enum Method {
     Post,
     Put,
     Patch,
+    Delete,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,6 +49,16 @@ impl Request {
             url: url.into(),
             headers: Vec::new(),
             body: body.into(),
+        }
+    }
+
+    #[must_use]
+    pub fn delete(url: impl Into<String>) -> Self {
+        Self {
+            method: Method::Delete,
+            url: url.into(),
+            headers: Vec::new(),
+            body: Vec::new(),
         }
     }
 
