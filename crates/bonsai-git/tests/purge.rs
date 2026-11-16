@@ -366,6 +366,8 @@ fn force_pushes_rewritten_branches_with_a_lease() {
     );
     run(root, &["push", "-q", "origin", "main", "feature"]);
     run(root, &["fetch", "-q", "origin"]);
+    // Newer Git sets origin/HEAD on fetch; it must stay a symbolic ref.
+    run(root, &["remote", "set-head", "origin", "main"]);
 
     let backups = tempfile::tempdir().unwrap();
     let report = repository
@@ -383,7 +385,11 @@ fn force_pushes_rewritten_branches_with_a_lease() {
             })
         })
         .collect();
-    assert_eq!(rewritten.len(), 2);
+    assert_eq!(rewritten.len(), 2, "{rewritten:?}");
+    assert_eq!(
+        run(root, &["symbolic-ref", "refs/remotes/origin/HEAD"]).trim(),
+        "refs/remotes/origin/main"
+    );
     repository
         .push_rewritten("origin", &rewritten, None, None)
         .unwrap();

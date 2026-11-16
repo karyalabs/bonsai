@@ -209,12 +209,21 @@ impl Repository {
         Ok(blockers)
     }
 
-    /// Every ref except stashes and Bonsai's own, with its target.
+    /// Every ref except stashes, Bonsai's own and symbolic refs (such as
+    /// `refs/remotes/origin/HEAD`, which follow their target), with its
+    /// target.
     fn refs(&self) -> Result<BTreeMap<String, Oid>> {
-        let output = self.git_out(["for-each-ref", "--format=%(objectname) %(refname)"])?;
+        let output = self.git_out([
+            "for-each-ref",
+            "--format=%(objectname) %(refname) %(symref)",
+        ])?;
         Ok(String::from_utf8_lossy(&output)
             .lines()
-            .filter_map(|line| line.split_once(' '))
+            .filter_map(|line| {
+                let mut fields = line.splitn(3, ' ');
+                let (oid, name, symref) = (fields.next()?, fields.next()?, fields.next()?);
+                symref.is_empty().then_some((oid, name))
+            })
             .filter(|(_, name)| *name != "refs/stash" && !name.starts_with("refs/bonsai/"))
             .map(|(oid, name)| (name.to_owned(), Oid::new(oid)))
             .collect())
