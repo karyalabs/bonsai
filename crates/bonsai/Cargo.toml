@@ -1,0 +1,36 @@
+[package]
+name = "bonsai"
+description = "A native Git client for macOS"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+default-run = "bonsai"
+
+[dependencies]
+bonsai-git = { path = "../bonsai-git" }
+bonsai-graph = { path = "../bonsai-graph" }
+bonsai-keychain = { path = "../bonsai-keychain" }
+bonsai-providers = { path = "../bonsai-providers" }
+# gpuicn pins: keep these four together and move them with `gpuicn update`.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit"] }
+gpui-icons = "=0.7.0"
+gpui-kit = { version = "=0.9.1", default-features = false, features = ["component", "tree-sitter-languages"] }
+gpuicn = "=0.12.1"
+web-time = "1.1"
+futures = "0.3"
+notify = "8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"
+gpui-kit = { version = "=0.9.1", default-features = false, features = ["component", "test-support"] }
+
+[features]
+# Compile Metal shaders at runtime instead of build time (CI without Xcode's Metal toolchain).
+runtime_shaders = ["gpui_platform/runtime_shaders"]
+
+[lints]
+workspace = true
