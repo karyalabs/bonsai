@@ -258,47 +258,9 @@ impl Git {
     /// Runs `command` and returns its output whatever the exit code. Only a
     /// failure to start or a cancellation is an error.
     pub fn run_unchecked(&self, command: &GitCommand) -> Result<Output> {
-        let mut process = Command::new(&self.program);
-        process
-            .args(["-c", "color.ui=never", "-c", "core.quotepath=false"])
-            .args(&command.args)
-            .env("GIT_TERMINAL_PROMPT", "0")
-            .env("GIT_OPTIONAL_LOCKS", "0")
-            .stdin(if command.stdin.is_some() {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        // Its own process group, so cancelling also stops hooks, credential
-        // helpers and ssh that Git started (they hold the output pipes open).
-        #[cfg(unix)]
-        std::os::unix::process::CommandExt::process_group(&mut process, 0);
-        if let Some(askpass) = &self.askpass {
-            process
-                .env("GIT_ASKPASS", askpass)
-                .env(ASKPASS_MODE_ENV, "1");
-        }
-        for (key, value) in &self.env {
-            process.env(key, value);
-        }
-        if let Some(cwd) = &command.cwd {
-            process.current_dir(cwd);
-        }
-        for (key, value) in &command.env {
-            process.env(key, value);
-        }
-
         let started_at = SystemTime::now();
         let started = Instant::now();
-        let mut child = process.spawn().map_err(|error| {
-            if error.kind() == std::io::ErrorKind::NotFound {
-                Error::GitNotFound
-            } else {
-                Error::Spawn(error)
-            }
-        })?;
+        let mut child = self.spawn(command)?;
 
         let stdin_writer = command.stdin.clone().and_then(|bytes| {
             let mut stdin = child.stdin.take()?;
@@ -361,6 +323,166 @@ impl Git {
             stderr,
             record,
         })
+    }
+
+    /// Starts `command` and hands back its output as it arrives, for output
+    /// too long to wait for, such as a whole history. Stdin and cancellation
+    /// are not used: drop the stream to stop the command.
+    pub fn stream(&self, command: &GitCommand) -> Result<OutputStream> {
+        let started_at = SystemTime::now();
+        let started = Instant::now();
+        let mut child = self.spawn(command)?;
+        let stdout = child.stdout.take().map(std::io::BufReader::new);
+        let stderr = read_to_end(child.stderr.take(), command.on_stderr.clone());
+        Ok(OutputStream {
+            child,
+            stdout,
+            stderr: Some(stderr),
+            log: self.log.clone(),
+            args: command.args.clone(),
+            cwd: command.cwd.clone(),
+            started_at,
+            started,
+            head: Vec::new(),
+        })
+    }
+
+    fn spawn(&self, command: &GitCommand) -> Result<std::process::Child> {
+        let mut process = Command::new(&self.program);
+        process
+            .args(["-c", "color.ui=never", "-c", "core.quotepath=false"])
+            .args(&command.args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .stdin(if command.stdin.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        // Its own process group, so cancelling also stops hooks, credential
+        // helpers and ssh that Git started (they hold the output pipes open).
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(&mut process, 0);
+        if let Some(askpass) = &self.askpass {
+            process
+                .env("GIT_ASKPASS", askpass)
+                .env(ASKPASS_MODE_ENV, "1");
+        }
+        for (key, value) in &self.env {
+            process.env(key, value);
+        }
+        if let Some(cwd) = &command.cwd {
+            process.current_dir(cwd);
+        }
+        for (key, value) in &command.env {
+            process.env(key, value);
+        }
+
+        process.spawn().map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound {
+                Error::GitNotFound
+            } else {
+                Error::Spawn(error)
+            }
+        })
+    }
+}
+
+/// A running command's output, read a record at a time. Dropping it stops
+/// the command if it is still running, and logs it.
+pub struct OutputStream {
+    child: std::process::Child,
+    stdout: Option<std::io::BufReader<std::process::ChildStdout>>,
+    stderr: Option<thread::JoinHandle<Vec<u8>>>,
+    log: Option<Arc<dyn CommandLog>>,
+    args: Vec<OsString>,
+    cwd: Option<PathBuf>,
+    started_at: SystemTime,
+    started: Instant,
+    /// The first part of stdout, for the log.
+    head: Vec<u8>,
+}
+
+impl std::fmt::Debug for OutputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputStream")
+            .field("args", &self.args)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OutputStream {
+    /// The next record ending in `delimiter`, without it, or `None` at the
+    /// end. A command that ended in failure is an error once its output is
+    /// read.
+    pub fn next_record(&mut self, delimiter: u8) -> Result<Option<Vec<u8>>> {
+        let Some(stdout) = self.stdout.as_mut() else {
+            return Ok(None);
+        };
+        let mut record = Vec::new();
+        std::io::BufRead::read_until(stdout, delimiter, &mut record).map_err(Error::Spawn)?;
+        if self.head.len() < RECORDED_STDOUT_LIMIT {
+            let room = RECORDED_STDOUT_LIMIT - self.head.len();
+            self.head
+                .extend_from_slice(&record[..record.len().min(room)]);
+        }
+        if record.is_empty() {
+            self.stdout = None;
+            let record = self.finish(false)?;
+            return if record.succeeded() {
+                Ok(None)
+            } else {
+                Err(Error::Failed {
+                    record: Box::new(record),
+                })
+            };
+        }
+        if record.last() == Some(&delimiter) {
+            record.pop();
+        }
+        Ok(Some(record))
+    }
+
+    /// Waits for (or with `kill`, stops) the command and logs it once.
+    fn finish(&mut self, kill: bool) -> Result<CommandRecord> {
+        if kill {
+            kill_tree(&mut self.child);
+        }
+        let status = self.child.wait().map_err(Error::Spawn)?;
+        let stderr = self
+            .stderr
+            .take()
+            .and_then(|reader| reader.join().ok())
+            .unwrap_or_default();
+        let record = CommandRecord {
+            args: self
+                .args
+                .iter()
+                .map(|arg| redact(&arg.to_string_lossy()))
+                .collect(),
+            cwd: self.cwd.clone(),
+            started_at: self.started_at,
+            duration: self.started.elapsed(),
+            exit_code: if kill { None } else { status.code() },
+            stdout: redact(&String::from_utf8_lossy(&self.head)),
+            stderr: redact(&String::from_utf8_lossy(&stderr)),
+            cancelled: kill,
+        };
+        if let Some(log) = self.log.take() {
+            log.record(&record);
+        }
+        Ok(record)
+    }
+}
+
+impl Drop for OutputStream {
+    fn drop(&mut self) {
+        if self.stderr.is_some() {
+            self.stdout = None;
+            let _ = self.finish(true);
+        }
     }
 }
 

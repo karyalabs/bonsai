@@ -126,8 +126,42 @@ impl Repository {
         skip: usize,
         limit: usize,
     ) -> Result<Vec<CommitInfo>> {
-        if *scope == LogScope::Head && self.head_is_unborn()? {
+        let Some(args) = self.log_args(scope, filter, Some((skip, limit)))? else {
             return Ok(Vec::new());
+        };
+        let output = self.git().run(&self.git().command(args).cwd(self.root()))?;
+        output
+            .stdout_lossy()
+            .split('\0')
+            .filter(|record| !record.trim().is_empty())
+            .map(parse)
+            .collect()
+    }
+
+    /// Reads the history a page at a time from one `git log`, so each page
+    /// costs only its own commits. [`Self::log_filtered`] with `--skip`
+    /// walks every skipped commit again.
+    pub fn log_reader(&self, scope: &LogScope, filter: &LogFilter) -> Result<LogReader> {
+        let stream = match self.log_args(scope, filter, None)? {
+            Some(args) => Some(
+                self.git()
+                    .stream(&self.git().command(args).cwd(self.root()))?,
+            ),
+            None => None,
+        };
+        Ok(LogReader { stream })
+    }
+
+    /// `git log` arguments, or `None` when there is no history to read.
+    fn log_args(
+        &self,
+        scope: &LogScope,
+        filter: &LogFilter,
+        page: Option<(usize, usize)>,
+    ) -> Result<Option<Vec<std::ffi::OsString>>> {
+        let unborn = matches!(scope, LogScope::Head | LogScope::All) && self.head_is_unborn()?;
+        if *scope == LogScope::Head && unborn {
+            return Ok(None);
         }
         let mut args = vec![
             "log".to_owned(),
@@ -135,9 +169,10 @@ impl Repository {
             "--topo-order".to_owned(),
             "--no-color".to_owned(),
             FORMAT.to_owned(),
-            format!("--skip={skip}"),
-            format!("--max-count={limit}"),
         ];
+        if let Some((skip, limit)) = page {
+            args.extend([format!("--skip={skip}"), format!("--max-count={limit}")]);
+        }
         if filter.message.is_some() || filter.author.is_some() {
             args.extend(
                 ["--regexp-ignore-case", "--fixed-strings", "--all-match"].map(str::to_owned),
@@ -151,9 +186,9 @@ impl Repository {
         }
         match scope {
             LogScope::All => {
-                args.extend(["--branches", "--remotes", "--tags", "HEAD"].map(str::to_owned));
-                if self.head_is_unborn()? {
-                    args.pop();
+                args.extend(["--branches", "--remotes", "--tags"].map(str::to_owned));
+                if !unborn {
+                    args.push("HEAD".to_owned());
                 }
             }
             LogScope::Head => args.push("HEAD".to_owned()),
@@ -164,13 +199,42 @@ impl Repository {
         if let Some(path) = &filter.path {
             args.push(path.as_os_str().to_owned());
         }
-        let output = self.git().run(&self.git().command(args).cwd(self.root()))?;
-        output
-            .stdout_lossy()
-            .split('\0')
-            .filter(|record| !record.trim().is_empty())
-            .map(parse)
-            .collect()
+        Ok(Some(args))
+    }
+}
+
+/// A history being read a page at a time; see [`Repository::log_reader`].
+/// Dropping it stops the `git log` behind it.
+#[derive(Debug)]
+pub struct LogReader {
+    stream: Option<crate::OutputStream>,
+}
+
+impl LogReader {
+    /// Up to `limit` more commits; fewer only at the end of the history.
+    pub fn next_page(&mut self, limit: usize) -> Result<Vec<CommitInfo>> {
+        let mut page = Vec::with_capacity(limit.min(4096));
+        let Some(stream) = self.stream.as_mut() else {
+            return Ok(page);
+        };
+        while page.len() < limit {
+            let Some(record) = stream.next_record(0)? else {
+                self.stream = None;
+                break;
+            };
+            let record = String::from_utf8_lossy(&record);
+            if record.trim().is_empty() {
+                continue;
+            }
+            page.push(parse(&record)?);
+        }
+        Ok(page)
+    }
+
+    /// Whether the history has been read to its end.
+    #[must_use]
+    pub fn is_done(&self) -> bool {
+        self.stream.is_none()
     }
 }
 

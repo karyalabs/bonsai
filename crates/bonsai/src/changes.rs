@@ -476,11 +476,11 @@ impl ChangesView {
         folder_ids(&nodes, &mut folders);
         // Folder ids end in '/' or ':', which no path does, so they are unique.
         let _ = self.tree.replace_nodes(nodes);
-        for folder in folders {
-            if !self.collapsed.contains(&folder) && !self.tree.is_expanded(&folder) {
-                self.tree.set_expanded(&folder, true);
-            }
-        }
+        self.tree.expand_folders(
+            folders
+                .into_iter()
+                .filter(|folder| !self.collapsed.contains(folder)),
+        );
         self.rows = rows;
         self.rebuild_menu(cx);
         self.emit_focus(cx);

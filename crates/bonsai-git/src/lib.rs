@@ -31,13 +31,13 @@ pub use commit::Signing;
 pub use diff::{DiffOptions, DiffOutput, DiffTarget, Whitespace};
 pub use error::{Error, Result};
 pub use integrate::{Integration, MergeMode, OperationAction, ResetMode, Side};
-pub use log::{CommitDetails, CommitInfo, LogFilter, LogScope, SignatureStatus};
+pub use log::{CommitDetails, CommitInfo, LogFilter, LogReader, LogScope, SignatureStatus};
 pub use patch::{ApplyMode, LinePosition, LineSide, partial_patch};
 pub use purge::{PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange};
 pub use remote::RemoteFailure;
 pub use repository::Repository;
 pub use runner::{
-    ASKPASS_MODE_ENV, CancelToken, CommandLog, CommandRecord, Git, GitCommand, Output,
+    ASKPASS_MODE_ENV, CancelToken, CommandLog, CommandRecord, Git, GitCommand, Output, OutputStream,
 };
 pub use snapshot::{
     Branch, Change, ChangeKind, ConflictKind, EntryStatus, Head, InProgress, Oid, Remote,

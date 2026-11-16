@@ -193,3 +193,46 @@ fn reads_a_commits_details() {
     );
     assert_eq!(details.signature, SignatureStatus::Unsigned);
 }
+
+#[test]
+fn a_reader_pages_through_the_same_history_as_log() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    for n in 0..7 {
+        std::fs::write(dir.path().join("file.txt"), n.to_string()).unwrap();
+        run(dir.path(), &["add", "."]);
+        run(dir.path(), &["commit", "-qm", &format!("commit {n}")]);
+    }
+    let all = repository.log(&LogScope::All, 0, 100).unwrap();
+    let mut reader = repository
+        .log_reader(&LogScope::All, &LogFilter::default())
+        .unwrap();
+    let mut paged = Vec::new();
+    let mut sizes = Vec::new();
+    while !reader.is_done() {
+        let page = reader.next_page(3).unwrap();
+        sizes.push(page.len());
+        paged.extend(page);
+    }
+    assert_eq!(sizes, [3, 3, 1]);
+    assert_eq!(paged, all);
+    assert_eq!(reader.next_page(3).unwrap(), Vec::new());
+
+    // Dropping a reader part way stops its `git log`.
+    let mut partial = repository
+        .log_reader(&LogScope::All, &LogFilter::default())
+        .unwrap();
+    assert_eq!(partial.next_page(2).unwrap().len(), 2);
+    drop(partial);
+}
+
+#[test]
+fn a_reader_of_an_unborn_branch_is_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    let mut reader = repository
+        .log_reader(&LogScope::Head, &LogFilter::default())
+        .unwrap();
+    assert_eq!(reader.next_page(10).unwrap(), Vec::new());
+    assert!(reader.is_done());
+}

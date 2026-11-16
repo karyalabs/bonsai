@@ -4,7 +4,7 @@
 
 use std::{collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
-use bonsai_git::{CommitInfo, Head, LogFilter, LogScope, Oid, ResetMode, Snapshot};
+use bonsai_git::{CommitInfo, Head, LogFilter, LogReader, LogScope, Oid, ResetMode, Snapshot};
 use bonsai_graph::{Commit, Layout, Row};
 use gpui_icons::LucideIcon;
 use gpui_kit::{
@@ -37,8 +37,9 @@ pub const PAGE: usize = 500;
 /// Ref labels drawn on a row before the rest collapse into "+N".
 const MAX_LABELS: usize = 2;
 
-/// How far a jump to a commit pages in before giving up.
-const MAX_SEARCH_DEPTH: usize = 50_000;
+/// How far a jump to a commit pages in before giving up. Pages are cheap
+/// to read (one `git log` streams them), so this only stops runaway paging.
+const MAX_SEARCH_DEPTH: usize = 1_000_000;
 
 /// Rows from the end at which the next page starts loading.
 const PREFETCH: usize = 100;
@@ -162,7 +163,10 @@ pub struct HistoryView {
     graph: CommitGraphState,
     commits: Rc<Vec<CommitInfo>>,
     layout: Layout<Oid>,
-    rows: Vec<GraphRow>,
+    /// The `git log` the next page comes from; taken while a page loads.
+    reader: Option<LogReader>,
+    /// A commit to page to after a reload, so the selection survives.
+    keep: Option<String>,
     labels: HashMap<Oid, Vec<GraphLabel>>,
     search: Search,
     paging: Paging,
@@ -225,7 +229,8 @@ impl HistoryView {
             graph,
             commits: Rc::new(Vec::new()),
             layout: Layout::new(),
-            rows: Vec::new(),
+            reader: None,
+            keep: None,
             labels: HashMap::new(),
             search: Search::default(),
             paging: Paging::More,
@@ -279,8 +284,11 @@ impl HistoryView {
     /// Reads the history again from the top, keeping as many commits as are
     /// loaded now (so the scroll position and selection survive).
     pub fn reload(&mut self, cx: &mut Context<Self>) {
-        let count = self.commits.len().max(PAGE);
-        self.load(0, count, cx);
+        // Read the first page again, then page on to the selected commit:
+        // each page is small, so the window never waits on a whole history.
+        self.keep = self.selected().map(|c| c.oid.as_str().to_owned());
+        self.paging = Paging::More;
+        self.load(0, PAGE, cx);
     }
 
     /// Loads the next page, unless one is loading or the history ended.
@@ -297,11 +305,26 @@ impl HistoryView {
         self.paging = Paging::Loading;
         let snapshot = self.model.read(cx).snapshot();
         self.refs_key = snapshot.map(refs_key);
-        self.labels = snapshot.map(labels).unwrap_or_default();
+        if skip == 0 {
+            self.labels = snapshot.map(labels).unwrap_or_default();
+        }
         let repository = self.model.read(cx).repository().clone();
         let filter = self.search.filter.clone();
+        // A new read for the first page; otherwise the next page of the
+        // current one.
+        let reader = if skip == 0 { None } else { self.reader.take() };
+        if skip > 0 && reader.is_none() {
+            self.paging = Paging::End;
+            cx.notify();
+            return;
+        }
         let work = cx.background_spawn(async move {
-            repository.log_filtered(&LogScope::All, &filter, skip, limit)
+            let mut reader = match reader {
+                Some(reader) => reader,
+                None => repository.log_reader(&LogScope::All, &filter)?,
+            };
+            let page = reader.next_page(limit)?;
+            Ok::<_, bonsai_git::Error>((reader, page))
         });
         self.tasks.retain(|task| !task.is_ready());
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -312,10 +335,12 @@ impl HistoryView {
                 }
                 this.paging = Paging::More;
                 match result {
-                    Ok(page) => {
+                    Ok((reader, page)) => {
                         this.error = None;
-                        if page.len() < limit {
+                        if page.len() < limit || reader.is_done() {
                             this.paging = Paging::End;
+                        } else {
+                            this.reader = Some(reader);
                         }
                         this.apply(skip, page, cx);
                     }
@@ -330,7 +355,6 @@ impl HistoryView {
     fn apply(&mut self, skip: usize, page: Vec<CommitInfo>, cx: &mut Context<Self>) {
         if skip == 0 {
             self.layout = Layout::new();
-            self.rows.clear();
             self.commits = Rc::new(Vec::new());
         }
         let commits: Vec<Commit<Oid>> = page
@@ -341,29 +365,41 @@ impl HistoryView {
             })
             .collect();
         let laid = self.layout.extend(&commits);
-        self.rows.extend(
-            page.iter()
-                .zip(&laid)
-                .map(|(commit, row)| graph_row(commit, row, &self.labels)),
-        );
-        Rc::make_mut(&mut self.commits).extend(page);
+        let rows: Vec<GraphRow> = page
+            .iter()
+            .zip(&laid)
+            .map(|(commit, row)| graph_row(commit, row, &self.labels))
+            .collect();
+        let first = rows.first().map(|row| row.id.clone());
         // IDs are commit hashes, which a log lists once.
-        let _ = self.graph.replace_rows(self.rows.clone());
+        let _ = if skip == 0 {
+            self.graph.replace_rows(rows)
+        } else {
+            self.graph.append_rows(rows)
+        };
+        Rc::make_mut(&mut self.commits).extend(page);
         // Start on the newest commit, so its diff shows at once.
         if skip == 0
+            && self.keep.is_none()
             && self.graph.selected().is_empty()
-            && let Some(first) = self.rows.first()
+            && let Some(first) = first
         {
-            self.graph.set_selected([first.id.clone()]);
+            self.graph.set_selected([first]);
         }
-        if let Some(hash) = self.search.hash.clone()
-            && !self.reveal_hash(&hash, cx)
-            && self.paging != Paging::End
-            && self.commits.len() < MAX_SEARCH_DEPTH
-        {
-            // Not loaded yet: keep paging until it turns up.
-            self.load(self.commits.len(), PAGE, cx);
-            return;
+        let target = self.search.hash.clone().or_else(|| self.keep.clone());
+        if let Some(hash) = target {
+            if self.reveal_hash(&hash, cx) {
+                self.keep = None;
+            } else if self.paging != Paging::End && self.commits.len() < MAX_SEARCH_DEPTH {
+                // Not loaded yet: keep paging until it turns up.
+                self.load(self.commits.len(), PAGE, cx);
+                return;
+            } else if self.keep.take().is_some()
+                && let Some(first) = self.graph.row(0)
+            {
+                // The kept commit is gone: start on the newest again.
+                self.graph.set_selected([first.id]);
+            }
         }
         self.rebuild_menu(cx);
         self.emit_selection(cx);
