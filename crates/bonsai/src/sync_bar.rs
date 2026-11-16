@@ -18,6 +18,7 @@ use crate::{
         progress::Progress,
         theme::UiTheme,
     },
+    workspace::title_bar::{bar_button, ghost_trigger},
 };
 
 /// Where a push of the current branch goes, worked out from the snapshot.
@@ -330,6 +331,15 @@ fn set_rebase(
     })
 }
 
+fn plural(n: u32) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// A button and its options menu, drawn as one control.
+fn split(button: impl IntoElement, menu: impl IntoElement) -> impl IntoElement {
+    div().flex().items_center().child(button).child(menu)
+}
+
 impl Render for SyncBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = UiTheme::read(cx).clone();
@@ -347,7 +357,22 @@ impl Render for SyncBar {
             .and_then(|b| b.upstream.as_ref())
             .map_or((0, 0), |u| (u.ahead, u.behind));
         let icon = |name: LucideIcon| lucide(name).size(px(14.)).text_color(c.foreground);
-        let count = |n: u32| (n > 0).then(|| div().text_xs().child(n.to_string()));
+        let count = |n: u32| {
+            (n > 0).then(|| {
+                div()
+                    .px(px(5.))
+                    .rounded(px(8.))
+                    .bg(c.primary)
+                    .text_color(c.primary_foreground)
+                    .text_xs()
+                    .child(n.to_string())
+            })
+        };
+        let chevron = || {
+            lucide(LucideIcon::ChevronDown)
+                .size(px(12.))
+                .text_color(c.muted_foreground)
+        };
         let busy = running.is_some();
 
         div()
@@ -397,46 +422,52 @@ impl Render for SyncBar {
                 )
             })
             .child(
-                Button::new("sync.fetch")
-                    .variant(ButtonVariant::Ghost)
-                    .size(ButtonSize::Sm)
-                    .disabled(busy)
-                    .aria_label("Fetch")
+                bar_button("sync.fetch", "Fetch all remotes (⌥⌘F)", busy, &theme)
                     .child(icon(LucideIcon::RefreshCw))
                     .child("Fetch")
                     .on_click(cx.listener(|this, _, _, cx| this.fetch(cx))),
             )
-            .child(
-                Button::new("sync.pull")
-                    .variant(ButtonVariant::Ghost)
-                    .size(ButtonSize::Sm)
-                    .disabled(busy)
-                    .aria_label("Pull")
-                    .child(icon(LucideIcon::ArrowDown))
-                    .child(if self.rebase { "Pull (Rebase)" } else { "Pull" })
-                    .children(count(behind))
-                    .on_click(cx.listener(|this, _, _, cx| this.pull(cx))),
-            )
-            .child(
-                Menu::new(&self.pull_menu, "Pull options").trigger(icon(LucideIcon::ChevronDown)),
-            )
-            .child(
-                Button::new("sync.push")
-                    .variant(ButtonVariant::Ghost)
-                    .size(ButtonSize::Sm)
-                    .disabled(busy)
-                    .aria_label("Push")
-                    .child(icon(LucideIcon::ArrowUp))
-                    .child("Push")
-                    .children(count(ahead))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.notice = this.push(cx);
-                        cx.notify();
-                    })),
-            )
-            .child(
-                Menu::new(&self.push_menu, "Push options").trigger(icon(LucideIcon::ChevronDown)),
-            )
+            .child(split(
+                bar_button(
+                    "sync.pull",
+                    if behind > 0 {
+                        format!("Pull {behind} commit{} (⌥⌘L)", plural(behind))
+                    } else {
+                        "Pull (⌥⌘L)".to_owned()
+                    },
+                    busy,
+                    &theme,
+                )
+                .child(icon(LucideIcon::ArrowDown))
+                .child(if self.rebase { "Pull (Rebase)" } else { "Pull" })
+                .children(count(behind))
+                .on_click(cx.listener(|this, _, _, cx| this.pull(cx))),
+                Menu::new(&self.pull_menu, "Pull options")
+                    .trigger_style_with(ghost_trigger(&theme, ButtonSize::IconSm))
+                    .trigger(chevron()),
+            ))
+            .child(split(
+                bar_button(
+                    "sync.push",
+                    if ahead > 0 {
+                        format!("Push {ahead} commit{} (⌥⌘P)", plural(ahead))
+                    } else {
+                        "Push (⌥⌘P)".to_owned()
+                    },
+                    busy,
+                    &theme,
+                )
+                .child(icon(LucideIcon::ArrowUp))
+                .child("Push")
+                .children(count(ahead))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.notice = this.push(cx);
+                    cx.notify();
+                })),
+                Menu::new(&self.push_menu, "Push options")
+                    .trigger_style_with(ghost_trigger(&theme, ButtonSize::IconSm))
+                    .trigger(chevron()),
+            ))
             .child(self.render_force(window, cx))
     }
 }

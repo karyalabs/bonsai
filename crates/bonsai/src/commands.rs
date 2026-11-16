@@ -30,6 +30,8 @@ actions!(
         PurgeFromHistory,
         PublishRepository,
         StashChanges,
+        SwitchBranch,
+        NewBranch,
     ]
 );
 
@@ -116,6 +118,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(Fetch, "repository.fetch", "Fetch", "Repository", keys: ["secondary-alt-f"], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["download", "update", "remote"]),
     command!(Pull, "repository.pull", "Pull", "Repository", keys: ["secondary-alt-l"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["download", "merge", "rebase", "update"]),
     command!(Push, "repository.push", "Push", "Repository", keys: ["secondary-alt-p"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["upload", "publish", "remote"]),
+    command!(SwitchBranch, "repository.switch-branch", "Switch Branch…", "Repository", keys: ["secondary-b"], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["checkout", "branch", "change"]),
+    command!(NewBranch, "repository.new-branch", "New Branch…", "Repository", keys: ["secondary-shift-b"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["create", "branch"]),
     command!(StashChanges, "repository.stash", "Stash Changes…", "Repository", keys: ["secondary-alt-s"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["save", "shelve", "set aside"]),
     command!(PublishRepository, "repository.publish", "Publish Repository…", "Repository", keys: [], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["github", "gitlab", "bitbucket", "create", "upload", "remote", "origin"]),
     command!(PurgeFromHistory, "repository.purge", "Purge from History…", "Repository", keys: [], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["remove", "secret", "env", "rewrite", "filter", "delete file"]),

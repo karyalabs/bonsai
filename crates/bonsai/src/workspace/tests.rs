@@ -139,6 +139,8 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.purge",
         "repository.publish",
         "repository.stash",
+        "repository.switch-branch",
+        "repository.new-branch",
     ];
     for command in commands::COMMANDS {
         assert!(
@@ -250,9 +252,12 @@ fn a_failed_operation_offers_details_in_the_activity_log(cx: &mut TestAppContext
         );
     });
     cx.run_until_parked();
-    workspace.read_with(cx, |w, _| {
+    workspace.read_with(cx, |w, cx| {
         assert!(w.message.is_some());
         assert_eq!(w.message_details, w.message);
+        // The error shows as a toast, not a banner.
+        assert_eq!(w.toasted, w.message);
+        assert!(w.toasts.read(cx).contains("workspace.message"));
     });
 
     workspace.update(cx, Workspace::show_message_details);
@@ -264,4 +269,64 @@ fn a_failed_operation_offers_details_in_the_activity_log(cx: &mut TestAppContext
     cx.dispatch_action(commands::ShowChanges);
     cx.dispatch_action(commands::ShowActivity);
     workspace.read_with(cx, |w, _| assert_eq!(w.section(), Section::Activity));
+}
+
+#[gpui_kit::test]
+fn switch_branch_lists_the_branches_and_switches(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "a");
+    let git = Git::locate(None).unwrap();
+    let run = |args: &[&str]| {
+        let mut full = vec![
+            "-c",
+            "user.name=Ada",
+            "-c",
+            "user.email=ada@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        full.extend_from_slice(args);
+        git.run(&git.command(full).cwd(&path)).unwrap();
+    };
+    run(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    run(&["branch", "feature"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    cx.dispatch_action(commands::SwitchBranch);
+    cx.run_until_parked();
+    let state = workspace.read_with(cx, |w, _| {
+        assert!(w.branch_handle.is_open());
+        w.branch_picker.as_ref().unwrap().0.clone()
+    });
+    state.update_in(cx, |state, window, cx| state.set_query("feat", window, cx));
+    cx.run_until_parked();
+    let value = state.read_with(cx, |state, _| state.highlighted().unwrap().value.clone());
+    assert_eq!(value.as_ref(), "local:feature");
+    state.update(cx, |_, cx| {
+        cx.emit(crate::ui::command::CommandEvent::Confirm(value));
+    });
+    cx.run_until_parked();
+    workspace.read_with(cx, |w, cx| {
+        assert!(w.branch_picker.is_none());
+        let snapshot = w.active_model().unwrap().read(cx).snapshot().unwrap();
+        assert_eq!(
+            super::BranchSummary::from_snapshot(snapshot).label.as_ref(),
+            "feature"
+        );
+    });
+}
+
+#[test]
+fn errors_split_into_a_title_and_details() {
+    let (title, rest) = super::split_message("Push failed\nremote rejected");
+    assert_eq!(title, "Push failed");
+    assert_eq!(rest, "remote rejected");
+    assert_eq!(
+        super::success_title("Push main to origin").as_deref(),
+        Some("Push main to origin")
+    );
+    assert_eq!(super::success_title("Stage a.rs"), None);
 }
