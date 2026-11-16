@@ -806,6 +806,11 @@ mod hosted {
                 (Method::Post, "/pulls/7/reviews", r#"{"id":1}"#.into()),
                 (
                     Method::Post,
+                    "/graphql",
+                    r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"id":"PRRT_5","isResolved":false,"comments":{"nodes":[{"databaseId":5}]}}]}}},"resolveReviewThread":{"thread":{"id":"PRRT_5"}}}}"#.into(),
+                ),
+                (
+                    Method::Post,
                     "/pulls/7/comments/5/replies",
                     r#"{"id":7,"in_reply_to_id":5,"path":"src/sync.rs","line":1,"side":"RIGHT","user":{"login":"ada"},"body":"Because","created_at":"2026-11-16T09:00:00Z"}"#.into(),
                 ),
@@ -904,6 +909,16 @@ mod hosted {
             assert_eq!(comments[1].thread, "5");
             assert_eq!(comments[1].line, Some(1));
         });
+        view.update(cx, |view, cx| view.toggle_thread_resolved("5", cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(
+                view.line_comments(7)
+                    .iter()
+                    .filter(|c| c.thread == "5")
+                    .all(|c| c.resolved)
+            );
+        });
         view.update(cx, |view, cx| view.show_files(false, cx));
         let composer = view
             .read_with(cx, |view, _| view.composer().cloned())
@@ -924,7 +939,7 @@ mod hosted {
             composer.read_with(cx, |input, _| input.value().to_string()),
             ""
         );
-        assert_eq!(client.sent.lock().unwrap()[2].1["body"], "Looks good");
+        assert_eq!(client.sent.lock().unwrap()[5].1["body"], "Looks good");
 
         view.update_in(cx, |view, window, cx| {
             view.review(bonsai_providers::Verdict::Approve, window, cx);
@@ -933,7 +948,7 @@ mod hosted {
         view.read_with(cx, |view, _| {
             assert_eq!(view.reviewed(7), Some(bonsai_providers::Verdict::Approve));
         });
-        assert_eq!(client.sent.lock().unwrap()[3].1["event"], "APPROVE");
+        assert_eq!(client.sent.lock().unwrap()[6].1["event"], "APPROVE");
 
         view.update(cx, HostedView::toggle_open);
         cx.run_until_parked();
@@ -946,7 +961,7 @@ mod hosted {
             assert_eq!(view.selected().unwrap().state, ItemState::Open);
         });
         let sent = client.sent.lock().unwrap();
-        assert_eq!(sent[4].1["state"], "closed");
-        assert_eq!(sent[5].1["state"], "open");
+        assert_eq!(sent[7].1["state"], "closed");
+        assert_eq!(sent[8].1["state"], "open");
     }
 }

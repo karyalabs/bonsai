@@ -501,6 +501,16 @@ pub trait Provider: Send + Sync {
         body: &'a str,
     ) -> BoxFuture<'a, Result<Comment>>;
 
+    /// Resolves a line comment thread, or reopens it.
+    fn set_thread_resolved<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        resolved: bool,
+    ) -> BoxFuture<'a, Result<()>>;
+
     /// The files a pull request changes, the first 100.
     fn changed_files<'a>(
         &'a self,

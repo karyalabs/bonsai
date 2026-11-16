@@ -601,16 +601,26 @@ fn approves_and_requests_changes_on_each_provider() {
 
 #[test]
 fn reads_line_comments_on_each_provider() {
-    let github_client = Recorded::new(vec![(
-        Method::Get,
-        "https://api.github.com/repos/ada/engine/pulls/7/comments?per_page=100",
-        json(
-            200,
-            r#"[{"id":104,"path":"src/a.rs","line":12,"side":"RIGHT","user":{"login":"grace"},"body":"Rename?","created_at":"2026-11-12T09:00:00Z"},
+    let github_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://api.github.com/repos/ada/engine/pulls/7/comments?per_page=100",
+            json(
+                200,
+                r#"[{"id":104,"path":"src/a.rs","line":12,"side":"RIGHT","user":{"login":"grace"},"body":"Rename?","created_at":"2026-11-12T09:00:00Z"},
                 {"id":105,"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Why remove?","created_at":"2026-11-12T09:00:00Z"},
                 {"id":106,"path":"src/b.rs","line":null,"side":"RIGHT","user":{"login":"ada"},"body":"Outdated","created_at":"2026-11-12T09:00:00Z"}]"#,
+            ),
         ),
-    )]);
+        (
+            Method::Post,
+            "https://api.github.com/graphql",
+            json(
+                200,
+                r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[]}}}}}"#,
+            ),
+        ),
+    ]);
     let comments =
         block_on(GitHub::new(&github_client).line_comments("t", "ada/engine", 7)).unwrap();
     assert_eq!((comments[0].line, comments[0].old_line), (Some(12), None));
@@ -756,6 +766,15 @@ fn groups_and_replies_to_threads_on_each_provider() {
         ),
         (
             Method::Post,
+            "https://api.github.com/graphql",
+            json(
+                200,
+                r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+                    {"id":"PRRT_1","isResolved":true,"comments":{"nodes":[{"databaseId":10}]}}]}}}}}"#,
+            ),
+        ),
+        (
+            Method::Post,
             "https://api.github.com/repos/ada/engine/pulls/7/comments/10/replies",
             json(
                 201,
@@ -767,6 +786,7 @@ fn groups_and_replies_to_threads_on_each_provider() {
     let comments = block_on(github.line_comments("t", "ada/engine", 7)).unwrap();
     assert_eq!(comments[0].thread, "10");
     assert_eq!(comments[1].thread, "10");
+    assert!(comments[0].resolved, "GraphQL says the thread is resolved");
     let reply = block_on(github.reply_to_thread("t", "ada/engine", 7, "10", "OK")).unwrap();
     assert_eq!(reply.body, "OK");
 
@@ -830,4 +850,63 @@ fn groups_and_replies_to_threads_on_each_provider() {
     let sent: serde_json::Value =
         serde_json::from_slice(&bitbucket_client.requests()[1].body).unwrap();
     assert_eq!(sent["parent"]["id"], 1);
+}
+
+#[test]
+fn resolves_threads_on_each_provider() {
+    let github_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://api.github.com/graphql",
+            json(
+                200,
+                r#"{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[
+                    {"id":"PRRT_9","isResolved":false,"comments":{"nodes":[{"databaseId":10}]}}]}}}}}"#,
+            ),
+        ),
+        (
+            Method::Post,
+            "https://api.github.com/graphql",
+            json(
+                200,
+                r#"{"data":{"resolveReviewThread":{"thread":{"id":"PRRT_9"}}}}"#,
+            ),
+        ),
+    ]);
+    block_on(GitHub::new(&github_client).set_thread_resolved("t", "ada/engine", 7, "10", true))
+        .unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&github_client.requests()[1].body).unwrap();
+    assert!(
+        sent["query"]
+            .as_str()
+            .unwrap()
+            .contains("resolveReviewThread")
+    );
+    assert_eq!(sent["variables"]["id"], "PRRT_9");
+
+    let gitlab_client = Recorded::new(vec![(
+        Method::Put,
+        "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions/d1?resolved=false",
+        json(200, r#"{"id":"d1"}"#),
+    )]);
+    block_on(GitLab::new(&gitlab_client).set_thread_resolved("t", "team/engine", 4, "d1", false))
+        .unwrap();
+
+    let bitbucket_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments/1/resolve",
+            json(200, r#"{"type":"comment_resolution"}"#),
+        ),
+        (
+            Method::Delete,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments/1/resolve",
+            json(204, ""),
+        ),
+    ]);
+    let bitbucket = Bitbucket::new(&bitbucket_client);
+    block_on(bitbucket.set_thread_resolved("t", "analytical/engine", 12, "1", true)).unwrap();
+    block_on(bitbucket.set_thread_resolved("t", "analytical/engine", 12, "1", false)).unwrap();
+    assert!(bitbucket_client.finished());
 }

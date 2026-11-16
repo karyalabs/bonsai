@@ -654,6 +654,31 @@ impl<C: HttpClient> Provider for GitLab<C> {
         })
     }
 
+    fn set_thread_resolved<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        resolved: bool,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            self.send(
+                Request::put(
+                    format!(
+                        "{}/merge_requests/{number}/discussions/{}?resolved={resolved}",
+                        self.project_url(full_name),
+                        percent_encode(thread)
+                    ),
+                    "",
+                ),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
     fn changed_files<'a>(
         &'a self,
         token: &'a str,

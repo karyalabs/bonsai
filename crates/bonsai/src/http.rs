@@ -60,6 +60,7 @@ fn config(request: &Request) -> Result<String, String> {
     ];
     match request.method {
         Method::Get => {}
+        Method::Delete => lines.push("request = \"DELETE\"".to_owned()),
         Method::Post | Method::Put | Method::Patch => {
             let verb = match request.method {
                 Method::Put => "PUT",

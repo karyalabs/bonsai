@@ -289,6 +289,10 @@ pub struct HostedView {
     line_target: Option<(u64, LineTarget)>,
     /// The line comment thread being replied to.
     reply_thread: Option<(u64, String)>,
+    /// Resolved threads shown in full.
+    expanded_threads: std::collections::HashSet<String>,
+    /// The thread being resolved or reopened.
+    resolving: Option<String>,
     /// The pull request a line comment is being sent on.
     posting_line: Option<u64>,
     /// Whether a pull request's detail shows its conversation or its files.
@@ -465,6 +469,8 @@ impl HostedView {
             line_composer: None,
             line_target: None,
             reply_thread: None,
+            expanded_threads: std::collections::HashSet::new(),
+            resolving: None,
             posting_line: None,
             showing_files: false,
             merge_method: MergeMethod::Merge,
@@ -779,6 +785,65 @@ impl HostedView {
         self.reply_thread = self.selected.zip(thread);
         self.line_target = None;
         self.action_error = None;
+        cx.notify();
+    }
+
+    /// Shows a resolved thread in full, or folds it again.
+    pub fn toggle_thread_expanded(&mut self, thread: &str, cx: &mut Context<Self>) {
+        if !self.expanded_threads.remove(thread) {
+            self.expanded_threads.insert(thread.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// Resolves a line comment thread of the selected pull request, or
+    /// reopens it when resolved.
+    pub fn toggle_thread_resolved(&mut self, thread: &str, cx: &mut Context<Self>) {
+        let Some(number) = self.selected else {
+            return;
+        };
+        let Some(current) = self
+            .line_comments(number)
+            .iter()
+            .find(|c| c.thread == thread)
+            .map(|c| c.resolved)
+        else {
+            return;
+        };
+        if self.resolving.is_some() {
+            return;
+        }
+        let (repo, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((number, error));
+                cx.notify();
+                return;
+            }
+        };
+        let thread = thread.to_owned();
+        self.resolving = Some(thread.clone());
+        self.action_error = None;
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider
+                .set_thread_resolved(&api, &repo.full_name, number, &thread, !current)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.resolving = None;
+                match result {
+                    Ok(()) => {
+                        for comment in this.line_comments.entry(number).or_default() {
+                            if comment.thread == thread {
+                                comment.resolved = !current;
+                            }
+                        }
+                        this.expanded_threads.remove(&thread);
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -2125,7 +2190,57 @@ impl HostedView {
         }
         let mut out = Vec::new();
         for thread in threads {
-            for comment in comments.iter().filter(|c| c.thread == thread) {
+            let in_thread: Vec<&&LineComment> =
+                comments.iter().filter(|c| c.thread == thread).collect();
+            let resolved = in_thread.first().is_some_and(|c| c.resolved);
+            let expanded = !resolved || this.expanded_threads.contains(thread);
+            let resolving = this.resolving.as_deref() == Some(thread);
+            let c = &theme.colors;
+            if resolved {
+                let toggle = view.clone();
+                let id = thread.to_owned();
+                out.push(
+                    div()
+                        .id(SharedString::from(format!("hosted.thread.{thread}")))
+                        .mx(px(10.))
+                        .my(px(4.))
+                        .px(px(10.))
+                        .py(px(6.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c.border)
+                        .bg(c.background)
+                        .font_family(theme.fonts.body.clone())
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .cursor_pointer()
+                        .on_click(move |_, _, cx| {
+                            toggle.update(cx, |this, cx| this.toggle_thread_expanded(&id, cx));
+                        })
+                        .child(
+                            lucide(LucideIcon::CircleCheck)
+                                .size(px(14.))
+                                .text_color(c.success),
+                        )
+                        .child(div().flex_1().child(format!(
+                            "Resolved · {} by {}",
+                            match in_thread.len() {
+                                1 => "1 comment".to_owned(),
+                                n => format!("{n} comments"),
+                            },
+                            in_thread[0].comment.author.name()
+                        )))
+                        .child(if expanded { "Hide" } else { "Show" })
+                        .into_any_element(),
+                );
+            }
+            if !expanded {
+                continue;
+            }
+            for comment in &in_thread {
                 out.push(line_comment_card(comment, theme).into_any_element());
             }
             let open = this.reply_thread.as_ref().is_some_and(|(_, t)| t == thread);
@@ -2135,10 +2250,13 @@ impl HostedView {
                 }
             } else {
                 let reply = view.clone();
+                let resolve = view.clone();
                 let id = thread.to_owned();
+                let resolve_id = thread.to_owned();
                 out.push(
                     div()
                         .flex()
+                        .gap(px(4.))
                         .px(px(10.))
                         .pb(px(6.))
                         .font_family(theme.fonts.body.clone())
@@ -2151,6 +2269,22 @@ impl HostedView {
                                     let id = id.clone();
                                     reply.update(cx, |this, cx| {
                                         this.set_reply_thread(Some(id), cx);
+                                    });
+                                }),
+                        )
+                        .child(
+                            Button::new(SharedString::from(format!("hosted.resolve.{thread}")))
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::Sm)
+                                .label(match (resolved, resolving) {
+                                    (_, true) => "Saving…",
+                                    (true, false) => "Unresolve",
+                                    (false, false) => "Resolve",
+                                })
+                                .disabled(resolving)
+                                .on_click(move |_, _, cx| {
+                                    resolve.update(cx, |this, cx| {
+                                        this.toggle_thread_resolved(&resolve_id, cx);
                                     });
                                 }),
                         )
