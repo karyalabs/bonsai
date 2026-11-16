@@ -15,6 +15,7 @@ use gpui_kit::{
 
 use crate::{
     activity_panel::ago,
+    avatar::avatar,
     refs::{Checkout, RefDialog, RefsPanel},
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
@@ -100,7 +101,19 @@ pub fn labels(snapshot: &Snapshot) -> HashMap<Oid, Vec<GraphLabel>> {
     for branch in snapshot.branches.iter().filter(|b| !b.is_head) {
         add(&branch.oid, GraphLabelKind::Branch, branch.name.clone());
     }
-    for remote in snapshot.remote_branches.iter().filter(|r| r.name != "HEAD") {
+    // A remote branch level with the local branch of the same name adds
+    // nothing but width: the local label stands for both.
+    let in_sync = |remote: &bonsai_git::RemoteBranch| {
+        snapshot
+            .branches
+            .iter()
+            .any(|b| b.name == remote.name && b.oid == remote.oid)
+    };
+    for remote in snapshot
+        .remote_branches
+        .iter()
+        .filter(|r| r.name != "HEAD" && !in_sync(r))
+    {
         add(
             &remote.oid,
             GraphLabelKind::Remote,
@@ -477,6 +490,15 @@ impl HistoryView {
         cx.emit(HistoryEvent::Selected(selected));
     }
 
+    /// Selects and scrolls to the commit `HEAD` points at.
+    pub fn reveal_head(&mut self, cx: &mut Context<Self>) {
+        let oid = match &self.model.read(cx).snapshot().map(|s| &s.head) {
+            Some(Head::Branch { oid: Some(oid), .. } | Head::Detached { oid }) => oid.clone(),
+            _ => return,
+        };
+        self.reveal(&oid, cx);
+    }
+
     fn current_branch(&self, cx: &gpui_kit::App) -> Option<String> {
         match &self.model.read(cx).snapshot()?.head {
             Head::Branch { name, .. } => Some(name.clone()),
@@ -677,6 +699,7 @@ impl HistoryView {
             .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
             .map(ago)
             .unwrap_or_default();
+        let dark = theme.mode == crate::ui::theme::ThemeMode::Dark;
         div()
             .w_full()
             .min_w_0()
@@ -687,6 +710,9 @@ impl HistoryView {
                 this.child(
                     div()
                         .flex_shrink_0()
+                        .px(px(5.))
+                        .rounded(px(8.))
+                        .bg(c.muted)
                         .text_xs()
                         .text_color(c.muted_foreground)
                         .child(format!("+{hidden}")),
@@ -702,14 +728,30 @@ impl HistoryView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .text_xs()
-                    .text_color(c.muted_foreground)
-                    .child(commit.author_name.clone()),
+                    .w(px(150.))
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(avatar(
+                        &commit.author_name,
+                        &commit.author_email,
+                        px(18.),
+                        dark,
+                    ))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(c.muted_foreground)
+                            .child(commit.author_name.clone()),
+                    ),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(72.))
+                    .w(px(84.))
+                    .truncate()
                     .text_xs()
                     .text_color(c.muted_foreground)
                     .child(when),
@@ -717,9 +759,10 @@ impl HistoryView {
             .child(
                 div()
                     .flex_shrink_0()
+                    .w(px(56.))
                     .font_family(theme.fonts.mono.clone())
                     .text_xs()
-                    .text_color(c.muted_foreground)
+                    .text_color(c.muted_foreground.opacity(0.8))
                     .child(short(&commit.oid)),
             )
             .into_any_element()
@@ -815,6 +858,20 @@ impl Render for HistoryView {
                         div()
                             .flex_1()
                             .child(Input::new(&search).aria_label("Search history")),
+                    )
+                    .child(
+                        crate::workspace::title_bar::bar_button(
+                            "history.head",
+                            "Jump to HEAD",
+                            false,
+                            &theme,
+                        )
+                        .child(
+                            gpui_icons::lucide(LucideIcon::LocateFixed)
+                                .size(px(15.))
+                                .text_color(c.foreground),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| this.reveal_head(cx))),
                     ),
             )
             .when_some(self.error.clone(), |this, error| {
