@@ -491,3 +491,56 @@ fn reads_ci_checks_on_each_provider() {
     assert_eq!(checks[1].name, "lint");
     assert_eq!(checks[1].state, CheckState::Pending);
 }
+
+#[test]
+fn lists_changed_files_on_each_provider() {
+    use bonsai_providers::FileChange;
+    let github_client = Recorded::new(vec![(
+        Method::Get,
+        "https://api.github.com/repos/ada/engine/pulls/7/files?per_page=100",
+        json(
+            200,
+            r#"[{"filename":"src/sync.rs","status":"modified","additions":3,"deletions":1,"patch":"@@ -1 +1,3 @@\n-a\n+b\n+c\n+d"},
+                {"filename":"docs/new.md","previous_filename":"docs/old.md","status":"renamed","additions":0,"deletions":0},
+                {"filename":"logo.png","status":"added","additions":0,"deletions":0}]"#,
+        ),
+    )]);
+    let files = block_on(GitHub::new(&github_client).changed_files("t", "ada/engine", 7)).unwrap();
+    assert_eq!(files.len(), 3);
+    assert_eq!(files[0].change, FileChange::Modified);
+    assert!(files[0].patch.as_deref().unwrap().starts_with("@@"));
+    assert_eq!(files[1].old_path.as_deref(), Some("docs/old.md"));
+    assert_eq!(files[2].change, FileChange::Added);
+    assert_eq!(files[2].patch, None);
+
+    let gitlab_client = Recorded::new(vec![(
+        Method::Get,
+        "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/diffs?per_page=100",
+        json(
+            200,
+            r#"[{"old_path":"a.rs","new_path":"a.rs","new_file":false,"renamed_file":false,"deleted_file":false,"diff":"@@ -1 +1,2 @@\n-x\n+y\n+z\n"},
+                {"old_path":"gone.rs","new_path":"gone.rs","new_file":false,"renamed_file":false,"deleted_file":true,"diff":""}]"#,
+        ),
+    )]);
+    let files = block_on(GitLab::new(&gitlab_client).changed_files("t", "team/engine", 4)).unwrap();
+    assert_eq!((files[0].additions, files[0].deletions), (2, 1));
+    assert_eq!(files[1].change, FileChange::Removed);
+    assert_eq!(files[1].patch, None);
+
+    let bitbucket_client = Recorded::new(vec![(
+        Method::Get,
+        "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/diffstat?pagelen=100",
+        json(
+            200,
+            r#"{"values":[{"status":"renamed","lines_added":1,"lines_removed":0,"old":{"path":"a.md"},"new":{"path":"b.md"}},
+                          {"status":"removed","lines_added":0,"lines_removed":9,"old":{"path":"c.md"},"new":null}]}"#,
+        ),
+    )]);
+    let files =
+        block_on(Bitbucket::new(&bitbucket_client).changed_files("t", "analytical/engine", 12))
+            .unwrap();
+    assert_eq!(files[0].path, "b.md");
+    assert_eq!(files[0].old_path.as_deref(), Some("a.md"));
+    assert_eq!(files[1].path, "c.md");
+    assert_eq!(files[1].deletions, 9);
+}

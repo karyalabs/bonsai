@@ -208,6 +208,43 @@ pub struct Comment {
     pub created_at: String,
 }
 
+/// What a pull request does to one file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FileChange {
+    Added,
+    Removed,
+    Modified,
+    Renamed,
+}
+
+/// One file a pull request changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangedFile {
+    pub path: String,
+    /// The path before a rename.
+    pub old_path: Option<String>,
+    pub change: FileChange,
+    pub additions: u32,
+    pub deletions: u32,
+    /// The unified diff's hunks, when the provider sends them (not for
+    /// binary or very large files, nor on Bitbucket).
+    pub patch: Option<String>,
+}
+
+/// Counts a unified diff's added and removed lines.
+#[must_use]
+pub fn count_lines(patch: &str) -> (u32, u32) {
+    let mut counts = (0, 0);
+    for line in patch.lines() {
+        if line.starts_with('+') && !line.starts_with("+++") {
+            counts.0 += 1;
+        } else if line.starts_with('-') && !line.starts_with("---") {
+            counts.1 += 1;
+        }
+    }
+    counts
+}
+
 /// How far one CI check on a commit has got.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum CheckState {
@@ -381,6 +418,14 @@ pub trait Provider: Send + Sync {
         full_name: &'a str,
         new: &'a NewIssue,
     ) -> BoxFuture<'a, Result<Issue>>;
+
+    /// The files a pull request changes, the first 100.
+    fn changed_files<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<ChangedFile>>>;
 
     /// The CI checks on a commit, by name.
     fn checks<'a>(

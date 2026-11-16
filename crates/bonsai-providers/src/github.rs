@@ -6,10 +6,11 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    Account, BoxFuture, Capabilities, Check, CheckState, Comment, Error, HttpClient, Issue,
-    ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository,
-    Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request,
-    Response, Result, StateFilter, form_encode, percent_encode,
+    Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
+    percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -592,6 +593,38 @@ impl<C: HttpClient> Provider for GitHub<C> {
         Box::pin(self.open_issue(token, full_name, new))
     }
 
+    fn changed_files<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<ChangedFile>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/pulls/{number}/files?per_page=100",
+                self.repo_url(full_name)?
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let files: Vec<PullFile> = self.parse(&response.body)?;
+            Ok(files
+                .into_iter()
+                .map(|file| ChangedFile {
+                    change: match file.status.as_str() {
+                        "added" => FileChange::Added,
+                        "removed" => FileChange::Removed,
+                        "renamed" => FileChange::Renamed,
+                        _ => FileChange::Modified,
+                    },
+                    path: file.filename,
+                    old_path: file.previous_filename,
+                    additions: file.additions,
+                    deletions: file.deletions,
+                    patch: file.patch,
+                })
+                .collect())
+        })
+    }
+
     fn checks<'a>(
         &'a self,
         token: &'a str,
@@ -774,6 +807,18 @@ impl LabelBody {
             color: self.color.filter(|c| c.len() == 6),
         }
     }
+}
+
+#[derive(Deserialize)]
+struct PullFile {
+    filename: String,
+    previous_filename: Option<String>,
+    status: String,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    patch: Option<String>,
 }
 
 #[derive(Deserialize)]

@@ -5,10 +5,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Check, CheckState, Comment, Error, HttpClient, Issue,
-    ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository,
-    Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request,
-    Response, Result, StateFilter, form_encode, github::next_link, oauth::Tokens, percent_encode,
+    Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
+    github::next_link, oauth::Tokens, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -477,6 +478,44 @@ impl<C: HttpClient> Provider for GitLab<C> {
         })
     }
 
+    fn changed_files<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<ChangedFile>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/merge_requests/{number}/diffs?per_page=100",
+                self.project_url(full_name)
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let diffs: Vec<MergeRequestDiff> = self.parse(&response.body)?;
+            Ok(diffs
+                .into_iter()
+                .map(|diff| {
+                    let (additions, deletions) = crate::count_lines(&diff.diff);
+                    ChangedFile {
+                        change: if diff.new_file {
+                            FileChange::Added
+                        } else if diff.deleted_file {
+                            FileChange::Removed
+                        } else if diff.renamed_file {
+                            FileChange::Renamed
+                        } else {
+                            FileChange::Modified
+                        },
+                        old_path: diff.renamed_file.then_some(diff.old_path),
+                        path: diff.new_path,
+                        additions,
+                        deletions,
+                        patch: (!diff.diff.is_empty()).then_some(diff.diff),
+                    }
+                })
+                .collect())
+        })
+    }
+
     fn checks<'a>(
         &'a self,
         token: &'a str,
@@ -612,6 +651,20 @@ impl Note {
             created_at: self.created_at,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct MergeRequestDiff {
+    old_path: String,
+    new_path: String,
+    #[serde(default)]
+    new_file: bool,
+    #[serde(default)]
+    renamed_file: bool,
+    #[serde(default)]
+    deleted_file: bool,
+    #[serde(default)]
+    diff: String,
 }
 
 #[derive(Deserialize)]
