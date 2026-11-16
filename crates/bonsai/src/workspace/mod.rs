@@ -24,6 +24,7 @@ use crate::{
     diff_pane::DiffPane,
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     refs::{RefDialog, RefsEvent, RefsPanel},
+    remote_browser::{RemoteBrowser, RemoteBrowserEvent},
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
     sync_bar::SyncBar,
@@ -79,6 +80,9 @@ pub struct Workspace {
     accounts_handle: DialogHandle,
     accounts: Option<Entity<AccountsSheet>>,
     accounts_events: Option<Subscription>,
+    /// The Welcome screen's remote repositories, built on first show and
+    /// again after the accounts change.
+    remote_browser: Option<(Entity<RemoteBrowser>, Subscription)>,
     /// A path to open Purge from History for on the next render.
     purge_requested: Option<PathBuf>,
     /// Shows the welcome screen in place of the active tab (New Tab).
@@ -124,6 +128,7 @@ impl Workspace {
             accounts_handle: DialogHandle::new(false),
             accounts: None,
             accounts_events: None,
+            remote_browser: None,
             purge_requested: None,
             welcome: false,
             message: None,
@@ -454,6 +459,7 @@ impl Workspace {
                 AccountsEvent::Dismissed => {
                     this.accounts_handle.close(window, cx);
                     this.accounts = None;
+                    this.remote_browser = None;
                     cx.notify();
                 }
             },
@@ -495,10 +501,53 @@ impl Workspace {
         .on_cancel(move |_, _, cx| {
             let _ = this.update(cx, |workspace, cx| {
                 workspace.accounts = None;
+                workspace.remote_browser = None;
                 cx.notify();
             });
             true
         })
+    }
+
+    /// Builds the Welcome screen's remote browser with the Keychain and the
+    /// system's HTTP.
+    fn ensure_remote_browser(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Without a session file (tests), there is no accounts file either.
+        if self.remote_browser.is_some() || self.git.is_err() || self.session_path.is_none() {
+            return;
+        }
+        let accounts = Accounts::load(
+            self.accounts_path(),
+            std::sync::Arc::from(bonsai_keychain::default_store()),
+        );
+        let client = std::sync::Arc::new(crate::http::CurlClient::default());
+        self.set_remote_browser(accounts, client, window, cx);
+    }
+
+    pub fn set_remote_browser(
+        &mut self,
+        accounts: Accounts,
+        client: std::sync::Arc<dyn bonsai_providers::HttpClient>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let recents = self.session.recents.clone();
+        let browser = cx.new(|cx| RemoteBrowser::new(accounts, client, recents, window, cx));
+        let events = cx.subscribe_in(
+            &browser,
+            window,
+            |this, _, event: &RemoteBrowserEvent, window, cx| match event {
+                RemoteBrowserEvent::Clone(url) => this.show_clone(Some(url), window, cx),
+                RemoteBrowserEvent::Open(path) => this.open_recent(path, cx),
+                RemoteBrowserEvent::ManageAccounts => this.show_accounts(window, cx),
+            },
+        );
+        self.remote_browser = Some((browser, events));
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn remote_browser(&self) -> Option<&Entity<RemoteBrowser>> {
+        self.remote_browser.as_ref().map(|(browser, _)| browser)
     }
 
     fn render_purge(
@@ -1062,6 +1111,10 @@ impl Workspace {
                     .gap(px(24.))
                     .child(header)
                     .child(actions)
+                    .when_some(
+                        self.remote_browser().cloned(),
+                        gpui_kit::ParentElement::child,
+                    )
                     .when(!recents.is_empty(), |this| {
                         this.child(
                             div()
@@ -1241,6 +1294,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.welcome || self.tabs.is_empty() {
+            self.ensure_remote_browser(window, cx);
+        }
         if let Some(path) = self.purge_requested.take() {
             self.show_purge(Some(path), window, cx);
         }

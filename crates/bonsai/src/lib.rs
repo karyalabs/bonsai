@@ -11,6 +11,7 @@ pub mod diff_pane;
 pub mod http;
 pub mod purge_sheet;
 pub mod refs;
+pub mod remote_browser;
 pub mod repository;
 pub mod session;
 pub mod sync_bar;
