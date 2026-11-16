@@ -10,7 +10,7 @@ use std::{
     thread,
 };
 
-use bonsai_git::{Git, PushRequest, Repository};
+use bonsai_git::{CommandLog, CommandRecord, Git, PushRequest, Repository};
 use bonsai_keychain::{ACCOUNTS_ENV, AccountRef, encode_accounts};
 
 const TOKEN: &str = "bns_test_token_4f2a";
@@ -157,6 +157,16 @@ fn handle(mut stream: TcpStream, root: &Path, log: &Mutex<Vec<Option<String>>>) 
     let _ = stream.write_all(content);
 }
 
+/// Keeps every command record, as the activity log does.
+#[derive(Default)]
+struct Records(Mutex<Vec<CommandRecord>>);
+
+impl CommandLog for Records {
+    fn record(&self, record: &CommandRecord) {
+        self.0.lock().unwrap().push(record.clone());
+    }
+}
+
 fn base64(text: &str) -> String {
     const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let bytes = text.as_bytes();
@@ -211,9 +221,11 @@ fn pushes_over_https_with_a_connected_account_token() {
         git_username: "x-access-token".into(),
     }]);
     let bonsai = env!("CARGO_BIN_EXE_bonsai");
+    let records = Arc::new(Records::default());
     let with_askpass = |git: Git, token: &str| {
         Repository::open(
-            &git.with_askpass(bonsai)
+            &git.with_log(records.clone())
+                .with_askpass(bonsai)
                 .with_env(ACCOUNTS_ENV, accounts.clone())
                 .with_env(
                     bonsai::askpass::TEST_TOKENS_ENV,
@@ -249,4 +261,26 @@ fn pushes_over_https_with_a_connected_account_token() {
         git(&work, &["rev-parse", "main"])
     );
     assert!(seen.lock().unwrap().iter().any(Option::is_some));
+
+    // The activity log saw both pushes and neither token.
+    let records = records.0.lock().unwrap();
+    assert!(
+        records
+            .iter()
+            .filter(|r| r.args.iter().any(|a| a == "push"))
+            .count()
+            >= 2
+    );
+    for record in records.iter() {
+        let text = format!(
+            "{} {:?} {} {}",
+            record.command_line(),
+            record.cwd,
+            record.stdout,
+            record.stderr
+        );
+        for secret in [TOKEN, "nope"] {
+            assert!(!text.contains(secret), "{secret} in {text}");
+        }
+    }
 }

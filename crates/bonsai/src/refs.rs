@@ -18,14 +18,13 @@ use gpui_kit::{
 };
 
 use crate::{
+    confirm::Confirm,
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonVariant},
         checkbox::Checkbox,
         context_menu::context_menu,
-        dialog::{
-            DialogHandle, dialog, dialog_description, dialog_footer, dialog_popup, dialog_title,
-        },
+        dialog::{DialogHandle, dialog, dialog_description, dialog_popup, dialog_title},
         input::{Input, InputEvent, InputState},
         menu::{MenuItem, MenuState},
         sidebar::{SidebarItem, sidebar_group_label},
@@ -1186,27 +1185,18 @@ impl RefsPanel {
                 )
             })
             .child(
-                dialog_footer(cx)
-                    .child(
-                        Button::new("refs.dialog.cancel")
-                            .variant(ButtonVariant::Outline)
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.dialog = None;
-                                this.handle.close(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("refs.dialog.confirm")
-                            .variant(if destructive {
-                                ButtonVariant::Destructive
-                            } else {
-                                ButtonVariant::Default
-                            })
-                            .label(confirm)
-                            .disabled(!can_confirm)
-                            .on_click(cx.listener(|this, _, window, cx| this.confirm(window, cx))),
-                    ),
+                Confirm::new(
+                    "refs.dialog",
+                    confirm,
+                    |this: &mut Self, window, cx| {
+                        this.dialog = None;
+                        this.handle.close(window, cx);
+                    },
+                    Self::confirm,
+                )
+                .destructive(destructive)
+                .enabled(can_confirm)
+                .footer(cx),
             );
         let this = cx.entity().downgrade();
         dialog("refs.dialog", &self.handle, popup, window, cx).on_cancel(move |_, _, cx| {

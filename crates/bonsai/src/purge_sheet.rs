@@ -19,6 +19,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    confirm::Confirm,
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonVariant},
@@ -612,23 +613,18 @@ impl PurgeSheet {
                 )
             })
             .child(
-                dialog_footer(cx)
-                    .child(
-                        Button::new("purge.back")
-                            .variant(ButtonVariant::Outline)
-                            .label("Back")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.phase = Phase::Pick;
-                                cx.notify();
-                            })),
-                    )
-                    .child(
-                        Button::new("purge.confirm")
-                            .variant(ButtonVariant::Destructive)
-                            .label("Purge")
-                            .disabled(!can_purge)
-                            .on_click(cx.listener(|this, _, _, cx| this.purge(cx))),
-                    ),
+                Confirm::new(
+                    "purge",
+                    "Purge",
+                    |this: &mut Self, _, cx| {
+                        this.phase = Phase::Pick;
+                        cx.notify();
+                    },
+                    |this, _, cx| this.purge(cx),
+                )
+                .cancel_label("Back")
+                .enabled(can_purge)
+                .footer(cx),
             )
             .into_any_element()
     }

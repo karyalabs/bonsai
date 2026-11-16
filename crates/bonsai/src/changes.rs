@@ -16,13 +16,12 @@ use gpui_kit::{
 
 use crate::{
     composer::CommitComposer,
+    confirm::{self, Confirm},
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonVariant},
         context_menu::context_menu,
-        dialog::{
-            DialogHandle, dialog, dialog_description, dialog_footer, dialog_popup, dialog_title,
-        },
+        dialog::{DialogHandle, dialog},
         menu::{MenuItem, MenuState},
         theme::UiTheme,
         virtual_list::{
@@ -791,33 +790,25 @@ impl ChangesView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement + use<> {
         let description = discard_description(&self.pending_discard);
-        let popup = dialog_popup("changes.discard.popup", "Discard Changes", cx)
-            .child(dialog_title("changes.discard.title", cx).child("Discard changes?"))
-            .child(
-                dialog_description("changes.discard.description", cx)
-                    .child(format!("{description} This can't be undone.")),
+        let popup = confirm::popup(
+            "changes.discard",
+            "Discard changes?",
+            format!("{description} This can't be undone."),
+            cx,
+        )
+        .child(
+            Confirm::new(
+                "changes.discard",
+                "Discard",
+                |this: &mut Self, window, cx| this.discard.close(window, cx),
+                |this, window, cx| {
+                    this.discard.close(window, cx);
+                    let targets = std::mem::take(&mut this.pending_discard);
+                    this.discard(targets, cx);
+                },
             )
-            .child(
-                dialog_footer(cx)
-                    .child(
-                        Button::new("changes.discard.cancel")
-                            .variant(ButtonVariant::Outline)
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.discard.close(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("changes.discard.confirm")
-                            .variant(ButtonVariant::Destructive)
-                            .label("Discard")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.discard.close(window, cx);
-                                let targets = std::mem::take(&mut this.pending_discard);
-                                this.discard(targets, cx);
-                            })),
-                    ),
-            );
+            .footer(cx),
+        );
         dialog("changes.discard", &self.discard, popup, window, cx)
     }
 }

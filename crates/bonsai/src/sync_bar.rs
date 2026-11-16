@@ -9,12 +9,11 @@ use gpui_kit::{
 };
 
 use crate::{
+    confirm::{self, Confirm},
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonSize, ButtonVariant},
-        dialog::{
-            DialogHandle, dialog, dialog_description, dialog_footer, dialog_popup, dialog_title,
-        },
+        dialog::{DialogHandle, dialog},
         menu::{Menu, MenuItem, MenuState},
         progress::Progress,
         theme::UiTheme,
@@ -283,34 +282,29 @@ impl SyncBar {
                 )
             })
             .unwrap_or_default();
-        let popup = dialog_popup("sync.force.popup", "Force Push", cx)
-            .child(dialog_title("sync.force.title", cx).child(format!("Force push to {target}?")))
-            .child(dialog_description("sync.force.description", cx).child(
-                "This replaces the remote branch with yours. Bonsai uses a lease: if someone pushed commits you haven't fetched, the push stops instead of deleting their work.",
-            ))
-            .child(
-                dialog_footer(cx)
-                    .child(
-                        Button::new("sync.force.cancel")
-                            .variant(ButtonVariant::Outline)
-                            .label("Cancel")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.force_request = None;
-                                this.force.close(window, cx);
-                            })),
-                    )
-                    .child(
-                        Button::new("sync.force.confirm")
-                            .variant(ButtonVariant::Destructive)
-                            .label("Force Push")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.force.close(window, cx);
-                                if let Some(request) = this.force_request.take() {
-                                    this.run_push(request, cx);
-                                }
-                            })),
-                    ),
-            );
+        let popup = confirm::popup(
+            "sync.force",
+            format!("Force push to {target}?"),
+            "This replaces the remote branch with yours. Bonsai uses a lease: if someone pushed commits you haven't fetched, the push stops instead of deleting their work.",
+            cx,
+        )
+        .child(
+            Confirm::new(
+                "sync.force",
+                "Force Push",
+                |this: &mut Self, window, cx| {
+                    this.force_request = None;
+                    this.force.close(window, cx);
+                },
+                |this, window, cx| {
+                    this.force.close(window, cx);
+                    if let Some(request) = this.force_request.take() {
+                        this.run_push(request, cx);
+                    }
+                },
+            )
+            .footer(cx),
+        );
         dialog("sync.force", &self.force, popup, window, cx)
     }
 }
