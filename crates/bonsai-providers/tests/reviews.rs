@@ -544,3 +544,57 @@ fn lists_changed_files_on_each_provider() {
     assert_eq!(files[1].path, "c.md");
     assert_eq!(files[1].deletions, 9);
 }
+
+#[test]
+fn approves_and_requests_changes_on_each_provider() {
+    use bonsai_providers::{Error, Verdict};
+    let github_client = Recorded::new(vec![(
+        Method::Post,
+        "https://api.github.com/repos/ada/engine/pulls/7/reviews",
+        json(200, r#"{"id":1,"state":"CHANGES_REQUESTED"}"#),
+    )]);
+    let github = GitHub::new(&github_client);
+    block_on(github.review("t", "ada/engine", 7, Verdict::RequestChanges, "Add a test")).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&github_client.requests()[0].body).unwrap();
+    assert_eq!(sent["event"], "REQUEST_CHANGES");
+    assert_eq!(sent["body"], "Add a test");
+    assert!(github.can_request_changes());
+
+    let gitlab_client = Recorded::new(vec![(
+        Method::Post,
+        "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/approve",
+        json(201, r#"{"id":4}"#),
+    )]);
+    let gitlab = GitLab::new(&gitlab_client);
+    block_on(gitlab.review("t", "team/engine", 4, Verdict::Approve, "")).unwrap();
+    let refused = block_on(gitlab.review("t", "team/engine", 4, Verdict::RequestChanges, "x"));
+    assert!(matches!(refused, Err(Error::Rejected(_))));
+    assert!(!gitlab.can_request_changes());
+    assert!(gitlab_client.finished());
+
+    let bitbucket_client = Recorded::new(vec![
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/approve",
+            json(200, r#"{"approved":true}"#),
+        ),
+        (
+            Method::Post,
+            "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments",
+            json(
+                201,
+                r#"{"user":{"display_name":"Ada Lovelace"},"content":{"raw":"Nice"},"created_on":"2026-11-16T09:00:00Z"}"#,
+            ),
+        ),
+    ]);
+    block_on(Bitbucket::new(&bitbucket_client).review(
+        "t",
+        "analytical/engine",
+        12,
+        Verdict::Approve,
+        "Nice",
+    ))
+    .unwrap();
+    assert!(bitbucket_client.finished());
+}

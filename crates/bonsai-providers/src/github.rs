@@ -9,8 +9,8 @@ use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
     HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue,
     NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
-    percent_encode,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
+    form_encode, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -591,6 +591,32 @@ impl<C: HttpClient> Provider for GitHub<C> {
         new: &'a NewIssue,
     ) -> BoxFuture<'a, Result<Issue>> {
         Box::pin(self.open_issue(token, full_name, new))
+    }
+
+    fn review<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        verdict: Verdict,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let event = match verdict {
+                Verdict::Approve => "APPROVE",
+                Verdict::RequestChanges => "REQUEST_CHANGES",
+            };
+            self.send(
+                Request::post(
+                    format!("{}/pulls/{number}/reviews", self.repo_url(full_name)?),
+                    json!({ "event": event, "body": body }).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
     }
 
     fn changed_files<'a>(

@@ -20,5 +20,5 @@ pub use types::{
     Account, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange, Issue,
     ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository,
     Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Result,
-    StateFilter, count_lines,
+    StateFilter, Verdict, count_lines,
 };

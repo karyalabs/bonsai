@@ -8,8 +8,8 @@ use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
     HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue,
     NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
-    github::next_link, oauth::Tokens, percent_encode,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
+    form_encode, github::next_link, oauth::Tokens, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -476,6 +476,44 @@ impl<C: HttpClient> Provider for GitLab<C> {
                 .await?;
             Ok(self.parse::<IssueBody>(&response.body)?.into_issue())
         })
+    }
+
+    fn review<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        verdict: Verdict,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if verdict == Verdict::RequestChanges {
+                return Err(Error::Rejected(
+                    "GitLab can't request changes. Leave a comment instead.".to_owned(),
+                ));
+            }
+            self.send(
+                Request::post(
+                    format!(
+                        "{}/merge_requests/{number}/approve",
+                        self.project_url(full_name)
+                    ),
+                    "{}",
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            if !body.trim().is_empty() {
+                self.add_comment(token, full_name, ItemKind::PullRequest, number, body)
+                    .await?;
+            }
+            Ok(())
+        })
+    }
+
+    fn can_request_changes(&self) -> bool {
+        false
     }
 
     fn changed_files<'a>(
