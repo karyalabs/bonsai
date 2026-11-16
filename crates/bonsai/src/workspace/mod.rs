@@ -29,6 +29,7 @@ use crate::{
     diff_pane::{DiffPane, DiffPaneEvent},
     history::{EditCommits, HistoryEvent, HistoryView},
     hosted::{HostedEnv, HostedEvent, HostedKind, HostedView},
+    new_issue_sheet::{NewIssueEvent, NewIssueSheet},
     publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     rebase_sheet::{RebaseEvent, RebaseSheet},
@@ -67,6 +68,7 @@ pub enum Section {
 enum SheetRequest {
     Accounts,
     CreatePull,
+    NewIssue,
 }
 
 impl Section {
@@ -130,6 +132,8 @@ pub struct Workspace {
     publish: Option<(Entity<PublishSheet>, Subscription)>,
     create_pull_handle: DialogHandle,
     create_pull: Option<(Entity<CreatePullSheet>, Subscription)>,
+    new_issue_handle: DialogHandle,
+    new_issue: Option<(Entity<NewIssueSheet>, Subscription)>,
     /// The Welcome screen's remote repositories, built on first show and
     /// again after the accounts change.
     remote_browser: Option<(Entity<RemoteBrowser>, Subscription)>,
@@ -201,6 +205,8 @@ impl Workspace {
             publish: None,
             create_pull_handle: DialogHandle::new(false),
             create_pull: None,
+            new_issue_handle: DialogHandle::new(false),
+            new_issue: None,
             remote_browser: None,
             purge_requested: None,
             hosted_env: None,
@@ -967,6 +973,89 @@ impl Workspace {
         cx.notify();
     }
 
+    fn on_new_issue(
+        &mut self,
+        _: &commands::NewIssue,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_new_issue(window, cx);
+    }
+
+    /// Opens New Issue for the active repository's hosted remote, showing
+    /// Issues behind it.
+    pub fn show_new_issue(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.welcome || self.tabs.is_empty() {
+            return;
+        }
+        self.set_section(Section::Issues, cx);
+        let Some(view) = self.ensure_hosted(cx) else {
+            return;
+        };
+        let Some(target) = view.read(cx).target().cloned() else {
+            return;
+        };
+        let env = self.hosted_env();
+        let accounts = Accounts::load(env.accounts_path.clone(), env.store.clone());
+        let sheet =
+            cx.new(|cx| NewIssueSheet::new(target, &accounts, env.client.clone(), window, cx));
+        let list = view.downgrade();
+        let events = cx.subscribe_in(
+            &sheet,
+            window,
+            move |this, _, event: &NewIssueEvent, window, cx| match event {
+                NewIssueEvent::Dismissed => {
+                    this.new_issue_handle.close(window, cx);
+                    this.new_issue = None;
+                    cx.notify();
+                }
+                NewIssueEvent::Created(number) => {
+                    let number = *number;
+                    let _ = list.update(cx, |list, cx| {
+                        list.select(number, cx);
+                        list.reload(cx);
+                    });
+                }
+            },
+        );
+        self.new_issue = Some((sheet, events));
+        self.new_issue_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn new_issue_sheet(&self) -> Option<&Entity<NewIssueSheet>> {
+        self.new_issue.as_ref().map(|(sheet, _)| sheet)
+    }
+
+    fn render_new_issue(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.new-issue.popup", "New Issue", cx)
+            .max_w(px(560.))
+            .when_some(
+                self.new_issue_sheet().cloned(),
+                gpui_kit::ParentElement::child,
+            );
+        let this = cx.entity().downgrade();
+        dialog(
+            "workspace.new-issue",
+            &self.new_issue_handle,
+            popup,
+            window,
+            cx,
+        )
+        .on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.new_issue = None;
+                cx.notify();
+            });
+            true
+        })
+    }
+
     #[must_use]
     pub fn create_pull_sheet(&self) -> Option<&Entity<CreatePullSheet>> {
         self.create_pull.as_ref().map(|(sheet, _)| sheet)
@@ -1231,6 +1320,10 @@ impl Workspace {
         let events = cx.subscribe(&view, |this, _, event: &HostedEvent, cx| match event {
             HostedEvent::ManageAccounts => {
                 this.sheet_request = Some(SheetRequest::Accounts);
+                cx.notify();
+            }
+            HostedEvent::CreateIssue => {
+                this.sheet_request = Some(SheetRequest::NewIssue);
                 cx.notify();
             }
             HostedEvent::CreatePullRequest => {
@@ -2113,6 +2206,7 @@ impl Render for Workspace {
         match self.sheet_request.take() {
             Some(SheetRequest::Accounts) => self.show_accounts(window, cx),
             Some(SheetRequest::CreatePull) => self.show_create_pull(window, cx),
+            Some(SheetRequest::NewIssue) => self.show_new_issue(window, cx),
             None => {}
         }
         if !self.welcome {
@@ -2214,6 +2308,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_terminal))
             .on_action(cx.listener(Self::on_publish))
             .on_action(cx.listener(Self::on_create_pull_request))
+            .on_action(cx.listener(Self::on_new_issue))
             .on_action(cx.listener(Self::on_switch_branch))
             .on_action(cx.listener(Self::on_new_branch))
             .size_full()
@@ -2233,6 +2328,7 @@ impl Render for Workspace {
             .child(self.render_settings(window, cx))
             .child(self.render_publish(window, cx))
             .child(self.render_create_pull(window, cx))
+            .child(self.render_new_issue(window, cx))
             .child(self.render_branch_picker(window, cx))
             .child(self.toasts.clone())
     }

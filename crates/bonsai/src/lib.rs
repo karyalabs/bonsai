@@ -16,6 +16,7 @@ pub mod file_icon;
 pub mod history;
 pub mod hosted;
 pub mod http;
+pub mod new_issue_sheet;
 pub mod publish_sheet;
 pub mod purge_sheet;
 pub mod rebase_sheet;

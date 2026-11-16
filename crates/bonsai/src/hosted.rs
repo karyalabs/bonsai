@@ -13,8 +13,8 @@ use std::{
 use bonsai_git::Snapshot;
 use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
-    HttpClient, Issue, ItemQuery, ItemState, Label, Person, ProviderKind, PullRequest, StateFilter,
-    hosted_repository,
+    Comment, HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, Person,
+    Provider, ProviderKind, PullRequest, StateFilter, hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -64,6 +64,7 @@ pub struct HostedEnv {
 pub enum HostedEvent {
     ManageAccounts,
     CreatePullRequest,
+    CreateIssue,
 }
 
 /// The remote whose pull requests and issues are shown, and the account
@@ -271,8 +272,27 @@ pub struct HostedView {
     /// Ignores results from a request that has since been replaced.
     generation: u64,
     started: bool,
+    /// Each item's comments, by number, loaded when it is first shown.
+    conversations: std::collections::HashMap<u64, Conversation>,
+    merge_method: MergeMethod,
+    /// The pull request being merged.
+    merging: Option<u64>,
+    merge_error: Option<(u64, SharedString)>,
     tasks: Vec<Task<()>>,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Conversation {
+    Loading,
+    Loaded(Vec<Comment>),
+    Failed(SharedString),
+}
+
+const MERGE_METHODS: [(MergeMethod, &str, &str); 3] = [
+    (MergeMethod::Merge, "Merge", "Merge Pull Request"),
+    (MergeMethod::Squash, "Squash", "Squash and Merge"),
+    (MergeMethod::Rebase, "Rebase", "Rebase and Merge"),
+];
 
 impl EventEmitter<HostedEvent> for HostedView {}
 
@@ -297,6 +317,10 @@ impl HostedView {
             selected: None,
             generation: 0,
             started: false,
+            conversations: std::collections::HashMap::new(),
+            merge_method: MergeMethod::Merge,
+            merging: None,
+            merge_error: None,
             tasks: Vec::new(),
         }
     }
@@ -374,6 +398,131 @@ impl HostedView {
 
     pub fn select(&mut self, number: u64, cx: &mut Context<Self>) {
         self.selected = Some(number);
+        cx.notify();
+    }
+
+    /// The selected item's comments, if they have been asked for.
+    #[must_use]
+    pub fn conversation(&self, number: u64) -> Option<&Conversation> {
+        self.conversations.get(&number)
+    }
+
+    pub fn set_merge_method(&mut self, method: MergeMethod, cx: &mut Context<Self>) {
+        self.merge_method = method;
+        cx.notify();
+    }
+
+    /// The target, its API credential and its provider, or why there are none.
+    fn session(&self) -> Result<(Target, String, Box<dyn Provider>), SharedString> {
+        let Availability::Ready(target) = self.availability.clone() else {
+            return Err("No account reads this repository.".into());
+        };
+        let token = match self.accounts().token(&target.connected) {
+            Some(token) => token,
+            None if crate::http::replaying() => Secret::new(""),
+            None => return Err("This account has no token. Sign in again in Accounts.".into()),
+        };
+        let api = target.connected.api_token(&token);
+        let provider = provider(
+            target.connected.account.kind,
+            &target.connected.account.host,
+            self.env.client.clone(),
+        );
+        Ok((target, api, provider))
+    }
+
+    /// Loads the selected item's comments the first time it is shown.
+    pub fn load_conversation(&mut self, cx: &mut Context<Self>) {
+        let Some(number) = self.selected else {
+            return;
+        };
+        if self.conversations.contains_key(&number) || self.selected().is_none() {
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.conversations
+                    .insert(number, Conversation::Failed(error));
+                return;
+            }
+        };
+        self.conversations.insert(number, Conversation::Loading);
+        let kind = match self.kind {
+            HostedKind::PullRequests => ItemKind::PullRequest,
+            HostedKind::Issues => ItemKind::Issue,
+        };
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider
+                .comments(&api, &target.full_name, kind, number)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.conversations.insert(
+                    number,
+                    match result {
+                        Ok(comments) => Conversation::Loaded(comments),
+                        Err(error) => Conversation::Failed(error.to_string().into()),
+                    },
+                );
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Merges the selected pull request on the provider, with the chosen
+    /// method, then reloads the list.
+    pub fn merge(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected().cloned() else {
+            return;
+        };
+        if item.pull.is_none() || item.state != ItemState::Open || self.merging.is_some() {
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.merge_error = Some((item.number, error));
+                cx.notify();
+                return;
+            }
+        };
+        let number = item.number;
+        let method = self.merge_method;
+        self.merging = Some(number);
+        self.merge_error = None;
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider
+                .merge_pull_request(&api, &target.full_name, number, method)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.merging = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(item) = this.items.iter_mut().find(|i| i.number == number) {
+                            item.state = ItemState::Merged;
+                        }
+                        // Fetch so the merge shows in History.
+                        let remote = target.remote.clone();
+                        this.model.update(cx, |model, cx| {
+                            model.run_network(
+                                format!("Fetch {remote}"),
+                                move |repository, progress, cancel| {
+                                    repository.fetch(
+                                        Some(&remote),
+                                        false,
+                                        Some(progress),
+                                        Some(cancel),
+                                    )
+                                },
+                                cx,
+                            );
+                        });
+                    }
+                    Err(error) => this.merge_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -715,6 +864,125 @@ impl HostedView {
             markdown(("hosted.body", item.number), item.body.clone(), cx).into_any_element()
         };
         let check_out = view.clone();
+        let mergeable = item.pull.is_some() && item.state == ItemState::Open;
+        let merging = this.merging == Some(item.number);
+        let merge_method = this.merge_method;
+        let merge_error = this
+            .merge_error
+            .as_ref()
+            .filter(|(n, _)| *n == item.number)
+            .map(|(_, e)| e.clone());
+        let merge_row = mergeable.then(|| {
+            let selected = MERGE_METHODS
+                .iter()
+                .position(|(m, _, _)| *m == merge_method)
+                .map(|i| SharedString::from(i.to_string()));
+            let mut group = ToggleGroup::new("hosted.merge-method")
+                .aria_label("How to merge")
+                .segmented(true)
+                .value(selected);
+            for (i, (_, short, _)) in MERGE_METHODS.iter().enumerate() {
+                group = group.item(
+                    ToggleGroupItem::new(
+                        SharedString::from(format!("hosted.merge-method.{i}")),
+                        i.to_string(),
+                    )
+                    .aria_label(*short)
+                    .child(div().text_xs().child(*short)),
+                );
+            }
+            let on_method = view.clone();
+            let group = group.on_change(move |next, _, cx| {
+                if let Some((method, _, _)) = next
+                    .first()
+                    .and_then(|i| i.parse::<usize>().ok())
+                    .and_then(|i| MERGE_METHODS.get(i))
+                {
+                    on_method.update(cx, |this, cx| this.set_merge_method(*method, cx));
+                }
+            });
+            let label = MERGE_METHODS
+                .iter()
+                .find(|(m, _, _)| *m == merge_method)
+                .map_or("Merge Pull Request", |(_, _, label)| label);
+            let on_merge = view.clone();
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .p(px(10.))
+                .rounded(px(8.))
+                .border_1()
+                .border_color(c.border)
+                .child(
+                    lucide(LucideIcon::GitMerge)
+                        .size(px(16.))
+                        .text_color(c.success),
+                )
+                .child(div().flex_1().text_sm().child("Ready to merge"))
+                .child(group)
+                .child(
+                    Button::new("hosted.merge")
+                        .size(ButtonSize::Sm)
+                        .label(if merging { "Merging…" } else { label })
+                        .disabled(merging)
+                        .on_click(move |_, _, cx| on_merge.update(cx, Self::merge)),
+                )
+        });
+        let conversation = match this.conversation(item.number) {
+            None | Some(Conversation::Loading) => div()
+                .text_sm()
+                .text_color(c.muted_foreground)
+                .child("Loading comments…")
+                .into_any_element(),
+            Some(Conversation::Failed(error)) => div()
+                .text_sm()
+                .text_color(c.destructive)
+                .child(error.clone())
+                .into_any_element(),
+            Some(Conversation::Loaded(comments)) if comments.is_empty() => div()
+                .text_sm()
+                .text_color(c.muted_foreground)
+                .child("No comments yet.")
+                .into_any_element(),
+            Some(Conversation::Loaded(comments)) => {
+                let mut list = div().flex().flex_col().gap(px(10.));
+                for (i, comment) in comments.iter().enumerate() {
+                    list = list.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(6.))
+                            .p(px(12.))
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(c.border)
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(6.))
+                                    .text_xs()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            .child(comment.author.name().to_owned()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_color(c.muted_foreground)
+                                            .child(when(&comment.created_at)),
+                                    ),
+                            )
+                            .child(markdown(
+                                SharedString::from(format!("hosted.comment.{}.{i}", item.number)),
+                                comment.body.clone(),
+                                cx,
+                            )),
+                    );
+                }
+                list.into_any_element()
+            }
+        };
         div()
             .id("hosted.detail")
             .size_full()
@@ -817,8 +1085,20 @@ impl HostedView {
                             .on_click(move |_, _, cx| cx.open_url(&web)),
                     ),
             )
+            .children(merge_row)
+            .when_some(merge_error, |this, error| {
+                this.child(div().text_xs().text_color(c.destructive).child(error))
+            })
             .child(div().h(px(1.)).bg(c.border))
             .child(body)
+            .child(
+                div()
+                    .pt(px(6.))
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child("Conversation"),
+            )
+            .child(conversation)
             .into_any_element()
     }
 }
@@ -847,6 +1127,7 @@ fn branch_chip(name: String, cx: &App) -> impl IntoElement {
 
 impl Render for HostedView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.load_conversation(cx);
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let selected = FILTERS
@@ -907,20 +1188,32 @@ impl Render for HostedView {
                     .when(self.loading, |this| {
                         this.child(Spinner::new("hosted.loading"))
                     })
-                    .when(self.kind == HostedKind::PullRequests, |this| {
+                    .when(ready, |this| {
+                        let kind = self.kind;
                         this.child(
                             Button::new("hosted.create")
                                 .variant(ButtonVariant::Outline)
                                 .size(ButtonSize::Sm)
                                 .child(
-                                    lucide(LucideIcon::GitPullRequestCreate)
-                                        .size(px(14.))
-                                        .text_color(c.foreground),
+                                    lucide(match kind {
+                                        HostedKind::PullRequests => {
+                                            LucideIcon::GitPullRequestCreate
+                                        }
+                                        HostedKind::Issues => LucideIcon::CirclePlus,
+                                    })
+                                    .size(px(14.))
+                                    .text_color(c.foreground),
                                 )
                                 .label("New")
-                                .aria_label("New Pull Request")
-                                .on_click(cx.listener(|_, _, _, cx| {
-                                    cx.emit(HostedEvent::CreatePullRequest);
+                                .aria_label(match kind {
+                                    HostedKind::PullRequests => "New Pull Request",
+                                    HostedKind::Issues => "New Issue",
+                                })
+                                .on_click(cx.listener(move |_, _, _, cx| {
+                                    cx.emit(match kind {
+                                        HostedKind::PullRequests => HostedEvent::CreatePullRequest,
+                                        HostedKind::Issues => HostedEvent::CreateIssue,
+                                    });
                                 })),
                         )
                     })

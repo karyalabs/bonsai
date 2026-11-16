@@ -5,10 +5,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Error, HttpClient, Issue, ItemQuery, ItemState,
-    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
-    oauth::Tokens, percent_encode,
+    Account, BoxFuture, Capabilities, Comment, Error, HttpClient, Issue, ItemKind, ItemQuery,
+    ItemState, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
+    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result,
+    StateFilter, form_encode, oauth::Tokens, percent_encode,
 };
 
 const HOST: &str = "bitbucket.org";
@@ -468,6 +468,82 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
         })
     }
 
+    fn comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<Comment>>> {
+        Box::pin(async move {
+            let path = match kind {
+                ItemKind::PullRequest => "pullrequests",
+                ItemKind::Issue => "issues",
+            };
+            let url = format!(
+                "{}/{path}/{number}/comments?pagelen=100&sort=created_on",
+                repo_url(full_name)?
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let page: Values<CommentBody> = parse(&response.body)?;
+            Ok(page
+                .values
+                .into_iter()
+                .filter(|c| !c.deleted)
+                .map(|c| Comment {
+                    author: c.user.map(Participant::into_person).unwrap_or_default(),
+                    body: c.content.and_then(|c| c.raw).unwrap_or_default(),
+                    created_at: c.created_on,
+                })
+                .collect())
+        })
+    }
+
+    fn merge_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        method: MergeMethod,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let strategy = match method {
+                MergeMethod::Merge => "merge_commit",
+                MergeMethod::Squash => "squash",
+                MergeMethod::Rebase => "fast_forward",
+            };
+            self.send(
+                Request::post(
+                    format!("{}/pullrequests/{number}/merge", repo_url(full_name)?),
+                    json!({ "merge_strategy": strategy }).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn create_issue<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewIssue,
+    ) -> BoxFuture<'a, Result<Issue>> {
+        Box::pin(async move {
+            let body = json!({ "title": new.title, "content": { "raw": new.body } });
+            let response = self
+                .send(
+                    Request::post(format!("{}/issues", repo_url(full_name)?), body.to_string())
+                        .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(parse::<IssueBody>(&response.body)?.into_issue())
+        })
+    }
+
     fn pull_request_ref(&self, _: u64) -> Option<String> {
         None
     }
@@ -581,6 +657,15 @@ impl Pull {
             web_url: self.links.html.href,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct CommentBody {
+    user: Option<Participant>,
+    content: Option<Content>,
+    #[serde(default)]
+    deleted: bool,
+    created_on: String,
 }
 
 #[derive(Deserialize)]

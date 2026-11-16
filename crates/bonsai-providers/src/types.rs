@@ -188,6 +188,44 @@ pub struct ItemQuery {
     pub cursor: Option<String>,
 }
 
+/// Whether a number names a pull request or an issue; their comments live
+/// in different places on GitLab and Bitbucket.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ItemKind {
+    PullRequest,
+    Issue,
+}
+
+/// One comment in a pull request's or issue's conversation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Comment {
+    pub author: Person,
+    /// Markdown.
+    pub body: String,
+    /// RFC 3339.
+    pub created_at: String,
+}
+
+/// How a pull request is merged.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum MergeMethod {
+    /// A merge commit.
+    #[default]
+    Merge,
+    /// One commit with all the changes.
+    Squash,
+    /// The commits replayed onto the base (fast-forward on Bitbucket).
+    Rebase,
+}
+
+/// An issue to open.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NewIssue {
+    pub title: String,
+    /// Markdown, possibly empty.
+    pub body: String,
+}
+
 /// A pull request to open.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NewPullRequest {
@@ -296,6 +334,31 @@ pub trait Provider: Send + Sync {
         full_name: &'a str,
         new: &'a NewPullRequest,
     ) -> BoxFuture<'a, Result<PullRequest>>;
+
+    /// The conversation on a pull request or issue, oldest first: the first
+    /// 100 comments, leaving out ones the provider wrote itself.
+    fn comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<Comment>>>;
+
+    fn merge_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        method: MergeMethod,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    fn create_issue<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewIssue,
+    ) -> BoxFuture<'a, Result<Issue>>;
 
     /// The ref a pull request's head can be fetched from, for one from a
     /// fork, such as `pull/7/head`. `None` when the provider has none.

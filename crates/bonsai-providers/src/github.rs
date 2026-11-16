@@ -6,10 +6,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    Account, BoxFuture, Capabilities, Error, HttpClient, Issue, ItemQuery, ItemState, Label,
-    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
-    percent_encode,
+    Account, BoxFuture, Capabilities, Comment, Error, HttpClient, Issue, ItemKind, ItemQuery,
+    ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
+    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result,
+    StateFilter, form_encode, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -302,6 +302,96 @@ impl<C: HttpClient> GitHub<C> {
     }
 }
 
+impl<C: HttpClient> GitHub<C> {
+    async fn list_comments(
+        &self,
+        token: &str,
+        full_name: &str,
+        number: u64,
+    ) -> Result<Vec<Comment>> {
+        // Issue comments are a pull request's conversation too.
+        let url = format!(
+            "{}/issues/{number}/comments?per_page=100",
+            self.repo_url(full_name)?
+        );
+        let response = self.send(Request::get(url), Some(token)).await?;
+        let comments: Vec<CommentBody> = self.parse(&response.body)?;
+        Ok(comments
+            .into_iter()
+            .filter(|c| {
+                c.user
+                    .as_ref()
+                    .is_none_or(|u| u.kind.as_deref() != Some("Bot"))
+            })
+            .map(|c| Comment {
+                author: c
+                    .user
+                    .map(|u| Person {
+                        username: u.login,
+                        display_name: None,
+                        avatar_url: u.avatar_url,
+                    })
+                    .unwrap_or_default(),
+                body: c.body.unwrap_or_default(),
+                created_at: c.created_at,
+            })
+            .collect())
+    }
+
+    async fn merge(
+        &self,
+        token: &str,
+        full_name: &str,
+        number: u64,
+        method: MergeMethod,
+    ) -> Result<()> {
+        let method = match method {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        };
+        self.send(
+            Request::put(
+                format!("{}/pulls/{number}/merge", self.repo_url(full_name)?),
+                json!({ "merge_method": method }).to_string(),
+            )
+            .header("Content-Type", "application/json"),
+            Some(token),
+        )
+        .await?;
+        Ok(())
+    }
+
+    async fn open_issue(&self, token: &str, full_name: &str, new: &NewIssue) -> Result<Issue> {
+        let response = self
+            .send(
+                Request::post(
+                    format!("{}/issues", self.repo_url(full_name)?),
+                    json!({ "title": new.title, "body": new.body }).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+        Ok(self.parse::<IssueBody>(&response.body)?.into_issue())
+    }
+}
+
+#[derive(Deserialize)]
+struct CommentUser {
+    login: String,
+    avatar_url: Option<String>,
+    #[serde(rename = "type")]
+    kind: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CommentBody {
+    user: Option<CommentUser>,
+    body: Option<String>,
+    created_at: String,
+}
+
 fn state_param(state: StateFilter) -> &'static str {
     match state {
         StateFilter::Open => "open",
@@ -425,6 +515,35 @@ impl<C: HttpClient> Provider for GitHub<C> {
         new: &'a NewPullRequest,
     ) -> BoxFuture<'a, Result<PullRequest>> {
         Box::pin(self.open_pull(token, full_name, new))
+    }
+
+    fn comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        _: ItemKind,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<Comment>>> {
+        Box::pin(self.list_comments(token, full_name, number))
+    }
+
+    fn merge_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        method: MergeMethod,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(self.merge(token, full_name, number, method))
+    }
+
+    fn create_issue<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewIssue,
+    ) -> BoxFuture<'a, Result<Issue>> {
+        Box::pin(self.open_issue(token, full_name, new))
     }
 
     fn pull_request_ref(&self, number: u64) -> Option<String> {
