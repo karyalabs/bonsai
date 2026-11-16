@@ -33,6 +33,7 @@ Environment:
   BONSAI_RELEASE_TAG          Release tag, defaults to v\$BONSAI_VERSION.
   BONSAI_RELEASE_ARCHIVE      Archive path, defaults to dist/release/Bonsai.dmg.
   BONSAI_RELEASE_MANIFEST     Manifest path, defaults to dist/release/Bonsai.release.plist.
+  BONSAI_RELEASE_PUBLISH      true publishes the release once its files are attached.
 USAGE
 }
 
@@ -195,22 +196,23 @@ elif [[ "$tag_lookup_status" != "404" ]]; then
   exit 1
 fi
 
+# A draft left by a failed run may hold stray files. Nobody can see it yet,
+# so start again.
+drafts_response="$TEMP_ROOT/bonsai-release-drafts.json"
+curl -sS -o "$drafts_response" "${api_headers[@]}" "$API_BASE/releases?per_page=100"
+jq -r --arg tag "$RELEASE_TAG" '.[]? | select(.draft and .tag_name == $tag) | .id' "$drafts_response" \
+  | while read -r stale_id; do
+    echo "Deleting the earlier draft for $RELEASE_TAG"
+    curl -sS -X DELETE "${api_headers[@]}" "$API_BASE/releases/$stale_id" >/dev/null
+  done
+
 notes_path="$TEMP_ROOT/bonsai-release-notes.md"
 cat >"$notes_path" <<NOTES
-Bonsai $VERSION ($BUILD_NUMBER)
+Bonsai $VERSION ($BUILD_NUMBER), a native Git client for macOS 14 and later.
 
-Native macOS Git client v0 release candidate.
-
-Evidence:
-- Fork-parity matrix: Specs/0242-v0-parity-evidence.md
-- Completion audit: Specs/0259-v0-completion-audit.md
-- Release checklist: Documentation/ReleaseChecklist.md
-
-Attachments:
-- Bonsai.dmg
-- Bonsai.release.plist
-
-Keep this release as a draft until the downloaded artifact passes the post-release Gatekeeper and smoke checks.
+Download Bonsai.dmg, open it and drag Bonsai to Applications. It is signed
+with Developer ID and notarized by Apple. Bonsai.release.plist records the
+build's version, signature and checksums.
 NOTES
 
 create_payload="$TEMP_ROOT/bonsai-release-payload.json"
@@ -287,4 +289,29 @@ for asset in "$ARCHIVE_PATH" "$MANIFEST_PATH"; do
   fi
 done
 
-echo "Draft GitHub release created for $RELEASE_TAG"
+if [[ "${BONSAI_RELEASE_PUBLISH:-false}" == "true" ]]; then
+  # Versions before 1.0 are published as prereleases.
+  prerelease=false
+  if [[ "$VERSION" == 0.* ]]; then
+    prerelease=true
+  fi
+  publish_response="$TEMP_ROOT/bonsai-release-publish.json"
+  publish_status="$(
+    curl -sS \
+      -X PATCH \
+      -o "$publish_response" \
+      -w "%{http_code}" \
+      "${api_headers[@]}" \
+      -H "Content-Type: application/json" \
+      --data "{\"draft\": false, \"prerelease\": $prerelease}" \
+      "$API_BASE/releases/$release_id"
+  )"
+  if [[ "$publish_status" != "200" ]]; then
+    echo "Publishing the GitHub release failed with status $publish_status" >&2
+    cat "$publish_response" >&2
+    exit 1
+  fi
+  echo "GitHub release published for $RELEASE_TAG: $(jq -r '.html_url' "$publish_response")"
+else
+  echo "Draft GitHub release created for $RELEASE_TAG"
+fi
