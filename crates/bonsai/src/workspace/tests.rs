@@ -128,6 +128,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.changes",
         "view.history",
         "repository.refresh",
+        "repository.commit",
     ];
     for command in commands::COMMANDS {
         assert!(

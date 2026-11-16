@@ -6,6 +6,7 @@
 //! through [`Repository`].
 
 mod clone;
+mod commit;
 mod diff;
 mod error;
 mod path;
@@ -18,6 +19,7 @@ mod version;
 mod worktree;
 
 pub use clone::{CloneProgress, clone_name};
+pub use commit::Signing;
 pub use diff::{DiffOptions, DiffOutput, DiffTarget, Whitespace};
 pub use error::{Error, Result};
 pub use remote::RemoteFailure;

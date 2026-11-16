@@ -12,6 +12,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    composer::CommitComposer,
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
         button::{Button, ButtonVariant},
@@ -236,6 +237,8 @@ pub struct ChangesView {
     discard: DialogHandle,
     /// What the open Discard dialog will throw away.
     pending_discard: Targets,
+    /// Built on first render, which has the window its inputs need.
+    composer: Option<Entity<CommitComposer>>,
     _events: Subscription,
 }
 
@@ -285,10 +288,18 @@ impl ChangesView {
             menu,
             discard: DialogHandle::new(false),
             pending_discard: Targets::default(),
+            composer: None,
             _events: events,
         };
         this.sync(cx);
         this
+    }
+
+    /// Commits with the composer's message, as Cmd+Enter does.
+    pub fn commit(&mut self, cx: &mut Context<Self>) {
+        if let Some(composer) = &self.composer {
+            composer.update(cx, CommitComposer::commit);
+        }
     }
 
     #[must_use]
@@ -672,6 +683,11 @@ fn describe(verb: &str, paths: &[PathBuf]) -> String {
 
 impl Render for ChangesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let model = self.model.clone();
+        let composer = self
+            .composer
+            .get_or_insert_with(|| cx.new(|cx| CommitComposer::new(model, window, cx)))
+            .clone();
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let staged = self
@@ -771,16 +787,7 @@ impl Render for ChangesView {
                     .child(context_menu(&self.menu, "Change actions", list).size_full()),
             )
             .child(self.render_discard(window, cx))
-            .child(
-                div()
-                    .px(px(12.))
-                    .py(px(6.))
-                    .border_t_1()
-                    .border_color(c.border)
-                    .text_xs()
-                    .text_color(c.muted_foreground)
-                    .child("Space stages or unstages the selection. Right-click for more."),
-            )
+            .child(composer)
     }
 }
 

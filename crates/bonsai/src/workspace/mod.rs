@@ -458,6 +458,16 @@ impl Workspace {
         cx.notify();
     }
 
+    fn on_commit(&mut self, _: &commands::Commit, _: &mut Window, cx: &mut Context<Self>) {
+        if self.welcome {
+            return;
+        }
+        if let Some(tab) = self.tabs.get(self.active) {
+            self.section = Section::Changes;
+            tab.changes.update(cx, ChangesView::commit);
+        }
+    }
+
     fn on_refresh(&mut self, _: &commands::Refresh, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(model) = self.active_model() {
             model.update(cx, RepositoryModel::refresh);
@@ -1084,6 +1094,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_changes))
             .on_action(cx.listener(Self::on_history))
             .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_commit))
             .size_full()
             .flex()
             .flex_col()
