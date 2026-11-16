@@ -4,6 +4,7 @@ pub mod accounts;
 pub mod accounts_sheet;
 pub mod activity_panel;
 pub mod askpass;
+pub mod avatar;
 pub mod changes;
 pub mod commands;
 pub mod composer;

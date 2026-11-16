@@ -232,7 +232,7 @@ pub fn duration(d: Duration) -> String {
     }
 }
 
-/// How long ago `at` was: "just now", "4 min ago", "2 h ago".
+/// How long ago `at` was: "just now", "4 min ago", "yesterday", "5 weeks ago".
 #[must_use]
 pub fn ago(at: SystemTime) -> String {
     let s = SystemTime::now()
@@ -244,7 +244,14 @@ pub fn ago(at: SystemTime) -> String {
         10..60 => format!("{s} s ago"),
         60..3_600 => format!("{} min ago", s / 60),
         3_600..86_400 => format!("{} h ago", s / 3_600),
-        _ => format!("{} d ago", s / 86_400),
+        86_400..172_800 => "yesterday".to_owned(),
+        172_800..1_209_600 => format!("{} days ago", s / 86_400),
+        1_209_600..5_184_000 => format!("{} weeks ago", s / 604_800),
+        5_184_000..31_536_000 => format!("{} months ago", s / 2_592_000),
+        _ => match s / 31_536_000 {
+            1 => "a year ago".to_owned(),
+            years => format!("{years} years ago"),
+        },
     }
 }
 
@@ -455,5 +462,12 @@ mod tests {
             ago(SystemTime::now() - Duration::from_secs(7_200)),
             "2 h ago"
         );
+        let days = |n: u64| ago(SystemTime::now() - Duration::from_secs(n * 86_400 + 60));
+        assert_eq!(days(1), "yesterday");
+        assert_eq!(days(4), "4 days ago");
+        assert_eq!(days(35), "5 weeks ago");
+        assert_eq!(days(100), "3 months ago");
+        assert_eq!(days(400), "a year ago");
+        assert_eq!(days(800), "2 years ago");
     }
 }

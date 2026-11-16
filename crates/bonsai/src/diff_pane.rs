@@ -9,9 +9,9 @@ use bonsai_git::{
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, Image, ImageFormat, IntoElement, ObjectFit,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    StyledImage as _, Subscription, Window,
+    AppContext as _, ClipboardItem, Context, Entity, Image, ImageFormat, InteractiveElement as _,
+    IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription, Window,
     component::diff::{DiffFile, DiffLineRange, DiffMode, DiffSide, DiffState},
     div, img,
     prelude::FluentBuilder as _,
@@ -556,7 +556,12 @@ impl DiffPane {
         self.details.as_ref()
     }
 
-    fn render_details(details: &CommitDetails, theme: &UiTheme) -> gpui_kit::Div {
+    fn render_details(
+        &self,
+        details: &CommitDetails,
+        theme: &UiTheme,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Div {
         let c = &theme.colors;
         let when = |time: i64| {
             u64::try_from(time)
@@ -565,52 +570,138 @@ impl DiffPane {
                 .map(crate::activity_panel::ago)
                 .unwrap_or_default()
         };
-        let (signature, signature_color) = match details.signature {
-            SignatureStatus::Unsigned => (None, c.muted_foreground),
-            SignatureStatus::Good => (Some("Signature verified"), c.success),
-            SignatureStatus::GoodUntrusted => (Some("Signed with an untrusted key"), c.warning),
-            SignatureStatus::Bad => (Some("Bad signature"), c.destructive),
-            SignatureStatus::Unknown => (Some("Signed, could not verify"), c.muted_foreground),
+        let (signature, signature_color, signature_icon) = match details.signature {
+            SignatureStatus::Unsigned => (None, c.muted_foreground, LucideIcon::Shield),
+            SignatureStatus::Good => (Some("Verified"), c.success, LucideIcon::ShieldCheck),
+            SignatureStatus::GoodUntrusted => {
+                (Some("Untrusted key"), c.warning, LucideIcon::ShieldAlert)
+            }
+            SignatureStatus::Bad => (Some("Bad signature"), c.destructive, LucideIcon::ShieldX),
+            SignatureStatus::Unknown => {
+                (Some("Unverified"), c.muted_foreground, LucideIcon::Shield)
+            }
         };
         let (summary, body) = details
             .message
             .split_once('\n')
             .map_or((details.message.as_str(), ""), |(s, b)| (s, b.trim()));
         let short = |oid: &bonsai_git::Oid| oid.as_str().chars().take(7).collect::<String>();
-        let mut people = format!(
-            "{} <{}> · {}",
-            details.author_name,
-            details.author_email,
-            when(details.author_time)
-        );
+        let dark = theme.mode == crate::ui::theme::ThemeMode::Dark;
+        let full_hash = details.oid.as_str().to_owned();
+        let mut byline = format!("authored {}", when(details.author_time));
         if details.committer_email != details.author_email {
-            people.push_str(" · committed by ");
-            people.push_str(&details.committer_name);
+            byline.push_str(" · committed by ");
+            byline.push_str(&details.committer_name);
         }
-        let parents = match details.parents.len() {
-            0 => "Root commit".to_owned(),
-            _ => format!(
-                "Parents {}",
-                details
-                    .parents
-                    .iter()
-                    .map(short)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
+        let pill = |text: String| {
+            div()
+                .px(px(6.))
+                .py(px(1.))
+                .rounded(px(4.))
+                .bg(c.muted)
+                .font_family(theme.fonts.mono.clone())
+                .text_xs()
+                .child(text)
         };
+        let files = self.state.read(cx).files().to_vec();
+        let file_rows = files.iter().enumerate().map(|(ix, file)| {
+            let path = file.path().clone();
+            let (folder, name) = path
+                .rsplit_once('/')
+                .map_or((None, path.to_string()), |(f, n)| {
+                    (Some(f.to_owned()), n.to_owned())
+                });
+            let (letter, color) = match file.status() {
+                gpui_kit::component::diff::DiffFileStatus::Added => ('A', c.success),
+                gpui_kit::component::diff::DiffFileStatus::Deleted => ('D', c.destructive),
+                gpui_kit::component::diff::DiffFileStatus::Renamed
+                | gpui_kit::component::diff::DiffFileStatus::Copied => ('R', c.info),
+                _ => ('M', c.warning),
+            };
+            let target = path.clone();
+            div()
+                .id(("diff.commit.file", ix))
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .px(px(8.))
+                .h(px(26.))
+                .rounded(px(4.))
+                .cursor_pointer()
+                .hover(|this| this.bg(c.muted))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.state
+                        .update(cx, |state, cx| state.scroll_to_file(&target, cx));
+                }))
+                .child(
+                    lucide(file_icon(std::path::Path::new(path.as_ref())))
+                        .size(px(14.))
+                        .flex_shrink_0()
+                        .text_color(c.muted_foreground),
+                )
+                .child(div().flex_shrink_0().text_sm().child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .when_some(folder, gpui_kit::ParentElement::child),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(4.))
+                        .text_xs()
+                        .font_family(theme.fonts.mono.clone())
+                        .when(file.additions() > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_color(c.success)
+                                    .child(format!("+{}", file.additions())),
+                            )
+                        })
+                        .when(file.deletions() > 0, |this| {
+                            this.child(
+                                div()
+                                    .text_color(c.destructive)
+                                    .child(format!("−{}", file.deletions())),
+                            )
+                        }),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .w(px(18.))
+                        .h(px(18.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded(px(4.))
+                        .bg(color.opacity(0.15))
+                        .text_color(color)
+                        .font_family(theme.fonts.mono.clone())
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::BOLD)
+                        .child(letter.to_string()),
+                )
+        });
+        let (added, removed) = files
+            .iter()
+            .fold((0, 0), |(a, r), f| (a + f.additions(), r + f.deletions()));
         div()
             .flex()
             .flex_col()
-            .gap(px(4.))
-            .px(px(12.))
-            .py(px(8.))
+            .gap(px(10.))
+            .px(px(14.))
+            .py(px(12.))
             .border_b_1()
             .border_color(c.border)
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .text_base()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .child(summary.to_owned()),
             )
             .when(!body.is_empty(), |this| {
@@ -621,23 +712,133 @@ impl DiffPane {
                         .child(body.to_owned()),
                 )
             })
-            .child(div().text_xs().text_color(c.muted_foreground).child(people))
             .child(
                 div()
                     .flex()
-                    .gap(px(8.))
-                    .text_xs()
-                    .text_color(c.muted_foreground)
+                    .items_center()
+                    .gap(px(10.))
+                    .child(crate::avatar::avatar(
+                        &details.author_name,
+                        &details.author_email,
+                        px(28.),
+                        dark,
+                    ))
                     .child(
                         div()
-                            .font_family(theme.fonts.mono.clone())
-                            .child(short(&details.oid)),
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(6.))
+                                    .text_sm()
+                                    .child(
+                                        div()
+                                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                            .child(details.author_name.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .truncate()
+                                            .text_color(c.muted_foreground)
+                                            .child(details.author_email.clone()),
+                                    ),
+                            )
+                            .child(div().text_xs().text_color(c.muted_foreground).child(byline)),
                     )
-                    .child(parents)
+                    .child(
+                        div()
+                            .id("diff.commit.hash")
+                            .flex()
+                            .items_center()
+                            .gap(px(4.))
+                            .px(px(6.))
+                            .py(px(2.))
+                            .rounded(px(4.))
+                            .border_1()
+                            .border_color(c.border)
+                            .cursor_pointer()
+                            .hover(|this| this.bg(c.muted))
+                            .tooltip(|_, cx| text_tooltip("Copy Full Hash".into(), cx))
+                            .on_click(move |_, _, cx| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(full_hash.clone()));
+                            })
+                            .child(
+                                div()
+                                    .font_family(theme.fonts.mono.clone())
+                                    .text_xs()
+                                    .child(short(&details.oid)),
+                            )
+                            .child(
+                                lucide(LucideIcon::Copy)
+                                    .size(px(12.))
+                                    .text_color(c.muted_foreground),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(match details.parents.len() {
+                        0 => "Root commit".to_owned(),
+                        1 => "Parent".to_owned(),
+                        _ => "Parents".to_owned(),
+                    })
+                    .children(details.parents.iter().map(|p| pill(short(p))))
                     .when_some(signature, |this, signature| {
-                        this.child(div().text_color(signature_color).child(signature))
+                        this.child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .ml(px(6.))
+                                .text_color(signature_color)
+                                .child(
+                                    lucide(signature_icon)
+                                        .size(px(12.))
+                                        .text_color(signature_color),
+                                )
+                                .child(signature),
+                        )
                     }),
             )
+            .when(files.len() > 1, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .text_color(c.muted_foreground)
+                                .child(format!("{} FILES CHANGED", files.len()))
+                                .child(div().text_color(c.success).child(format!("+{added}")))
+                                .child(
+                                    div().text_color(c.destructive).child(format!("−{removed}")),
+                                ),
+                        )
+                        .child(
+                            div()
+                                .id("diff.commit.files")
+                                .max_h(px(182.))
+                                .overflow_y_scroll()
+                                .children(file_rows),
+                        ),
+                )
+            })
     }
 
     /// The file (or commit) on the left; navigation, view options and the
@@ -651,8 +852,8 @@ impl DiffPane {
             .iter()
             .fold((0, 0), |(a, r), f| (a + f.additions(), r + f.deletions()));
         let path = self.target.as_ref().and_then(single_path);
-        let title = match &path {
-            Some(path) => {
+        let title = if let Some(path) = &path {
+            {
                 let text = path.to_string_lossy();
                 let (folder, name) = text
                     .rsplit_once('/')
@@ -686,16 +887,44 @@ impl DiffPane {
                         )
                     })
             }
-            None => div().min_w_0().flex().items_center().gap(px(6.)).child(
+        } else {
+            {
+                // A commit's card shows its message, so the bar names the commit.
+                let text: SharedString = match &self.target {
+                    Some(DiffTarget::Commit(oid)) => format!(
+                        "Commit {}",
+                        oid.as_str().chars().take(7).collect::<String>()
+                    )
+                    .into(),
+                    _ => self.title.clone(),
+                };
                 div()
                     .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::MEDIUM)
-                    .child(self.title.clone()),
-            ),
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .when(matches!(self.target, Some(DiffTarget::Commit(_))), |this| {
+                        this.child(
+                            lucide(LucideIcon::GitCommitHorizontal)
+                                .size(px(15.))
+                                .flex_shrink_0()
+                                .text_color(c.muted_foreground),
+                        )
+                    })
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(text),
+                    )
+            }
         };
-        let line_stats = (self.status == PaneStatus::Ready && self.preview.is_none()).then(|| {
+        let line_stats = (self.status == PaneStatus::Ready
+            && self.preview.is_none()
+            && path.is_some())
+        .then(|| {
             div()
                 .flex()
                 .flex_shrink_0()
@@ -1058,7 +1287,7 @@ impl Render for DiffPane {
                 self.details
                     .as_ref()
                     .filter(|_| matches!(self.target, Some(DiffTarget::Commit(_)))),
-                |this, details| this.child(Self::render_details(details, &theme)),
+                |this, details| this.child(self.render_details(details, &theme, cx)),
             )
             .when_some(self.error.clone(), |this, error| {
                 this.child(
