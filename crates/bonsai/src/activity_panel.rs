@@ -14,12 +14,58 @@ use gpui_kit::{
 
 use crate::{
     repository::RepositoryModel,
-    ui::{
-        button::{Button, ButtonSize, ButtonVariant},
-        checkbox::Checkbox,
-        theme::UiTheme,
-    },
+    ui::{switch::Switch, theme::UiTheme},
 };
+
+/// Command lines read as typed: no ligatures or contextual forms, which in
+/// Geist Mono pull a hyphen over the space before it ("fetch--prune").
+fn plain_features() -> FontFeatures {
+    FontFeatures(std::sync::Arc::new(vec![
+        ("calt".into(), 0),
+        ("liga".into(), 0),
+        ("dlig".into(), 0),
+    ]))
+}
+
+/// A plain name for what a command did: "Fetch", "Stage", "Commit".
+#[must_use]
+pub fn describe(args: &[String]) -> String {
+    let mut words = args.iter().map(String::as_str);
+    // Skip `-c key=value` and other options before the subcommand.
+    let sub = loop {
+        match words.next() {
+            Some("-c" | "-C") => {
+                words.next();
+            }
+            Some(word) if word.starts_with('-') => {}
+            Some(word) => break word,
+            None => return "Git".to_owned(),
+        }
+    };
+    let name = match sub {
+        "add" | "update-index" => "Stage",
+        "restore" => "Restore",
+        "apply" => "Apply patch",
+        "cherry-pick" => "Cherry-pick",
+        "rev-parse" => "Look up a revision",
+        "rev-list" => "List commits",
+        "for-each-ref" => "List refs",
+        "cat-file" => "Read an object",
+        "ls-files" => "List files",
+        "check-ignore" => "Check ignored files",
+        "symbolic-ref" => "Read HEAD",
+        "worktree" => "Worktree",
+        "filter-repo" => "Rewrite history",
+        other => {
+            let mut chars = other.chars();
+            return chars
+                .next()
+                .map(|first| first.to_uppercase().chain(chars).collect())
+                .unwrap_or_default();
+        }
+    };
+    name.to_owned()
+}
 
 /// Rows the list shows at most, newest first.
 const SHOWN: usize = 300;
@@ -102,14 +148,21 @@ impl ActivityPanel {
         let c = &theme.colors;
         let line = record.command_line();
         let copy = line.clone();
-        let result = if record.cancelled {
+        let status_label = if record.cancelled {
             "Cancelled".to_owned()
         } else {
             match record.exit_code {
                 Some(0) => "Succeeded".to_owned(),
-                Some(code) => format!("Failed with exit code {code}"),
+                Some(code) => format!("Failed · exit {code}"),
                 None => "Stopped by a signal".to_owned(),
             }
+        };
+        let status_color = if record.cancelled {
+            c.muted_foreground
+        } else if record.succeeded() {
+            c.success
+        } else {
+            c.destructive
         };
         let meta = |label: &'static str, value: String| {
             div()
@@ -134,7 +187,7 @@ impl ActivityPanel {
                 )
         };
         let output = |id: &'static str, label: &'static str, text: &str| {
-            let text = text.trim_end().to_owned();
+            let text = as_terminal_shows(text);
             div()
                 .flex()
                 .flex_col()
@@ -149,7 +202,7 @@ impl ActivityPanel {
                         .rounded(px(6.))
                         .bg(c.muted)
                         .font_family(theme.fonts.mono.clone())
-                        .font_features(FontFeatures::disable_ligatures())
+                        .font_features(plain_features())
                         .text_xs()
                         .whitespace_normal()
                         .child(if text.is_empty() {
@@ -170,26 +223,60 @@ impl ActivityPanel {
             .child(
                 div()
                     .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_base()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child(describe(&record.args)),
+                    )
+                    .child(
+                        div()
+                            .px(px(8.))
+                            .py(px(1.))
+                            .rounded(px(10.))
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .bg(status_color.opacity(0.14))
+                            .text_color(status_color)
+                            .child(status_label),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
                     .items_start()
-                    .justify_between()
-                    .gap(px(12.))
+                    .gap(px(8.))
+                    .p(px(10.))
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(c.border)
+                    .bg(c.muted.opacity(0.5))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
                             .font_family(theme.fonts.mono.clone())
-                            .font_features(FontFeatures::disable_ligatures())
+                            .font_features(plain_features())
                             .text_sm()
                             .child(line),
                     )
                     .child(
-                        Button::new("activity.copy")
-                            .variant(ButtonVariant::Outline)
-                            .size(ButtonSize::Sm)
-                            .label("Copy Command")
-                            .on_click(move |_, _, cx| {
-                                cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
-                            }),
+                        crate::workspace::title_bar::bar_button(
+                            "activity.copy",
+                            "Copy Command",
+                            false,
+                            &theme,
+                        )
+                        .child(
+                            lucide(LucideIcon::Copy)
+                                .size(px(14.))
+                                .text_color(c.foreground),
+                        )
+                        .on_click(move |_, _, cx| {
+                            cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                        }),
                     ),
             )
             .child(
@@ -197,7 +284,6 @@ impl ActivityPanel {
                     .flex()
                     .flex_col()
                     .gap(px(4.))
-                    .child(meta("Result", result))
                     .child(meta("Took", duration(record.duration)))
                     .child(meta("Started", ago(record.started_at)))
                     .when_some(record.cwd.as_ref(), |this, cwd| {
@@ -216,6 +302,21 @@ impl ActivityPanel {
             )
             .child(output("activity.stdout", "Output (stdout)", &record.stdout))
     }
+}
+
+/// Output as a terminal would leave it: Git redraws progress lines with
+/// carriage returns, so only the last state of each line remains.
+#[must_use]
+pub fn as_terminal_shows(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.rsplit('\r')
+                .find(|part| !part.is_empty())
+                .unwrap_or("")
+        })
+        .filter(|line| !line.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// A short duration: "840 ms", "2.4 s", "3 min 5 s".
@@ -270,13 +371,40 @@ impl Render for ActivityPanel {
             .overflow_y_scroll()
             .flex()
             .flex_col();
+        let total = rows.len();
+        let failed = rows.iter().filter(|(_, r)| !r.succeeded()).count();
         if rows.is_empty() {
             list = list.child(
                 div()
-                    .p(px(16.))
-                    .text_sm()
-                    .text_color(c.muted_foreground)
-                    .child("Commands Bonsai runs in this repository appear here."),
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(24.))
+                    .py(px(48.))
+                    .child(
+                        lucide(LucideIcon::Logs)
+                            .size(px(22.))
+                            .text_color(c.muted_foreground),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child("No activity yet"),
+                    )
+                    .child(
+                        div()
+                            .max_w(px(300.))
+                            .text_center()
+                            .text_sm()
+                            .text_color(c.muted_foreground)
+                            .child(if self.show_reads {
+                                "Every Git command Bonsai runs here appears with its full output."
+                            } else {
+                                "Fetches, commits, pushes and other changes appear here with their full output. Turn on Show Reads to see status and log reads too."
+                            }),
+                    ),
             );
         }
         for (id, record) in rows {
@@ -293,38 +421,53 @@ impl Render for ActivityPanel {
                     .id(SharedString::from(format!("activity.row.{id}")))
                     .flex()
                     .items_center()
-                    .gap(px(8.))
-                    .px(px(12.))
+                    .gap(px(10.))
+                    .mx(px(6.))
+                    .my(px(1.))
+                    .px(px(8.))
                     .py(px(6.))
-                    .border_b_1()
-                    .border_color(c.border)
+                    .rounded(px(6.))
                     .cursor_pointer()
-                    .when(is_selected, |this| this.bg(c.muted))
+                    .when(is_selected, |this| this.bg(c.accent))
                     .hover(|s| s.bg(c.muted))
                     .on_click(cx.listener(move |this, _, _, cx| this.select(Some(id), cx)))
-                    .child(lucide(icon).size(px(14.)).text_color(color).flex_shrink_0())
+                    .child(lucide(icon).size(px(16.)).text_color(color).flex_shrink_0())
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .overflow_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .font_family(theme.fonts.mono.clone())
-                            .font_features(FontFeatures::disable_ligatures())
-                            .text_xs()
-                            .child(record.command_line()),
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .child(describe(&record.args)),
+                            )
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
+                                    .font_family(theme.fonts.mono.clone())
+                                    .font_features(plain_features())
+                                    .text_xs()
+                                    .text_color(c.muted_foreground)
+                                    .child(record.command_line()),
+                            ),
                     )
                     .child(
                         div()
                             .flex_shrink_0()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(1.))
                             .text_xs()
                             .text_color(c.muted_foreground)
-                            .child(format!(
-                                "{} · {}",
-                                duration(record.duration),
-                                ago(record.started_at)
-                            )),
+                            .child(ago(record.started_at))
+                            .child(duration(record.duration)),
                     ),
             );
         }
@@ -332,15 +475,30 @@ impl Render for ActivityPanel {
             .flex()
             .items_center()
             .justify_between()
+            .h(px(44.))
             .px(px(12.))
-            .py(px(8.))
             .border_b_1()
             .border_color(c.border)
             .child(
                 div()
-                    .text_sm()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Activity"),
+                    .flex()
+                    .items_baseline()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child("Activity"),
+                    )
+                    .when(total > 0, |this| {
+                        this.child(div().text_xs().text_color(c.muted_foreground).child(
+                            match failed {
+                                0 => format!("{total} commands"),
+                                1 => format!("{total} commands · 1 failed"),
+                                n => format!("{total} commands · {n} failed"),
+                            },
+                        ))
+                    }),
             )
             .child(
                 div()
@@ -348,15 +506,16 @@ impl Render for ActivityPanel {
                     .items_center()
                     .gap(px(8.))
                     .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child("Show Reads")
                     .child(
-                        Checkbox::new("activity.show-reads")
+                        Switch::new("activity.show-reads")
                             .checked(self.show_reads)
                             .aria_label("Show read-only commands")
                             .on_change(cx.listener(|this, checked: &bool, _, cx| {
                                 this.set_show_reads(*checked, cx);
                             })),
-                    )
-                    .child("Show reads"),
+                    ),
             );
         let detail = match &selected {
             Some(record) => self.render_detail(record, cx).into_any_element(),
@@ -364,7 +523,7 @@ impl Render for ActivityPanel {
                 .p(px(16.))
                 .text_sm()
                 .text_color(c.muted_foreground)
-                .child("Select a command to see its output.")
+                .child("Select a command to see its full output.")
                 .into_any_element(),
         };
         div()
@@ -462,6 +621,15 @@ mod tests {
             ago(SystemTime::now() - Duration::from_secs(7_200)),
             "2 h ago"
         );
+        assert_eq!(
+            as_terminal_shows("Counting:  7% (1/14)\rCounting: 100% (14/14), done.\r\nDone\n"),
+            "Counting: 100% (14/14), done.\nDone"
+        );
+        assert_eq!(
+            describe(&["-c".into(), "a=b".into(), "fetch".into()]),
+            "Fetch"
+        );
+        assert_eq!(describe(&["add".into(), "--".into()]), "Stage");
         let days = |n: u64| ago(SystemTime::now() - Duration::from_secs(n * 86_400 + 60));
         assert_eq!(days(1), "yesterday");
         assert_eq!(days(4), "4 days ago");
