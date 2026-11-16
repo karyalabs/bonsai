@@ -15,7 +15,7 @@ use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
     ChangedFile, Check, CheckState, Comment, FileChange, HttpClient, Issue, ItemKind, ItemQuery,
     ItemState, Label, MergeMethod, Person, Provider, ProviderKind, PullRequest, StateFilter,
-    hosted_repository,
+    Verdict, hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -295,6 +295,10 @@ pub struct HostedView {
     posting: Option<u64>,
     /// The item being closed or reopened.
     changing_state: Option<u64>,
+    /// The pull request whose review is being sent.
+    reviewing: Option<u64>,
+    /// Reviews sent from here, by pull request.
+    reviewed: std::collections::HashMap<u64, Verdict>,
     tasks: Vec<Task<()>>,
 }
 
@@ -417,6 +421,8 @@ impl HostedView {
             composer: None,
             posting: None,
             changing_state: None,
+            reviewing: None,
+            reviewed: std::collections::HashMap::new(),
             tasks: Vec::new(),
         }
     }
@@ -718,6 +724,67 @@ impl HostedView {
                             item.comments = item.comments.map(|n| n + 1);
                         }
                         composer.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// The review sent from here on a pull request, if any.
+    #[must_use]
+    pub fn reviewed(&self, number: u64) -> Option<Verdict> {
+        self.reviewed.get(&number).copied()
+    }
+
+    fn can_request_changes(&self) -> bool {
+        !matches!(&self.availability, Availability::Ready(t)
+            if t.connected.account.kind == ProviderKind::GitLab)
+    }
+
+    /// Approves the selected pull request, or asks for changes, with the
+    /// composer's text as the review's message.
+    pub fn review(&mut self, verdict: Verdict, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.selected().cloned() else {
+            return;
+        };
+        let Some(composer) = self.composer.clone() else {
+            return;
+        };
+        let body = composer.read(cx).value().trim().to_owned();
+        if item.pull.is_none() || !item.state.is_open() || self.reviewing.is_some() {
+            return;
+        }
+        if verdict == Verdict::RequestChanges && body.is_empty() {
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((item.number, error));
+                cx.notify();
+                return;
+            }
+        };
+        let number = item.number;
+        self.reviewing = Some(number);
+        self.action_error = None;
+        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = provider
+                .review(&api, &target.full_name, number, verdict, &body)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.reviewing = None;
+                match result {
+                    Ok(()) => {
+                        this.reviewed.insert(number, verdict);
+                        if !body.is_empty() {
+                            // The review's message joins the conversation.
+                            this.conversations.remove(&number);
+                            composer.update(cx, |input, cx| input.set_value("", window, cx));
+                        }
                     }
                     Err(error) => this.action_error = Some((number, error.to_string().into())),
                 }
@@ -1195,25 +1262,88 @@ impl HostedView {
             (false, true) => "Reopening…".to_owned(),
         };
         let posting = this.posting == Some(item.number);
+        let reviewable = item.pull.is_some() && item.state.is_open();
+        let reviewing = this.reviewing == Some(item.number);
+        let can_request_changes = this.can_request_changes();
+        let reviewed = this.reviewed(item.number);
         let reply = this.composer.clone().map(|composer| {
             let empty = composer.read(cx).value().trim().is_empty();
             let send = view.clone();
+            let approve = view.clone();
+            let request = view.clone();
+            let buttons = div()
+                .flex()
+                .justify_end()
+                .gap(px(8.))
+                .when(reviewable, |this| {
+                    this.when(can_request_changes, |this| {
+                        this.child(
+                            Button::new("hosted.request-changes")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .label("Request Changes")
+                                .disabled(empty || reviewing)
+                                .on_click(move |_, window, cx| {
+                                    request.update(cx, |this, cx| {
+                                        this.review(Verdict::RequestChanges, window, cx);
+                                    });
+                                }),
+                        )
+                    })
+                    .child(
+                        Button::new("hosted.approve")
+                            .variant(ButtonVariant::Outline)
+                            .size(ButtonSize::Sm)
+                            .child(
+                                lucide(LucideIcon::Check)
+                                    .size(px(14.))
+                                    .text_color(c.success),
+                            )
+                            .label(if reviewing { "Sending…" } else { "Approve" })
+                            .disabled(reviewing)
+                            .on_click(move |_, window, cx| {
+                                approve.update(cx, |this, cx| {
+                                    this.review(Verdict::Approve, window, cx);
+                                });
+                            }),
+                    )
+                })
+                .child(
+                    Button::new("hosted.comment")
+                        .size(ButtonSize::Sm)
+                        .label(if posting { "Commenting…" } else { "Comment" })
+                        .disabled(empty || posting)
+                        .on_click(move |_, window, cx| {
+                            send.update(cx, |this, cx| this.comment(window, cx));
+                        }),
+                );
             div()
                 .flex()
                 .flex_col()
                 .gap(px(8.))
+                .when_some(reviewed, |this, verdict| {
+                    let (icon, color, text) = match verdict {
+                        Verdict::Approve => (
+                            LucideIcon::CircleCheck,
+                            c.success,
+                            "You approved this pull request.",
+                        ),
+                        Verdict::RequestChanges => {
+                            (LucideIcon::CircleAlert, c.warning, "You asked for changes.")
+                        }
+                    };
+                    this.child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_xs()
+                            .child(lucide(icon).size(px(14.)).text_color(color))
+                            .child(text),
+                    )
+                })
                 .child(Textarea::new(&composer).aria_label("New comment"))
-                .child(
-                    div().flex().justify_end().child(
-                        Button::new("hosted.comment")
-                            .size(ButtonSize::Sm)
-                            .label(if posting { "Commenting…" } else { "Comment" })
-                            .disabled(empty || posting)
-                            .on_click(move |_, window, cx| {
-                                send.update(cx, |this, cx| this.comment(window, cx));
-                            }),
-                    ),
-                )
+                .child(buttons)
         });
         let checks_box = match this.checks(item.number) {
             Some(Checks::Loaded(checks)) if !checks.is_empty() => {

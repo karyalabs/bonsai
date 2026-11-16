@@ -208,6 +208,13 @@ pub struct Comment {
     pub created_at: String,
 }
 
+/// What a review says about a pull request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Verdict {
+    Approve,
+    RequestChanges,
+}
+
 /// What a pull request does to one file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum FileChange {
@@ -418,6 +425,22 @@ pub trait Provider: Send + Sync {
         full_name: &'a str,
         new: &'a NewIssue,
     ) -> BoxFuture<'a, Result<Issue>>;
+
+    /// Reviews a pull request: approves it, or asks for changes with `body`
+    /// saying what. GitLab has no request for changes.
+    fn review<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        verdict: Verdict,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    /// Whether [`Provider::review`] can ask for changes.
+    fn can_request_changes(&self) -> bool {
+        true
+    }
 
     /// The files a pull request changes, the first 100.
     fn changed_files<'a>(

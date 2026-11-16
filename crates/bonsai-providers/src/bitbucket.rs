@@ -8,7 +8,7 @@ use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
     HttpClient, Issue, ItemKind, ItemQuery, ItemState, MergeMethod, NewIssue, NewPullRequest,
     NewRepository, Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository,
-    RepositoryQuery, Request, Response, Result, StateFilter, form_encode, oauth::Tokens,
+    RepositoryQuery, Request, Response, Result, StateFilter, Verdict, form_encode, oauth::Tokens,
     percent_encode,
 };
 
@@ -535,6 +535,36 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
                 )
                 .await?;
             Ok(parse::<IssueBody>(&response.body)?.into_issue())
+        })
+    }
+
+    fn review<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        verdict: Verdict,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let action = match verdict {
+                Verdict::Approve => "approve",
+                Verdict::RequestChanges => "request-changes",
+            };
+            self.send(
+                Request::post(
+                    format!("{}/pullrequests/{number}/{action}", repo_url(full_name)?),
+                    "{}",
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            if !body.trim().is_empty() {
+                self.add_comment(token, full_name, ItemKind::PullRequest, number, body)
+                    .await?;
+            }
+            Ok(())
         })
     }
 

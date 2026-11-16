@@ -803,6 +803,7 @@ mod hosted {
                     r#"{"user":{"login":"ada","type":"User"},"body":"Looks good","created_at":"2026-11-16T09:00:00Z"}"#.into(),
                 ),
                 (Method::Patch, "/issues/7", r#"{"number":7}"#.into()),
+                (Method::Post, "/pulls/7/reviews", r#"{"id":1}"#.into()),
                 (
                     Method::Get,
                     "/pulls/7/files",
@@ -869,6 +870,15 @@ mod hosted {
         );
         assert_eq!(client.sent.lock().unwrap()[0].1["body"], "Looks good");
 
+        view.update_in(cx, |view, window, cx| {
+            view.review(bonsai_providers::Verdict::Approve, window, cx);
+        });
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.reviewed(7), Some(bonsai_providers::Verdict::Approve));
+        });
+        assert_eq!(client.sent.lock().unwrap()[1].1["event"], "APPROVE");
+
         view.update(cx, HostedView::toggle_open);
         cx.run_until_parked();
         view.read_with(cx, |view, _| {
@@ -880,7 +890,7 @@ mod hosted {
             assert_eq!(view.selected().unwrap().state, ItemState::Open);
         });
         let sent = client.sent.lock().unwrap();
-        assert_eq!(sent[1].1["state"], "closed");
-        assert_eq!(sent[2].1["state"], "open");
+        assert_eq!(sent[2].1["state"], "closed");
+        assert_eq!(sent[3].1["state"], "open");
     }
 }
