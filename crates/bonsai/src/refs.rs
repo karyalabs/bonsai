@@ -3,12 +3,13 @@
 
 use std::{
     collections::BTreeSet,
+    path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use bonsai_git::{
-    Branch, CheckoutBlocker, DiffTarget, Head, Integration, MergeMode, Oid, ResetMode, Snapshot,
-    Stash, is_valid_ref_name, stash_diff,
+    Branch, CheckoutBlocker, DiffTarget, Head, Integration, MergeMode, NewWorktree, Oid, ResetMode,
+    Snapshot, Stash, Worktree, is_valid_ref_name, stash_diff,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -85,6 +86,15 @@ pub enum RefDialog {
         oid: Oid,
         message: String,
     },
+    /// Check a branch out in a new folder; `branch` prefills the name.
+    AddWorktree {
+        branch: Option<String>,
+    },
+    /// `dirty` once Git refused because the worktree has changes.
+    RemoveWorktree {
+        path: PathBuf,
+        dirty: bool,
+    },
 }
 
 /// What the panel asks its owner to do.
@@ -94,6 +104,8 @@ pub enum RefsEvent {
     ShowDiff(DiffTarget, SharedString),
     /// Select this commit in the History view.
     ShowInHistory(Oid),
+    /// Open this folder (a worktree) in a tab.
+    OpenRepository(PathBuf),
 }
 
 /// Something to switch to.
@@ -136,6 +148,7 @@ struct Inputs {
     url: Entity<InputState>,
     message: Entity<TextareaState>,
     stash_message: Entity<InputState>,
+    folder: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -149,6 +162,8 @@ pub struct RefsPanel {
     /// A follow-up dialog an operation asks for (unmerged delete, blocked
     /// switch), picked up when the operation finishes.
     follow_up: Arc<Mutex<Option<RefDialog>>>,
+    /// A worktree to open once the operation creating it succeeds.
+    open_after: Arc<Mutex<Option<PathBuf>>>,
     inputs: Option<Inputs>,
     checkout_new: bool,
     stash_untracked: bool,
@@ -161,10 +176,14 @@ impl EventEmitter<RefsEvent> for RefsPanel {}
 impl RefsPanel {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
-            if matches!(event, RepositoryEvent::OperationFinished { .. }) {
+            if let RepositoryEvent::OperationFinished { error, .. } = event {
                 let next = this.follow_up.lock().ok().and_then(|mut slot| slot.take());
                 if let Some(next) = next {
                     this.show(next, cx);
+                }
+                let open = this.open_after.lock().ok().and_then(|mut slot| slot.take());
+                if let Some(path) = open.filter(|_| error.is_none()) {
+                    cx.emit(RefsEvent::OpenRepository(path));
                 }
             }
             cx.notify();
@@ -176,6 +195,7 @@ impl RefsPanel {
             dialog: None,
             open_requested: false,
             follow_up: Arc::new(Mutex::new(None)),
+            open_after: Arc::new(Mutex::new(None)),
             inputs: None,
             checkout_new: true,
             stash_untracked: true,
@@ -259,6 +279,127 @@ impl RefsPanel {
                 cx,
             );
         });
+    }
+
+    fn root(&self, cx: &gpui_kit::App) -> PathBuf {
+        self.model.read(cx).repository().root().to_path_buf()
+    }
+
+    /// The worktree with `branch` checked out, other than this one.
+    fn worktree_of<'a>(
+        &self,
+        branch: &str,
+        snapshot: &'a Snapshot,
+        cx: &gpui_kit::App,
+    ) -> Option<&'a Worktree> {
+        let root = canonical(&self.root(cx));
+        snapshot
+            .worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some(branch) && canonical(&w.path) != root)
+    }
+
+    /// Where a new worktree goes: the folder the person typed, or a sibling
+    /// of the main worktree named after the branch.
+    fn worktree_folder(&self, cx: &gpui_kit::App) -> PathBuf {
+        let typed = self
+            .inputs
+            .as_ref()
+            .map(|i| i.folder.read(cx).value().trim().to_owned())
+            .unwrap_or_default();
+        if !typed.is_empty() {
+            return expand_home(&typed);
+        }
+        let main = self
+            .snapshot(cx)
+            .and_then(|s| s.worktrees.iter().find(|w| w.main))
+            .map_or_else(|| self.root(cx), |w| w.path.clone());
+        default_worktree_folder(&main, &self.name_value(cx))
+    }
+
+    /// Removes a worktree, asking before forcing one with changes.
+    pub fn remove_worktree(&mut self, path: PathBuf, force: bool, cx: &mut Context<Self>) {
+        let slot = self.follow_up.clone();
+        let name = format!(
+            "Remove worktree {}",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+        self.run(
+            name,
+            move |repository| match repository.remove_worktree(&path, force) {
+                Err(error) if !force && error.to_string().contains("--force") => {
+                    if let Ok(mut slot) = slot.lock() {
+                        *slot = Some(RefDialog::RemoveWorktree { path, dirty: true });
+                    }
+                    Ok(())
+                }
+                result => result,
+            },
+            cx,
+        );
+    }
+
+    fn worktree_menu(
+        &self,
+        worktree: &Worktree,
+        current: bool,
+        cx: &mut Context<Self>,
+    ) -> Vec<MenuItem> {
+        let this = cx.entity().downgrade();
+        let path = worktree.path.clone();
+        let mut items = Vec::new();
+        if !current && !worktree.prunable {
+            items.push(
+                MenuItem::new("refs.worktree.open", "Open in Tab")
+                    .icon(LucideIcon::AppWindow)
+                    .on_click(with(&this, {
+                        let path = path.clone();
+                        move |_, _, cx| cx.emit(RefsEvent::OpenRepository(path.clone()))
+                    })),
+            );
+        }
+        if !worktree.prunable {
+            let reveal = path.clone();
+            items.push(
+                MenuItem::new("refs.worktree.reveal", "Reveal in Finder")
+                    .icon(LucideIcon::FolderOpen)
+                    .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+            );
+        }
+        let copy = path.to_string_lossy().into_owned();
+        items.push(
+            MenuItem::new("refs.worktree.copy", "Copy Path")
+                .icon(LucideIcon::Copy)
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
+                }),
+        );
+        if worktree.prunable {
+            items.push(MenuItem::separator());
+            items.push(
+                MenuItem::new("refs.worktree.prune", "Forget Missing Worktrees")
+                    .icon(LucideIcon::Eraser)
+                    .on_click(with(&this, |view, _, cx| {
+                        view.run(
+                            "Prune worktrees".to_owned(),
+                            bonsai_git::Repository::prune_worktrees,
+                            cx,
+                        );
+                    })),
+            );
+        } else if !worktree.main && !current {
+            items.push(MenuItem::separator());
+            items.push(
+                MenuItem::new("refs.worktree.remove", "Remove…")
+                    .icon(LucideIcon::Trash2)
+                    .disabled(worktree.locked.is_some())
+                    .on_click(show(
+                        &this,
+                        RefDialog::RemoveWorktree { path, dirty: false },
+                    )),
+            );
+        }
+        items
     }
 
     /// Applies a stash; `pop` drops it too when it applied without
@@ -449,9 +590,38 @@ impl RefsPanel {
                 let new = self.name_value(cx);
                 is_valid_ref_name(&new) && new != *name
             }
+            Some(RefDialog::AddWorktree { .. }) => self.worktree_problem(cx).is_none(),
             Some(_) => true,
             None => false,
         }
+    }
+
+    /// Why the Add Worktree dialog can't create its worktree yet.
+    fn worktree_problem(&self, cx: &gpui_kit::App) -> Option<String> {
+        let name = self.name_value(cx);
+        if !is_valid_ref_name(&name) {
+            return Some(String::new());
+        }
+        let snapshot = self.snapshot(cx)?;
+        let root = canonical(&self.root(cx));
+        if let Some(worktree) = snapshot
+            .worktrees
+            .iter()
+            .find(|w| w.branch.as_deref() == Some(name.as_str()))
+        {
+            return Some(if canonical(&worktree.path) == root {
+                format!("{name} is checked out here. Pick another branch or a new name.")
+            } else {
+                format!(
+                    "{name} is already checked out in {}.",
+                    worktree.path.display()
+                )
+            });
+        }
+        let folder = self.worktree_folder(cx);
+        let taken = std::fs::read_dir(&folder).is_ok_and(|mut entries| entries.next().is_some())
+            || folder.is_file();
+        taken.then(|| format!("{} already exists and isn't empty.", folder.display()))
     }
 
     /// Runs the open dialog's action.
@@ -549,6 +719,29 @@ impl RefsPanel {
                 move |repository| repository.remove_remote(&name),
                 cx,
             ),
+            RefDialog::AddWorktree { .. } => {
+                let folder = self.worktree_folder(cx);
+                let exists = self
+                    .snapshot(cx)
+                    .is_some_and(|s| s.branches.iter().any(|b| b.name == value));
+                let what = if exists {
+                    NewWorktree::Branch(value.clone())
+                } else {
+                    NewWorktree::NewBranch {
+                        name: value.clone(),
+                        start: None,
+                    }
+                };
+                if let Ok(mut slot) = self.open_after.lock() {
+                    *slot = Some(folder.clone());
+                }
+                self.run(
+                    format!("Create worktree for {value}"),
+                    move |repository| repository.add_worktree(&folder, &what),
+                    cx,
+                );
+            }
+            RefDialog::RemoveWorktree { path, dirty } => self.remove_worktree(path, dirty, cx),
             RefDialog::DeleteRemoteBranch { remote, branch } => {
                 self.model.update(cx, |model, cx| {
                     model.run_network(
@@ -571,8 +764,13 @@ impl RefsPanel {
                 (name.clone(), String::new())
             }
             Some(RefDialog::EditRemoteUrl { url, .. }) => (String::new(), url.clone()),
+            Some(RefDialog::AddWorktree {
+                branch: Some(branch),
+            }) => (branch.clone(), String::new()),
             _ => (String::new(), String::new()),
         };
+        let folder = inputs.folder.clone();
+        folder.update(cx, |input, cx| input.set_value(String::new(), window, cx));
         let edit_url = matches!(self.dialog, Some(RefDialog::EditRemoteUrl { .. }));
         let (name, url, message) = (
             inputs.name.clone(),
@@ -616,7 +814,10 @@ impl RefsPanel {
         });
         let stash_message =
             cx.new(|cx| InputState::new(window, cx).placeholder("Message (optional)"));
-        let subscriptions = [&name, &url, &stash_message]
+        let folder = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Folder (optional; defaults to the path below)")
+        });
+        let subscriptions = [&name, &url, &stash_message, &folder]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
@@ -631,6 +832,7 @@ impl RefsPanel {
             url,
             message,
             stash_message,
+            folder,
             _subscriptions: subscriptions,
         });
     }
@@ -654,7 +856,18 @@ impl RefsPanel {
         let this = cx.entity().downgrade();
         let name = branch.name.clone();
         let mut items = vec![Self::history_item(branch.oid.clone(), cx)];
-        if !branch.is_head {
+        let elsewhere = self
+            .worktree_of(&name, snapshot, cx)
+            .map(|w| w.path.clone());
+        if let Some(path) = elsewhere.clone() {
+            items.push(
+                MenuItem::new("refs.open-worktree", "Open Its Worktree")
+                    .icon(LucideIcon::FolderGit2)
+                    .on_click(with(&this, move |_, _, cx| {
+                        cx.emit(RefsEvent::OpenRepository(path.clone()));
+                    })),
+            );
+        } else if !branch.is_head {
             items.push(
                 MenuItem::new("refs.checkout", format!("Switch to {name}"))
                     .icon(LucideIcon::Check)
@@ -662,6 +875,18 @@ impl RefsPanel {
                         let name = name.clone();
                         move |view, _, cx| view.checkout(Checkout::Branch(name.clone()), cx)
                     })),
+            );
+        }
+        if elsewhere.is_none() && !branch.is_head {
+            items.push(
+                MenuItem::new("refs.new-worktree", "Check Out in New Worktree…")
+                    .icon(LucideIcon::FolderGit2)
+                    .on_click(show(
+                        &this,
+                        RefDialog::AddWorktree {
+                            branch: Some(name.clone()),
+                        },
+                    )),
             );
         }
         items.push(
@@ -682,7 +907,7 @@ impl RefsPanel {
         items.push(
             MenuItem::new("refs.delete", "Delete…")
                 .icon(LucideIcon::Trash2)
-                .disabled(branch.is_head)
+                .disabled(branch.is_head || elsewhere.is_some())
                 .on_click(show(
                     &this,
                     RefDialog::DeleteBranch {
@@ -1096,6 +1321,29 @@ impl RefsPanel {
                 "Drop",
                 true,
             ),
+            RefDialog::AddWorktree { .. } => (
+                "New Worktree".to_owned(),
+                "Checks a branch out in its own folder, so you can work on it without switching away from this one. It opens in a new tab."
+                    .to_owned(),
+                "Create Worktree",
+                false,
+            ),
+            RefDialog::RemoveWorktree { path, dirty: false } => (
+                format!("Remove {}?", path.file_name().unwrap_or_default().to_string_lossy()),
+                format!(
+                    "{} is deleted from disk. Its branch and commits stay in this repository.",
+                    path.display()
+                ),
+                "Remove",
+                true,
+            ),
+            RefDialog::RemoveWorktree { path, dirty: true } => (
+                format!("{} has changes", path.file_name().unwrap_or_default().to_string_lossy()),
+                "It has uncommitted changes or untracked files. Removing it anyway deletes them for good."
+                    .to_owned(),
+                "Remove Anyway",
+                true,
+            ),
         };
         let with_name = matches!(
             open,
@@ -1104,6 +1352,7 @@ impl RefsPanel {
                 | RefDialog::CreateTag { .. }
                 | RefDialog::AddRemote
                 | RefDialog::RenameRemote { .. }
+                | RefDialog::AddWorktree { .. }
         );
         let with_url = matches!(open, RefDialog::AddRemote | RefDialog::EditRemoteUrl { .. });
         let name_value = self.name_value(cx);
@@ -1123,6 +1372,23 @@ impl RefsPanel {
             .as_ref()
             .map(|i| i.stash_message.clone())
             .filter(|_| matches!(open, RefDialog::StashChanges));
+        let worktree = matches!(open, RefDialog::AddWorktree { .. }).then(|| {
+            let snapshot = self.snapshot(cx);
+            let hint = if name_value.is_empty() {
+                "Type a branch to check out, or a new name to create a branch from the current commit."
+                    .to_owned()
+            } else if snapshot.is_some_and(|s| s.branches.iter().any(|b| b.name == name_value)) {
+                format!("Checks out the existing branch {name_value}.")
+            } else {
+                format!("Creates the branch {name_value} at {current}.")
+            };
+            (
+                self.inputs.as_ref().map(|i| i.folder.clone()),
+                hint,
+                self.worktree_folder(cx).display().to_string(),
+                self.worktree_problem(cx).filter(|p| !p.is_empty()),
+            )
+        });
         let paths: Vec<String> = match &open {
             RefDialog::CheckoutBlocked { blocker, .. } => blocker
                 .paths()
@@ -1205,6 +1471,43 @@ impl RefsPanel {
             .when_some(url_input, |this, url| {
                 this.child(Input::new(&url).aria_label("Remote URL"))
             })
+            .when_some(worktree, |this, (folder, hint, path, problem)| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(div().text_xs().text_color(c.muted_foreground).child(hint))
+                        .when_some(folder, |this, folder| {
+                            this.child(Input::new(&folder).aria_label("Folder"))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(
+                                    lucide(LucideIcon::FolderGit2)
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(c.muted_foreground),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(theme.fonts.mono.clone())
+                                        .child(path),
+                                ),
+                        )
+                        .when_some(problem, |this, problem| {
+                            this.child(div().text_xs().text_color(c.destructive).child(problem))
+                        }),
+                )
+            })
             .when(!paths.is_empty(), |this| {
                 this.child(
                     div()
@@ -1238,6 +1541,131 @@ impl RefsPanel {
             true
         })
     }
+}
+
+impl RefsPanel {
+    fn render_worktrees(
+        &self,
+        snapshot: &Snapshot,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = UiTheme::read(cx).clone();
+        let c = &theme.colors;
+        let this = cx.entity().downgrade();
+        let root = canonical(&self.root(cx));
+        let mut list = div().flex().flex_col().child(
+            div()
+                .mt(px(12.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(sidebar_group_label("WORKTREES", cx))
+                .child(
+                    Button::new("refs.add-worktree")
+                        .variant(ButtonVariant::Ghost)
+                        .aria_label("New Worktree")
+                        .child(
+                            lucide(LucideIcon::Plus)
+                                .size(px(12.))
+                                .text_color(c.sidebar_foreground),
+                        )
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.show(RefDialog::AddWorktree { branch: None }, cx);
+                        })),
+                ),
+        );
+        let main = snapshot
+            .worktrees
+            .iter()
+            .find(|w| w.main)
+            .map(|w| w.path.clone());
+        for worktree in snapshot.worktrees.iter().filter(|w| !w.bare) {
+            let current = canonical(&worktree.path) == root;
+            let label = match (&worktree.branch, &worktree.head) {
+                (Some(branch), _) => branch.clone(),
+                (None, Some(head)) => format!("detached at {}", head.short()),
+                (None, None) => "detached".to_owned(),
+            };
+            // The folder, unless it's the main one or named the usual way.
+            let folder = worktree
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let usual = main.as_deref().is_some_and(|main| {
+                worktree.main
+                    || default_worktree_folder(main, worktree.branch.as_deref().unwrap_or(""))
+                        == worktree.path
+            });
+            let (icon, trailing) = if worktree.prunable {
+                (LucideIcon::TriangleAlert, Some("missing".to_owned()))
+            } else if worktree.locked.is_some() {
+                (LucideIcon::Lock, (!usual).then_some(folder))
+            } else {
+                (LucideIcon::FolderGit2, (!usual).then_some(folder))
+            };
+            let mut item = SidebarItem::new(
+                SharedString::from(format!("worktree:{}", worktree.path.display())),
+                label,
+            )
+            .icon(lucide(icon).size(px(16.)).text_color(if worktree.prunable {
+                c.warning
+            } else {
+                c.sidebar_foreground
+            }))
+            .selected(current);
+            if let Some(trailing) = trailing {
+                item = item.trailing(
+                    div()
+                        .max_w(px(96.))
+                        .truncate()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(trailing),
+                );
+            }
+            if !current && !worktree.prunable {
+                let path = worktree.path.clone();
+                item = item.on_activate(with(&this, move |_, _, cx| {
+                    cx.emit(RefsEvent::OpenRepository(path.clone()));
+                }));
+            }
+            let menu_worktree = worktree.clone();
+            list = list.child(div().child(item).on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, _, cx| {
+                    let items = this.worktree_menu(&menu_worktree, current, cx);
+                    this.set_menu(items, cx);
+                }),
+            ));
+        }
+        list
+    }
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// `~/x` as a path in the home folder.
+fn expand_home(path: &str) -> PathBuf {
+    match (path.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(path),
+    }
+}
+
+/// `../orchard-feature-login` for branch `feature/login` of `.../orchard`.
+fn default_worktree_folder(main: &Path, branch: &str) -> PathBuf {
+    let name = main.file_name().unwrap_or_default().to_string_lossy();
+    let branch = branch.replace(['/', '\\'], "-");
+    let folder = if branch.is_empty() {
+        format!("{name}-worktree")
+    } else {
+        format!("{name}-{branch}")
+    };
+    main.parent().unwrap_or(main).join(folder)
 }
 
 /// A menu click handler that updates the panel.
@@ -1333,7 +1761,19 @@ impl Render for RefsPanel {
                         );
                     }
                 }
-                if !branch.is_head {
+                if let Some(worktree) = self.worktree_of(&branch.name, snapshot, cx) {
+                    let path = worktree.path.clone();
+                    if branch.upstream.is_none() {
+                        item = item.trailing(
+                            lucide(LucideIcon::FolderGit2)
+                                .size(px(12.))
+                                .text_color(c.muted_foreground),
+                        );
+                    }
+                    item = item.on_activate(with(&this, move |_, _, cx| {
+                        cx.emit(RefsEvent::OpenRepository(path.clone()));
+                    }));
+                } else if !branch.is_head {
                     let target = Checkout::Branch(branch.name.clone());
                     item = item.on_activate(with(&this, move |view, _, cx| {
                         view.checkout(target.clone(), cx);
@@ -1349,6 +1789,8 @@ impl Render for RefsPanel {
                     }),
                 ));
             }
+
+            list = list.child(self.render_worktrees(snapshot, cx));
 
             let mut remotes: Vec<&str> = snapshot.remotes.iter().map(|r| r.name.as_str()).collect();
             for branch in &snapshot.remote_branches {
@@ -1730,5 +2172,132 @@ mod tests {
         panel.update_in(cx, RefsPanel::confirm);
         cx.run_until_parked();
         assert_eq!(stashes(cx), [] as [bonsai_git::Stash; 0]);
+    }
+
+    #[gpui_kit::test]
+    fn adds_opens_and_removes_worktrees(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        // Git reports real paths (macOS temp folders are behind a symlink).
+        let base = dir.path().canonicalize().unwrap();
+        let root = base.join("orchard");
+        std::fs::create_dir(&root).unwrap();
+        let repository =
+            Repository::init(&Git::locate(None).unwrap(), &root, Some("main")).unwrap();
+        for (key, value) in [
+            ("user.name", "Bonsai"),
+            ("user.email", "bonsai@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&root, &["config", key, value]);
+        }
+        std::fs::write(root.join("a.txt"), "1").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "base"]);
+        git(&root, &["branch", "feature/login"]);
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| RefsPanel::new(model.clone(), cx));
+        cx.run_until_parked();
+        let opened = Arc::new(Mutex::new(Vec::new()));
+        let _events = cx.update(|_, cx| {
+            let opened = opened.clone();
+            cx.subscribe(&panel, move |_, event: &RefsEvent, _| {
+                if let RefsEvent::OpenRepository(path) = event {
+                    opened.lock().unwrap().push(path.clone());
+                }
+            })
+        });
+
+        // An existing branch, into the default sibling folder.
+        panel.update(cx, |panel, cx| {
+            panel.show(
+                RefDialog::AddWorktree {
+                    branch: Some("feature/login".into()),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let expected = base.join("orchard-feature-login");
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.worktree_folder(cx), expected);
+            assert!(panel.can_confirm(cx));
+        });
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            opened.lock().unwrap().as_slice(),
+            std::slice::from_ref(&expected)
+        );
+        assert_eq!(
+            std::fs::read_to_string(expected.join("a.txt")).unwrap(),
+            "1"
+        );
+
+        // `main` is checked out here and `feature/login` there now.
+        panel.update(cx, |panel, cx| {
+            panel.show(RefDialog::AddWorktree { branch: None }, cx);
+        });
+        cx.run_until_parked();
+        let name = panel.read_with(cx, |panel, _| panel.inputs.as_ref().unwrap().name.clone());
+        for taken in ["main", "feature/login"] {
+            name.update_in(cx, |input, window, cx| input.set_value(taken, window, cx));
+            panel.read_with(cx, |panel, cx| {
+                assert!(!panel.can_confirm(cx));
+                assert!(panel.worktree_problem(cx).unwrap().contains("checked out"));
+            });
+        }
+        // A new name makes a branch, in the folder typed.
+        name.update_in(cx, |input, window, cx| input.set_value("spike", window, cx));
+        let folder = panel.read_with(cx, |panel, _| panel.inputs.as_ref().unwrap().folder.clone());
+        let typed = base.join("elsewhere");
+        folder.update_in(cx, |input, window, cx| {
+            input.set_value(typed.to_string_lossy().into_owned(), window, cx);
+        });
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert_eq!(opened.lock().unwrap().last(), Some(&typed));
+        model.read_with(cx, |model, _| {
+            let snapshot = model.snapshot().unwrap();
+            let branches: Vec<_> = snapshot
+                .worktrees
+                .iter()
+                .map(|w| w.branch.clone())
+                .collect();
+            assert_eq!(snapshot.worktrees.len(), 3, "{branches:?}");
+            assert!(snapshot.branches.iter().any(|b| b.name == "spike"));
+        });
+
+        // A branch checked out elsewhere opens its worktree instead of switching.
+        panel.read_with(cx, |panel, cx| {
+            let snapshot = panel.snapshot(cx).unwrap();
+            let elsewhere = panel.worktree_of("feature/login", snapshot, cx).unwrap();
+            assert_eq!(canonical(&elsewhere.path), canonical(&expected));
+            assert!(panel.worktree_of("main", snapshot, cx).is_none());
+        });
+
+        // Removing one with changes asks before forcing.
+        std::fs::write(expected.join("a.txt"), "edited").unwrap();
+        panel.update(cx, |panel, cx| {
+            panel.remove_worktree(expected.clone(), false, cx);
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| {
+            assert_eq!(
+                panel.dialog(),
+                Some(&RefDialog::RemoveWorktree {
+                    path: expected.clone(),
+                    dirty: true,
+                })
+            );
+        });
+        assert!(expected.exists());
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert!(!expected.exists());
+        model.read_with(cx, |model, _| {
+            assert_eq!(model.snapshot().unwrap().worktrees.len(), 2);
+        });
     }
 }

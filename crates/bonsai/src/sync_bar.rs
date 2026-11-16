@@ -569,6 +569,7 @@ mod tests {
                 })
                 .collect(),
             stashes: Vec::new(),
+            worktrees: Vec::new(),
             operation: None,
         }
     }

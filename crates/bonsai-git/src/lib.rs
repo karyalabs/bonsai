@@ -25,6 +25,7 @@ mod stash;
 mod sync;
 mod version;
 mod worktree;
+mod worktrees;
 
 pub use blame::{Blame, BlameCommit, BlameLine, parse_porcelain};
 pub use branch::{CheckoutBlocker, is_valid_ref_name};
@@ -52,3 +53,4 @@ pub use stash::{StashContents, stash_diff};
 pub use sync::{Progress, PullMode, PushRequest, RewrittenBranch, SyncFailure};
 pub use version::GitVersion;
 pub use worktree::IgnoreRule;
+pub use worktrees::{NewWorktree, Worktree, parse_worktrees};
