@@ -214,6 +214,8 @@ impl Targets {
 pub enum ChangesEvent {
     /// The active row changed: show this diff, titled by its path.
     Focused(Option<DiffTarget>, SharedString),
+    /// Purge from History was chosen for this path.
+    Purge(PathBuf),
 }
 
 impl ChangeRow {
@@ -524,6 +526,19 @@ impl ChangesView {
                 MenuItem::submenu("changes.ignore", "Ignore", ignore).icon(LucideIcon::EyeOff),
             );
             items.push(MenuItem::separator());
+            let purge = path.to_path_buf();
+            items.push(
+                MenuItem::new("changes.purge", "Purge from History…")
+                    .icon(LucideIcon::Eraser)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let _ = this.update(cx, |_, cx| {
+                                cx.emit(ChangesEvent::Purge(purge.clone()));
+                            });
+                        }
+                    }),
+            );
             let reveal = path.to_path_buf();
             items.push(
                 MenuItem::new("changes.reveal", "Reveal in Finder")

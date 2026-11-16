@@ -23,6 +23,7 @@ actions!(
         Fetch,
         Pull,
         Push,
+        PurgeFromHistory,
     ]
 );
 
@@ -106,6 +107,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(Fetch, "repository.fetch", "Fetch", "Repository", keys: ["secondary-alt-f"], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["download", "update", "remote"]),
     command!(Pull, "repository.pull", "Pull", "Repository", keys: ["secondary-alt-l"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["download", "merge", "rebase", "update"]),
     command!(Push, "repository.push", "Push", "Repository", keys: ["secondary-alt-p"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["upload", "publish", "remote"]),
+    command!(PurgeFromHistory, "repository.purge", "Purge from History…", "Repository", keys: [], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["remove", "secret", "env", "rewrite", "filter", "delete file"]),
     command!(Refresh, "repository.refresh", "Refresh", "Repository", keys: ["secondary-r"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["reload", "status"]),
     command!(NextTab, "window.next-tab", "Show Next Tab", "Window", keys: ["ctrl-tab", "secondary-shift-]"], menu: Some(MenuPlacement::Window), palette: true),
     command!(PreviousTab, "window.previous-tab", "Show Previous Tab", "Window", keys: ["ctrl-shift-tab", "secondary-shift-["], menu: Some(MenuPlacement::Window), palette: true),

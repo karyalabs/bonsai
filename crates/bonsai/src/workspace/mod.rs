@@ -19,6 +19,7 @@ use crate::{
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     diff_pane::DiffPane,
+    purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     refs::RefsPanel,
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
@@ -66,6 +67,11 @@ pub struct Workspace {
     clone_handle: DialogHandle,
     clone: Option<Entity<CloneDialog>>,
     clone_events: Option<Subscription>,
+    purge_handle: DialogHandle,
+    purge: Option<Entity<PurgeSheet>>,
+    purge_events: Option<Subscription>,
+    /// A path to open Purge from History for on the next render.
+    purge_requested: Option<PathBuf>,
     /// Shows the welcome screen in place of the active tab (New Tab).
     welcome: bool,
     message: Option<SharedString>,
@@ -98,6 +104,10 @@ impl Workspace {
             clone_handle: DialogHandle::new(false),
             clone: None,
             clone_events: None,
+            purge_handle: DialogHandle::new(false),
+            purge: None,
+            purge_events: None,
+            purge_requested: None,
             welcome: false,
             message: None,
             watch,
@@ -148,11 +158,19 @@ impl Workspace {
             let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
             let sync = cx.new(|cx| SyncBar::new(model.clone(), cx));
             let diff_target = diff.downgrade();
-            let changes_events = cx.subscribe(&changes, move |_, _, event: &ChangesEvent, cx| {
-                let ChangesEvent::Focused(target, title) = event;
-                let _ =
-                    diff_target.update(cx, |diff, cx| diff.show(target.clone(), title.clone(), cx));
-            });
+            let changes_events = cx.subscribe(
+                &changes,
+                move |this, _, event: &ChangesEvent, cx| match event {
+                    ChangesEvent::Focused(target, title) => {
+                        let _ = diff_target
+                            .update(cx, |diff, cx| diff.show(target.clone(), title.clone(), cx));
+                    }
+                    ChangesEvent::Purge(path) => {
+                        this.purge_requested = Some(path.clone());
+                        cx.notify();
+                    }
+                },
+            );
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -328,6 +346,66 @@ impl Workspace {
     }
 
     /// Opens the Clone dialog, optionally filled with `url`.
+    /// Opens Purge from History for the active repository.
+    pub fn show_purge(
+        &mut self,
+        path: Option<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.active_model().cloned().filter(|_| !self.welcome) else {
+            return;
+        };
+        let backups = backup_dir(self.session_path.as_deref());
+        let sheet = cx.new(|cx| PurgeSheet::new(model, backups, path, window, cx));
+        self.purge_events = Some(cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &PurgeEvent, window, cx| match event {
+                PurgeEvent::Dismissed => {
+                    this.purge_handle.close(window, cx);
+                    this.purge = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.purge = Some(sheet);
+        self.purge_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn purge_sheet(&self) -> Option<&Entity<PurgeSheet>> {
+        self.purge.as_ref()
+    }
+
+    fn on_purge(
+        &mut self,
+        _: &commands::PurgeFromHistory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_purge(None, window, cx);
+    }
+
+    fn render_purge(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let content = self.purge.clone();
+        let popup = dialog_popup("workspace.purge.popup", "Purge from History", cx)
+            .when_some(content.clone(), gpui_kit::ParentElement::child);
+        dialog("workspace.purge", &self.purge_handle, popup, window, cx).on_cancel(
+            move |_, _, cx| {
+                // A running purge can't be interrupted safely.
+                !content
+                    .as_ref()
+                    .is_some_and(|sheet| sheet.read(cx).is_running())
+            },
+        )
+    }
+
     pub fn show_clone(&mut self, url: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(git) = self.git.clone() else { return };
         let parent = self
@@ -1031,6 +1109,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(path) = self.purge_requested.take() {
+            self.show_purge(Some(path), window, cx);
+        }
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let model = self.active_model().cloned().filter(|_| !self.welcome);
@@ -1101,6 +1182,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_fetch))
             .on_action(cx.listener(Self::on_pull))
             .on_action(cx.listener(Self::on_push))
+            .on_action(cx.listener(Self::on_purge))
             .size_full()
             .flex()
             .flex_col()
@@ -1136,6 +1218,7 @@ impl Render for Workspace {
             .child(div().flex_1().min_h_0().child(body))
             .child(self.render_palette(window, cx))
             .child(self.render_clone(window, cx))
+            .child(self.render_purge(window, cx))
     }
 }
 

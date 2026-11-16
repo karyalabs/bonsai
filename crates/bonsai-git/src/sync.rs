@@ -125,6 +125,15 @@ impl PushRequest {
     }
 }
 
+/// A remote branch to move from its pre-purge commit to the rewritten one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewrittenBranch {
+    /// The branch name on the remote.
+    pub name: String,
+    pub old: String,
+    pub new: String,
+}
+
 /// Progress callback for network operations.
 pub type Progress = Arc<dyn Fn(CloneProgress) + Send + Sync>;
 
@@ -217,6 +226,37 @@ impl Repository {
         args.push("--".into());
         args.push(request.remote.clone().into());
         args.push(format!("refs/heads/{}:refs/heads/{target}", request.branch).into());
+        self.network(args, progress, cancel)
+    }
+
+    /// Force pushes branches whose history a purge rewrote: each remote
+    /// branch moves from `old` (its value before the rewrite) to `new`, and
+    /// only if the server still has `old`. One atomic push per call.
+    pub fn push_rewritten(
+        &self,
+        remote: &str,
+        branches: &[RewrittenBranch],
+        progress: Option<Progress>,
+        cancel: Option<CancelToken>,
+    ) -> Result<()> {
+        if branches.is_empty() {
+            return Ok(());
+        }
+        let mut args: Vec<OsString> = vec!["push".into(), "--progress".into(), "--atomic".into()];
+        for branch in branches {
+            args.push(
+                format!(
+                    "--force-with-lease=refs/heads/{}:{}",
+                    branch.name, branch.old
+                )
+                .into(),
+            );
+        }
+        args.push("--".into());
+        args.push(remote.into());
+        for branch in branches {
+            args.push(format!("{}:refs/heads/{}", branch.new, branch.name).into());
+        }
         self.network(args, progress, cancel)
     }
 

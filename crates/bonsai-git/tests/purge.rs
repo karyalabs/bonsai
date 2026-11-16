@@ -353,3 +353,70 @@ fn stashes_unrelated_to_the_paths_are_kept() {
     );
     assert_eq!(run(root, &["stash", "list", "--format=%H %gs"]), before);
 }
+
+#[test]
+fn force_pushes_rewritten_branches_with_a_lease() {
+    let (dir, repository) = fixture();
+    let root = dir.path();
+    let remote = tempfile::tempdir().unwrap();
+    run(remote.path(), &["init", "-q", "--bare"]);
+    run(
+        root,
+        &["remote", "add", "origin", remote.path().to_str().unwrap()],
+    );
+    run(root, &["push", "-q", "origin", "main", "feature"]);
+    run(root, &["fetch", "-q", "origin"]);
+
+    let backups = tempfile::tempdir().unwrap();
+    let report = repository
+        .purge(&[PurgeTarget::Path(".env".into())], backups.path(), &|_| {})
+        .unwrap();
+    let rewritten: Vec<bonsai_git::RewrittenBranch> = report
+        .refs
+        .iter()
+        .filter_map(|change| {
+            let name = change.name.strip_prefix("refs/remotes/origin/")?;
+            Some(bonsai_git::RewrittenBranch {
+                name: name.to_owned(),
+                old: change.old.as_ref()?.to_string(),
+                new: change.new.as_ref()?.to_string(),
+            })
+        })
+        .collect();
+    assert_eq!(rewritten.len(), 2);
+    repository
+        .push_rewritten("origin", &rewritten, None, None)
+        .unwrap();
+    assert_eq!(
+        run(remote.path(), &["rev-parse", "main"]),
+        run(root, &["rev-parse", "main"])
+    );
+    assert!(
+        !in_history(remote.path(), ".env") || {
+            // The bare remote keeps loose objects until its own gc, but no ref
+            // reaches them.
+            run(
+                remote.path(),
+                &["log", "--all", "--format=%H", "--", ".env"],
+            )
+            .trim()
+            .is_empty()
+        }
+    );
+
+    // Pushing again with the pre-purge lease is refused: the server moved on.
+    let main = rewritten.iter().find(|b| b.name == "main").unwrap();
+    let feature = rewritten.iter().find(|b| b.name == "feature").unwrap();
+    let stale = bonsai_git::RewrittenBranch {
+        name: "main".into(),
+        old: main.old.clone(),
+        new: feature.new.clone(),
+    };
+    let error = repository
+        .push_rewritten("origin", &[stale], None, None)
+        .unwrap_err();
+    assert_eq!(
+        error.sync_failure(),
+        Some(bonsai_git::SyncFailure::StaleLease)
+    );
+}
