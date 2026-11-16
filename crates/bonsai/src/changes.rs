@@ -3,12 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
-use bonsai_git::{Change, ChangeKind, EntryStatus, IgnoreRule, Snapshot};
+use bonsai_git::{Change, ChangeKind, DiffTarget, EntryStatus, IgnoreRule, Snapshot};
 use gpui_icons::LucideIcon;
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled, Subscription, WeakEntity,
-    Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, ClipboardItem, Context, ElementId, Entity, EventEmitter,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled,
+    Subscription, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -208,6 +208,26 @@ impl Targets {
     }
 }
 
+/// What the Changes view tells its owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangesEvent {
+    /// The active row changed: show this diff, titled by its path.
+    Focused(Option<DiffTarget>, SharedString),
+}
+
+impl ChangeRow {
+    /// The diff that shows this row's side of the change.
+    #[must_use]
+    pub fn diff_target(&self) -> Option<DiffTarget> {
+        let path = self.change.as_ref()?.path.clone();
+        Some(match self.group {
+            Group::Staged => DiffTarget::Staged(vec![path]),
+            Group::Unstaged | Group::Conflicted => DiffTarget::Unstaged(vec![path]),
+            Group::Untracked => DiffTarget::Untracked(path),
+        })
+    }
+}
+
 pub struct ChangesView {
     model: Entity<RepositoryModel>,
     rows: Vec<ChangeRow>,
@@ -219,7 +239,36 @@ pub struct ChangesView {
     _events: Subscription,
 }
 
+impl EventEmitter<ChangesEvent> for ChangesView {}
+
 impl ChangesView {
+    /// The row the list's focus is on, if it is a change.
+    #[must_use]
+    pub fn focused_row(&self) -> Option<&ChangeRow> {
+        let focused = self.list.focused()?;
+        self.rows
+            .iter()
+            .find(|row| matches!(&focused, ElementId::Name(name) if *name == row.id))
+            .filter(|row| row.change.is_some())
+    }
+
+    fn emit_focus(&mut self, cx: &mut Context<Self>) {
+        let (target, title) = self
+            .focused_row()
+            .map_or((None, SharedString::default()), |row| {
+                let path = row
+                    .change
+                    .as_ref()
+                    .map(|c| c.path.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                (
+                    row.diff_target(),
+                    format!("{path} · {}", row.group.title()).into(),
+                )
+            });
+        cx.emit(ChangesEvent::Focused(target, title));
+    }
+
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let list = VirtualListState::new(Vec::new()).expect("an empty list has no duplicates");
         list.set_selection_mode(ListSelectionMode::Multiple);
@@ -275,6 +324,7 @@ impl ChangesView {
         let _ = self.list.replace_items(items);
         self.rows = rows;
         self.rebuild_menu(cx);
+        self.emit_focus(cx);
         cx.notify();
     }
 
@@ -659,6 +709,7 @@ impl Render for ChangesView {
             let _ = view.update(cx, |view, cx| match event {
                 VirtualListEvent::SelectionChanged | VirtualListEvent::FocusChanged => {
                     view.rebuild_menu(cx);
+                    view.emit_focus(cx);
                     cx.notify();
                 }
                 VirtualListEvent::Activate(_) => view.toggle_selection(cx),

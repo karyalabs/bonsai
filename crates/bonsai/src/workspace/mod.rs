@@ -16,8 +16,9 @@ use gpui_kit::{
 };
 
 use crate::{
-    changes::ChangesView,
+    changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
+    diff_pane::DiffPane,
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
     ui::{
@@ -44,7 +45,9 @@ struct RepositoryTab {
     title: SharedString,
     model: Entity<RepositoryModel>,
     changes: Entity<ChangesView>,
+    diff: Entity<DiffPane>,
     _events: Subscription,
+    _changes_events: Subscription,
 }
 
 pub struct Workspace {
@@ -137,11 +140,20 @@ impl Workspace {
                 cx.notify();
             });
             let changes = cx.new(|cx| ChangesView::new(model.clone(), cx));
+            let diff = cx.new(|cx| DiffPane::new(model.clone(), cx));
+            let diff_target = diff.downgrade();
+            let changes_events = cx.subscribe(&changes, move |_, _, event: &ChangesEvent, cx| {
+                let ChangesEvent::Focused(target, title) = event;
+                let _ =
+                    diff_target.update(cx, |diff, cx| diff.show(target.clone(), title.clone(), cx));
+            });
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
                 model,
                 changes,
+                diff,
+                _changes_events: changes_events,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -685,12 +697,9 @@ impl Workspace {
             .border_l_1()
             .border_color(theme.colors.border)
             .bg(theme.colors.background)
-            .child(message_panel(
-                LucideIcon::FileDiff,
-                "Nothing selected",
-                "Select a change or a commit to see its diff.".into(),
-                cx,
-            ))
+            .when_some(self.tabs.get(self.active), |this, tab| {
+                this.child(tab.diff.clone())
+            })
     }
 
     fn render_welcome(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
