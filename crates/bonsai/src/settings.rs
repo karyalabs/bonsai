@@ -59,6 +59,8 @@ pub struct Settings {
     /// Minutes between background fetches of open repositories; 0 is off.
     pub auto_fetch_minutes: u32,
     pub pull: PullSetting,
+    /// Shows the Changes view as a folder tree.
+    pub changes_tree: bool,
 }
 
 impl Default for Settings {
@@ -69,6 +71,7 @@ impl Default for Settings {
             terminal: None,
             appearance: AppearanceSetting::System,
             auto_fetch_minutes: 10,
+            changes_tree: false,
             pull: PullSetting::Merge,
         }
     }

@@ -1,7 +1,11 @@
 //! The Changes view: conflicted, staged, unstaged and untracked files, with
 //! staging, discarding and ignoring (CONTEXT.md: Change).
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    path::{Path, PathBuf},
+    rc::Rc,
+};
 
 use bonsai_git::{
     Change, ChangeKind, DiffTarget, EntryStatus, IgnoreRule, InProgress, OperationAction, Side,
@@ -24,6 +28,8 @@ use crate::{
         dialog::{DialogHandle, dialog},
         menu::{MenuItem, MenuState},
         theme::UiTheme,
+        toggle_group::{ToggleGroup, ToggleGroupItem},
+        tree::{Tree, TreeEvent, TreeNode, TreeRow, TreeRowKind, TreeState},
         virtual_list::{
             ListItem, ListRow, ListSelectionMode, VirtualList, VirtualListEvent, VirtualListState,
         },
@@ -145,6 +151,80 @@ pub fn group_rows(changes: &[Change]) -> Vec<ChangeRow> {
     rows
 }
 
+/// The Changes tree: a folder per group, then the folders of each path.
+/// Leaves keep their row's id; a folder is `group:dir/`, so a folder id is a
+/// prefix of every row under it.
+#[must_use]
+pub fn tree_nodes(rows: &[ChangeRow]) -> Vec<TreeNode> {
+    #[derive(Default)]
+    struct Dir<'a> {
+        dirs: BTreeMap<&'a str, Dir<'a>>,
+        files: Vec<(&'a str, &'a ChangeRow)>,
+    }
+    fn nodes(prefix: &str, dir: Dir<'_>) -> Vec<TreeNode> {
+        let mut out: Vec<TreeNode> = dir
+            .dirs
+            .into_iter()
+            .map(|(name, child)| {
+                let id = format!("{prefix}{name}/");
+                let children = nodes(&id, child);
+                TreeNode::folder(id, name.to_owned(), children)
+            })
+            .collect();
+        out.extend(
+            dir.files
+                .into_iter()
+                .map(|(name, row)| TreeNode::leaf(row.id.clone(), name.to_owned())),
+        );
+        out
+    }
+    let mut groups = Vec::new();
+    for heading in rows.iter().filter(|row| row.change.is_none()) {
+        let mut root = Dir::default();
+        let paths: Vec<(String, &ChangeRow)> = rows
+            .iter()
+            .filter(|row| row.group == heading.group)
+            .filter_map(|row| {
+                let path = row.change.as_ref()?.path.to_string_lossy().into_owned();
+                Some((path, row))
+            })
+            .collect();
+        for (path, row) in &paths {
+            let mut parts: Vec<&str> = path.split('/').collect();
+            let name = parts.pop().unwrap_or_default();
+            let mut dir = &mut root;
+            for part in parts {
+                dir = dir.dirs.entry(part).or_default();
+            }
+            dir.files.push((name, row));
+        }
+        let children = nodes(&heading.id, root);
+        groups.push(TreeNode::folder(
+            heading.id.clone(),
+            format!("{} ({})", heading.group.title(), heading.count),
+            children,
+        ));
+    }
+    groups
+}
+
+/// Whether the row with `row_id` is `selected_id` or sits in that folder.
+fn covers(selected_id: &str, row_id: &str) -> bool {
+    selected_id == row_id
+        || ((selected_id.ends_with('/') || selected_id.ends_with(':'))
+            && row_id.starts_with(selected_id))
+}
+
+/// Every folder id in `nodes`.
+fn folder_ids(nodes: &[TreeNode], out: &mut Vec<SharedString>) {
+    for node in nodes {
+        if let crate::ui::tree::TreeChildren::Loaded(children) = &node.children {
+            out.push(node.id.clone());
+            folder_ids(children, out);
+        }
+    }
+}
+
 /// What a selection of rows can do.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Targets {
@@ -237,6 +317,11 @@ pub struct ChangesView {
     model: Entity<RepositoryModel>,
     rows: Vec<ChangeRow>,
     list: VirtualListState,
+    tree: TreeState,
+    /// Shows folders (gpuicn Tree) instead of a flat list per group.
+    tree_mode: bool,
+    /// Folders the person closed; every other folder opens.
+    collapsed: HashSet<SharedString>,
     menu: Entity<MenuState>,
     discard: DialogHandle,
     /// What the open Discard dialog will throw away.
@@ -252,11 +337,48 @@ impl ChangesView {
     /// The row the list's focus is on, if it is a change.
     #[must_use]
     pub fn focused_row(&self) -> Option<&ChangeRow> {
-        let focused = self.list.focused()?;
+        let focused = if self.tree_mode {
+            self.tree.focused()?
+        } else {
+            match self.list.focused()? {
+                ElementId::Name(name) => name,
+                _ => return None,
+            }
+        };
         self.rows
             .iter()
-            .find(|row| matches!(&focused, ElementId::Name(name) if *name == row.id))
+            .find(|row| row.id == focused)
             .filter(|row| row.change.is_some())
+    }
+
+    #[must_use]
+    pub fn tree(&self) -> &TreeState {
+        &self.tree
+    }
+
+    #[must_use]
+    pub fn tree_mode(&self) -> bool {
+        self.tree_mode
+    }
+
+    /// Switches between the flat list and the folder tree, keeping what is
+    /// selected, and remembers the choice in Settings.
+    pub fn set_tree_mode(&mut self, tree_mode: bool, cx: &mut Context<Self>) {
+        if self.tree_mode == tree_mode {
+            return;
+        }
+        let selected: Vec<SharedString> = self.selected_rows().map(|row| row.id.clone()).collect();
+        self.tree_mode = tree_mode;
+        if tree_mode {
+            self.tree.set_selected(selected);
+        } else {
+            self.list
+                .set_selected(selected.into_iter().map(ElementId::Name));
+        }
+        let _ = crate::settings::update(cx, |s| s.changes_tree = tree_mode);
+        self.rebuild_menu(cx);
+        self.emit_focus(cx);
+        cx.notify();
     }
 
     fn emit_focus(&mut self, cx: &mut Context<Self>) {
@@ -279,6 +401,9 @@ impl ChangesView {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let list = VirtualListState::new(Vec::new()).expect("an empty list has no duplicates");
         list.set_selection_mode(ListSelectionMode::Multiple);
+        let tree = TreeState::new(Vec::new(), []).expect("an empty tree has no duplicates");
+        tree.set_selection_mode(ListSelectionMode::Multiple);
+        let tree_mode = crate::settings::get(cx).changes_tree;
         let menu = cx.new(|cx| MenuState::new(Vec::new(), cx));
         let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
             if matches!(event, RepositoryEvent::SnapshotChanged) {
@@ -289,6 +414,9 @@ impl ChangesView {
             model,
             rows: Vec::new(),
             list,
+            tree,
+            tree_mode,
+            collapsed: HashSet::new(),
             menu,
             discard: DialogHandle::new(false),
             pending_discard: Targets::default(),
@@ -337,6 +465,16 @@ impl ChangesView {
             .collect();
         // IDs are unique by construction: group key plus path.
         let _ = self.list.replace_items(items);
+        let nodes = tree_nodes(&rows);
+        let mut folders = Vec::new();
+        folder_ids(&nodes, &mut folders);
+        // Folder ids end in '/' or ':', which no path does, so they are unique.
+        let _ = self.tree.replace_nodes(nodes);
+        for folder in folders {
+            if !self.collapsed.contains(&folder) && !self.tree.is_expanded(&folder) {
+                self.tree.set_expanded(&folder, true);
+            }
+        }
         self.rows = rows;
         self.rebuild_menu(cx);
         self.emit_focus(cx);
@@ -346,12 +484,27 @@ impl ChangesView {
     /// The selected change rows.
     #[must_use]
     pub fn selection(&self) -> Targets {
-        let selected = self.list.selected();
-        Targets::from_rows(self.rows.iter().filter(|row| {
-            selected
-                .iter()
-                .any(|id| matches!(id, ElementId::Name(name) if *name == row.id))
-        }))
+        Targets::from_rows(self.selected_rows())
+    }
+
+    /// The selected change rows; in the tree, a selected folder stands for
+    /// every change under it.
+    fn selected_rows(&self) -> impl Iterator<Item = &ChangeRow> {
+        let selected: Vec<SharedString> = if self.tree_mode {
+            self.tree.selected()
+        } else {
+            self.list
+                .selected()
+                .into_iter()
+                .filter_map(|id| match id {
+                    ElementId::Name(name) => Some(name),
+                    _ => None,
+                })
+                .collect()
+        };
+        self.rows.iter().filter(move |row| {
+            row.change.is_some() && selected.iter().any(|id| covers(id, &row.id))
+        })
     }
 
     /// Stages the selection, or unstages it when everything selected is
@@ -718,7 +871,8 @@ impl ChangesView {
         self.menu.update(cx, |menu, cx| menu.set_items(items, cx));
     }
 
-    fn render_row(row: &ChangeRow, theme: &UiTheme) -> gpui_kit::AnyElement {
+    /// `show_folder` adds the file's folder after its name, for the flat list.
+    fn render_row(row: &ChangeRow, theme: &UiTheme, show_folder: bool) -> gpui_kit::AnyElement {
         let c = &theme.colors;
         let Some(change) = &row.change else {
             return div()
@@ -771,7 +925,7 @@ impl ChangesView {
                         .child(format!("← {}", original.to_string_lossy())),
                 )
             })
-            .when_some(folder, |this, folder| {
+            .when_some(folder.filter(|_| show_folder), |this, folder| {
                 this.child(
                     div()
                         .min_w_0()
@@ -782,6 +936,76 @@ impl ChangesView {
                 )
             })
             .into_any_element()
+    }
+
+    fn render_tree(&self, theme: &UiTheme, cx: &mut Context<Self>) -> Tree {
+        let rows: Rc<HashMap<SharedString, ChangeRow>> = Rc::new(
+            self.rows
+                .iter()
+                .filter(|row| row.change.is_some())
+                .map(|row| (row.id.clone(), row.clone()))
+                .collect(),
+        );
+        let row_theme = theme.clone();
+        let view = cx.entity().downgrade();
+        Tree::new(
+            "changes.tree",
+            "Changes",
+            self.tree.clone(),
+            move |row: &TreeRow, _, _| {
+                if let Some(change) = rows.get(&row.id) {
+                    return Self::render_row(change, &row_theme, false);
+                }
+                let c = &row_theme.colors;
+                match &row.kind {
+                    TreeRowKind::Folder { .. } if row.depth == 0 => div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .text_color(c.muted_foreground)
+                        .child(row.label.to_uppercase())
+                        .into_any_element(),
+                    _ => div()
+                        .min_w_0()
+                        .truncate()
+                        .text_color(c.muted_foreground)
+                        .child(row.label.clone())
+                        .into_any_element(),
+                }
+            },
+        )
+        .empty(
+            div()
+                .p(px(16.))
+                .text_sm()
+                .text_color(theme.colors.muted_foreground)
+                .child("No changes. The work tree matches the last commit."),
+        )
+        .on_event(move |event, _, cx| {
+            let _ = view.update(cx, |view, cx| match event {
+                TreeEvent::SelectionChanged | TreeEvent::FocusChanged => {
+                    view.rebuild_menu(cx);
+                    view.emit_focus(cx);
+                    cx.notify();
+                }
+                TreeEvent::Activate(id) => {
+                    if view
+                        .rows
+                        .iter()
+                        .any(|row| row.id == *id && row.change.is_some())
+                    {
+                        view.toggle_selection(cx);
+                    }
+                }
+                TreeEvent::ExpansionChanged { id, expanded } => {
+                    if *expanded {
+                        view.collapsed.remove(id);
+                    } else {
+                        view.collapsed.insert(id.clone());
+                    }
+                }
+                TreeEvent::LoadChildren(_) => {}
+            });
+        })
     }
 
     fn render_discard(
@@ -869,7 +1093,7 @@ impl Render for ChangesView {
             move |row: &ListRow, _, _| {
                 rows.get(row.index).map_or_else(
                     || div().into_any_element(),
-                    |r| Self::render_row(r, &row_theme),
+                    |r| Self::render_row(r, &row_theme, true),
                 )
             },
         )
@@ -890,6 +1114,11 @@ impl Render for ChangesView {
                 VirtualListEvent::Activate(_) => view.toggle_selection(cx),
             });
         });
+        let list = if self.tree_mode {
+            self.render_tree(&theme, cx).into_any_element()
+        } else {
+            list.into_any_element()
+        };
         let operation = self.model.read(cx).snapshot().and_then(|s| s.operation);
         let conflicts = self
             .rows
@@ -921,7 +1150,35 @@ impl Render for ChangesView {
                     .child(
                         div()
                             .flex()
+                            .items_center()
                             .gap(px(4.))
+                            .child(
+                                ToggleGroup::new("changes.mode")
+                                    .aria_label("Show changes as")
+                                    .segmented(true)
+                                    .value([if self.tree_mode { "tree" } else { "list" }])
+                                    .item(
+                                        ToggleGroupItem::new("changes.mode.list", "list")
+                                            .aria_label("List")
+                                            .child("List"),
+                                    )
+                                    .item(
+                                        ToggleGroupItem::new("changes.mode.tree", "tree")
+                                            .aria_label("Tree")
+                                            .child("Tree"),
+                                    )
+                                    .on_change({
+                                        let view = cx.entity().downgrade();
+                                        move |values, _, cx| {
+                                            if let Some(value) = values.first() {
+                                                let tree = value == "tree";
+                                                let _ = view.update(cx, |view, cx| {
+                                                    view.set_tree_mode(tree, cx);
+                                                });
+                                            }
+                                        }
+                                    }),
+                            )
                             .child(
                                 Button::new("changes.unstage-all")
                                     .variant(ButtonVariant::Ghost)
@@ -969,6 +1226,60 @@ mod tests {
             kind,
             submodule: false,
         }
+    }
+
+    #[test]
+    fn the_tree_nests_folders_under_each_group() {
+        let untracked = ChangeKind::Untracked;
+        let rows = group_rows(&[
+            change("src/ui/a.rs", untracked),
+            change("src/b.rs", untracked),
+            change("README.md", untracked),
+        ]);
+        let nodes = tree_nodes(&rows);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].id.as_ref(), "untracked:");
+        assert_eq!(nodes[0].label.as_ref(), "Untracked (3)");
+        let crate::ui::tree::TreeChildren::Loaded(top) = &nodes[0].children else {
+            panic!("the group is a folder");
+        };
+        let ids: Vec<&str> = top.iter().map(|n| n.id.as_ref()).collect();
+        // Folders first, then files; leaves keep the list's row ids.
+        assert_eq!(ids, ["untracked:src/", "untracked:README.md"]);
+        let mut folders = Vec::new();
+        folder_ids(&nodes, &mut folders);
+        assert_eq!(
+            folders,
+            ["untracked:", "untracked:src/", "untracked:src/ui/"]
+        );
+        assert!(covers("untracked:src/", "untracked:src/ui/a.rs"));
+        assert!(covers("untracked:", "untracked:README.md"));
+        assert!(!covers("untracked:src/", "untracked:srcx/a.rs"));
+        assert!(!covers("untracked:src/b.rs", "untracked:src/b.rs.orig"));
+    }
+
+    #[test]
+    fn ten_thousand_changes_build_quickly() {
+        let changes: Vec<Change> = (0..10_000)
+            .map(|i| {
+                change(
+                    &format!("dir{}/sub{}/file{i}.txt", i % 50, i % 7),
+                    ChangeKind::Untracked,
+                )
+            })
+            .collect();
+        let started = std::time::Instant::now();
+        let rows = group_rows(&changes);
+        let nodes = tree_nodes(&rows);
+        let state = TreeState::new(nodes, []).unwrap();
+        state.set_expanded(&"untracked:".into(), true);
+        assert_eq!(rows.len(), 10_001);
+        // Generous for a debug build on a shared CI runner.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -1111,6 +1422,60 @@ mod tests {
             });
             cx.run_until_parked();
             assert!(!dir.path().join("b.txt").exists());
+        }
+
+        #[gpui_kit::test]
+        fn a_folder_in_the_tree_stages_everything_under_it(cx: &mut TestAppContext) {
+            cx.update(crate::ui::theme::init);
+            let dir = tempfile::tempdir().unwrap();
+            let git = Git::locate(None).unwrap();
+            let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+            std::fs::create_dir_all(dir.path().join("src/ui")).unwrap();
+            std::fs::write(dir.path().join("src/ui/a.rs"), "a").unwrap();
+            std::fs::write(dir.path().join("src/b.rs"), "b").unwrap();
+            std::fs::write(dir.path().join("README.md"), "r").unwrap();
+            let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+            let view = cx.new(|cx| ChangesView::new(model.clone(), cx));
+            cx.run_until_parked();
+
+            view.update(cx, |view, cx| {
+                view.set_tree_mode(true, cx);
+                assert!(view.tree_mode());
+                assert!(view.tree().is_expanded(&"untracked:".into()));
+                let untracked: Vec<String> = view
+                    .rows()
+                    .iter()
+                    .filter(|r| r.change.is_some())
+                    .map(|r| r.id.to_string())
+                    .collect();
+                assert!(untracked.iter().any(|id| id.starts_with("untracked:src/")));
+                view.tree().set_selected(["untracked:src/".into()]);
+                assert!(
+                    view.selection()
+                        .untracked
+                        .iter()
+                        .all(|p| p.starts_with("src"))
+                );
+                view.toggle_selection(cx);
+            });
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                let staged: Vec<String> = view
+                    .rows()
+                    .iter()
+                    .filter(|r| r.group == Group::Staged && r.change.is_some())
+                    .map(|r| r.id.to_string())
+                    .collect();
+                assert_eq!(staged, ["staged:src/b.rs", "staged:src/ui/a.rs"]);
+                assert!(view.tree().is_expanded(&"staged:src/ui/".into()));
+            });
+
+            // Switching back keeps the selection.
+            view.update(cx, |view, cx| {
+                view.tree().set_selected(["untracked:README.md".into()]);
+                view.set_tree_mode(false, cx);
+                assert_eq!(view.selection().untracked, [PathBuf::from("README.md")]);
+            });
         }
 
         #[gpui_kit::test]
