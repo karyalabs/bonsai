@@ -96,7 +96,7 @@ impl CommitComposer {
                 }
             }),
             cx.subscribe_in(&model, window, |this, _, event, window, cx| match event {
-                RepositoryEvent::OperationFinished { name, error }
+                RepositoryEvent::OperationFinished { name, error, .. }
                     if this.pending.as_ref() == Some(name) =>
                 {
                     this.pending = None;

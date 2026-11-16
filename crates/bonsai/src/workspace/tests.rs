@@ -119,6 +119,8 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "file.open",
         "file.new",
         "app.accounts",
+        "app.settings",
+        "repository.terminal",
         "file.clone",
         "file.new-tab",
         "file.close-tab",

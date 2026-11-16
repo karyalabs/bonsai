@@ -99,7 +99,7 @@ impl SyncBar {
             model,
             pull_menu: cx.new(|cx| MenuState::new(Vec::new(), cx)),
             push_menu: cx.new(|cx| MenuState::new(Vec::new(), cx)),
-            rebase: false,
+            rebase: crate::settings::get(cx).pull == crate::settings::PullSetting::Rebase,
             force: DialogHandle::new(false),
             force_request: None,
             notice: None,
@@ -130,13 +130,15 @@ impl SyncBar {
         self.notice = None;
         let mode = if self.rebase {
             PullMode::Rebase
+        } else if crate::settings::get(cx).pull == crate::settings::PullSetting::FastForwardOnly {
+            PullMode::FastForwardOnly
         } else {
             PullMode::Merge
         };
-        let name = if self.rebase {
-            "Pull with rebase"
-        } else {
-            "Pull"
+        let name = match mode {
+            PullMode::Rebase => "Pull with rebase",
+            PullMode::FastForwardOnly => "Pull (fast-forward only)",
+            PullMode::Merge => "Pull",
         };
         self.model.update(cx, |model, cx| {
             model.run_network(

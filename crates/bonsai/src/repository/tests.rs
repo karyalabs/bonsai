@@ -76,7 +76,7 @@ fn operations_run_in_order_and_refresh(cx: &mut TestAppContext) {
         .unwrap()
         .iter()
         .filter_map(|e| match e {
-            RepositoryEvent::OperationFinished { name, error } => {
+            RepositoryEvent::OperationFinished { name, error, .. } => {
                 assert!(error.is_none());
                 Some(name.to_string())
             }
@@ -94,7 +94,7 @@ fn a_failed_operation_reports_its_error_and_the_queue_continues(cx: &mut TestApp
     let recorded = errors.clone();
     cx.update(|cx| {
         cx.subscribe(&model, move |_, event: &RepositoryEvent, _| {
-            if let RepositoryEvent::OperationFinished { name, error } = event {
+            if let RepositoryEvent::OperationFinished { name, error, .. } = event {
                 recorded
                     .lock()
                     .unwrap()
@@ -151,4 +151,40 @@ fn a_refresh_during_an_operation_waits_for_it(cx: &mut TestAppContext) {
             Path::new("x.txt")
         );
     });
+}
+
+#[gpui_kit::test]
+fn a_background_fetch_is_quiet_and_waits_its_turn(cx: &mut TestAppContext) {
+    let (dir, repository) = new_repository();
+    let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+    cx.run_until_parked();
+    // Without a remote there is nothing to fetch.
+    assert!(!model.update(cx, RepositoryModel::fetch_in_background));
+
+    let missing = dir.path().join("no-such-remote");
+    model.update(cx, |model, cx| {
+        let url = missing.display().to_string();
+        model.run(
+            "add remote",
+            move |repo| repo.add_remote("origin", &url),
+            cx,
+        );
+        // Something is running, so the background fetch steps aside.
+        assert!(!model.fetch_in_background(cx));
+    });
+    cx.run_until_parked();
+
+    let finished = Arc::new(Mutex::new(Vec::new()));
+    let recorded = finished.clone();
+    cx.update(|cx| {
+        cx.subscribe(&model, move |_, event: &RepositoryEvent, _| {
+            if let RepositoryEvent::OperationFinished { error, quiet, .. } = event {
+                recorded.lock().unwrap().push((error.is_some(), *quiet));
+            }
+        })
+        .detach();
+    });
+    assert!(model.update(cx, RepositoryModel::fetch_in_background));
+    cx.run_until_parked();
+    assert_eq!(*finished.lock().unwrap(), [(true, true)]);
 }

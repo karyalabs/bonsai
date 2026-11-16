@@ -11,7 +11,7 @@ use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
     AppContext as _, Context, Entity, ExternalPaths, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Window, div,
+    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
 
@@ -28,6 +28,7 @@ use crate::{
     remote_browser::{RemoteBrowser, RemoteBrowserEvent},
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
+    settings_sheet::{SettingsEvent, SettingsSheet},
     sync_bar::SyncBar,
     ui::{
         button::{Button, ButtonVariant},
@@ -81,6 +82,10 @@ pub struct Workspace {
     accounts_handle: DialogHandle,
     accounts: Option<Entity<AccountsSheet>>,
     accounts_events: Option<Subscription>,
+    settings_handle: DialogHandle,
+    settings: Option<(Entity<SettingsSheet>, Subscription)>,
+    /// Fetches open repositories every few minutes, as Settings says.
+    auto_fetch: Option<Task<()>>,
     publish_handle: DialogHandle,
     publish: Option<(Entity<PublishSheet>, Subscription)>,
     /// The Welcome screen's remote repositories, built on first show and
@@ -110,7 +115,7 @@ impl Workspace {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let git = Git::locate(None)
+        let git = Git::locate(crate::settings::get(cx).git_path.as_deref())
             .map(crate::askpass::configure)
             .map_err(|error| SharedString::from(error.to_string()));
         let mut this = Self {
@@ -131,6 +136,9 @@ impl Workspace {
             accounts_handle: DialogHandle::new(false),
             accounts: None,
             accounts_events: None,
+            settings_handle: DialogHandle::new(false),
+            settings: None,
+            auto_fetch: None,
             publish_handle: DialogHandle::new(false),
             publish: None,
             remote_browser: None,
@@ -147,7 +155,36 @@ impl Workspace {
         }
         this.active = session.active_tab.min(this.tabs.len().saturating_sub(1));
         this.save_session();
+        // Only a watched window (the app, not tests) fetches on its own.
+        if watch {
+            this.auto_fetch = Some(cx.spawn(async move |this, cx| {
+                let mut minutes = 0;
+                loop {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_secs(60))
+                        .await;
+                    minutes += 1;
+                    let Ok(()) = this.update(cx, |this, cx| {
+                        let every = crate::settings::get(cx).auto_fetch_minutes;
+                        if every > 0 && minutes >= every {
+                            minutes = 0;
+                            this.fetch_all_in_background(cx);
+                        }
+                    }) else {
+                        break;
+                    };
+                }
+            }));
+        }
         this
+    }
+
+    /// Fetches every open repository quietly: a failure, such as being
+    /// offline, shows in the activity log but not in the banner.
+    pub fn fetch_all_in_background(&mut self, cx: &mut Context<Self>) {
+        for tab in &self.tabs {
+            tab.model.update(cx, RepositoryModel::fetch_in_background);
+        }
     }
 
     /// Opens the repository containing `path` in a new tab, or switches to its
@@ -174,7 +211,9 @@ impl Workspace {
             let model = cx.new(|cx| RepositoryModel::new(repository, watch, cx));
             let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
                 if let RepositoryEvent::OperationFinished {
-                    error: Some(error), ..
+                    error: Some(error),
+                    quiet: false,
+                    ..
                 } = event
                 {
                     this.message = Some(error.clone());
@@ -477,6 +516,79 @@ impl Workspace {
     #[must_use]
     pub fn accounts_sheet(&self) -> Option<&Entity<AccountsSheet>> {
         self.accounts.as_ref()
+    }
+
+    pub fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let sheet = cx.new(|cx| SettingsSheet::new(window, cx));
+        let events = cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &SettingsEvent, window, cx| match event {
+                SettingsEvent::Dismissed => {
+                    this.settings_handle.close(window, cx);
+                    this.settings = None;
+                    cx.notify();
+                }
+            },
+        );
+        self.settings = Some((sheet, events));
+        self.settings_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn settings_sheet(&self) -> Option<&Entity<SettingsSheet>> {
+        self.settings.as_ref().map(|(sheet, _)| sheet)
+    }
+
+    fn on_settings(
+        &mut self,
+        _: &commands::ShowSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_settings(window, cx);
+    }
+
+    fn render_settings(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.settings.popup", "Settings", cx).when_some(
+            self.settings.as_ref().map(|(sheet, _)| sheet.clone()),
+            gpui_kit::ParentElement::child,
+        );
+        let this = cx.entity().downgrade();
+        dialog(
+            "workspace.settings",
+            &self.settings_handle,
+            popup,
+            window,
+            cx,
+        )
+        .on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.settings = None;
+                cx.notify();
+            });
+            true
+        })
+    }
+
+    fn on_terminal(
+        &mut self,
+        _: &commands::OpenInTerminal,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(model) = self.active_model().filter(|_| !self.welcome) {
+            let root = model.read(cx).repository().root().to_path_buf();
+            if let Err(error) = crate::settings::open_terminal(&root, cx) {
+                self.message = Some(error.into());
+                cx.notify();
+            }
+        }
     }
 
     fn on_accounts(
@@ -1467,6 +1579,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
             .on_action(cx.listener(Self::on_accounts))
+            .on_action(cx.listener(Self::on_settings))
+            .on_action(cx.listener(Self::on_terminal))
             .on_action(cx.listener(Self::on_publish))
             .size_full()
             .flex()
@@ -1521,6 +1635,7 @@ impl Render for Workspace {
             .child(self.render_clone(window, cx))
             .child(self.render_purge(window, cx))
             .child(self.render_accounts(window, cx))
+            .child(self.render_settings(window, cx))
             .child(self.render_publish(window, cx))
     }
 }

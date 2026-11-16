@@ -24,6 +24,8 @@ struct PendingOperation {
     name: SharedString,
     run: OperationFn,
     network: Option<NetworkRun>,
+    /// A background run, whose failure the workspace doesn't announce.
+    quiet: bool,
 }
 
 /// Progress and cancellation for an operation that talks to a remote.
@@ -34,6 +36,9 @@ struct NetworkRun {
 }
 
 /// Emitted by [`RepositoryModel`].
+/// The name of the fetch [`RepositoryModel::fetch_in_background`] runs.
+pub const BACKGROUND_FETCH: &str = "Fetch in the background";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RepositoryEvent {
     SnapshotChanged,
@@ -41,6 +46,9 @@ pub enum RepositoryEvent {
         name: SharedString,
         /// The error message when the operation failed.
         error: Option<SharedString>,
+        /// Whether the app started it on its own, such as a background
+        /// fetch, so a failure shouldn't interrupt the person.
+        quiet: bool,
     },
 }
 
@@ -181,6 +189,7 @@ impl RepositoryModel {
             name: name.into(),
             run: Box::new(operation),
             network: None,
+            quiet: false,
         });
         self.pump(cx);
     }
@@ -195,6 +204,18 @@ impl RepositoryModel {
         + 'static,
         cx: &mut Context<Self>,
     ) {
+        self.queue_network(name.into(), operation, false, cx);
+    }
+
+    fn queue_network(
+        &mut self,
+        name: SharedString,
+        operation: impl FnOnce(&Repository, Progress, CancelToken) -> bonsai_git::Result<()>
+        + Send
+        + 'static,
+        quiet: bool,
+        cx: &mut Context<Self>,
+    ) {
         let network = NetworkRun {
             progress: Arc::new(Mutex::new(None)),
             cancel: CancelToken::new(),
@@ -207,11 +228,34 @@ impl RepositoryModel {
         });
         let cancel = network.cancel.clone();
         self.queue.push_back(PendingOperation {
-            name: name.into(),
+            name,
             run: Box::new(move |repository| operation(repository, progress, cancel)),
             network: Some(network),
+            quiet,
         });
         self.pump(cx);
+    }
+
+    /// Fetches every remote in the background when nothing else is running
+    /// or queued, so it never delays what the person asked for. Returns
+    /// whether the fetch was queued.
+    pub fn fetch_in_background(&mut self, cx: &mut Context<Self>) -> bool {
+        let has_remotes = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|snapshot| !snapshot.remotes.is_empty());
+        if self.running.is_some() || !self.queue.is_empty() || !has_remotes {
+            return false;
+        }
+        self.queue_network(
+            BACKGROUND_FETCH.into(),
+            |repository, progress, cancel| {
+                repository.fetch(None, true, Some(progress), Some(cancel))
+            },
+            true,
+            cx,
+        );
+        true
     }
 
     fn pump(&mut self, cx: &mut Context<Self>) {
@@ -253,6 +297,7 @@ impl RepositoryModel {
             (result, repository.snapshot())
         });
         let name = operation.name;
+        let quiet = operation.quiet;
         self.operation_task = Some(cx.spawn(async move |this, cx| {
             let (result, snapshot) = work.await;
             let _ = this.update(cx, |this, cx| {
@@ -263,6 +308,7 @@ impl RepositoryModel {
                 cx.emit(RepositoryEvent::OperationFinished {
                     name,
                     error: result.err().map(|e| e.to_string().into()),
+                    quiet,
                 });
                 this.pump(cx);
             });

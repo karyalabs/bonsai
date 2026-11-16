@@ -591,7 +591,7 @@ impl ChangesView {
                                 if let Ok(path) =
                                     this.read_with(cx, |view, cx| view.absolute(&path, cx))
                                 {
-                                    cx.open_with_system(&path);
+                                    crate::settings::open_in_editor(&path, cx);
                                 }
                             }
                         }),
