@@ -14,6 +14,7 @@ mod repository;
 mod runner;
 mod snapshot;
 mod version;
+mod worktree;
 
 pub use clone::{CloneProgress, clone_name};
 pub use error::{Error, Result};
@@ -25,3 +26,4 @@ pub use snapshot::{
     RemoteBranch, Snapshot, Stash, Tag, Tracking,
 };
 pub use version::GitVersion;
+pub use worktree::IgnoreRule;

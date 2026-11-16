@@ -16,6 +16,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    changes::ChangesView,
     commands::{self, COMMANDS},
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
@@ -42,6 +43,7 @@ struct RepositoryTab {
     id: u64,
     title: SharedString,
     model: Entity<RepositoryModel>,
+    changes: Entity<ChangesView>,
     _events: Subscription,
 }
 
@@ -134,10 +136,12 @@ impl Workspace {
                 }
                 cx.notify();
             });
+            let changes = cx.new(|cx| ChangesView::new(model.clone(), cx));
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
                 model,
+                changes,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -654,26 +658,10 @@ impl Workspace {
                 .text_color(c.muted_foreground)
                 .child("Reading the repository…")
                 .into_any_element(),
-            (Section::Changes, Some(snapshot), _) if snapshot.changes.is_empty() => message_panel(
-                LucideIcon::CircleCheck,
-                "No changes",
-                "The work tree matches the last commit.".into(),
-                cx,
-            )
-            .into_any_element(),
-            (Section::Changes, Some(snapshot), _) => div()
-                .flex()
-                .flex_col()
-                .p(px(8.))
-                .children(snapshot.changes.iter().take(500).map(|change| {
-                    div()
-                        .px(px(8.))
-                        .py(px(4.))
-                        .text_sm()
-                        .text_color(c.foreground)
-                        .child(change.path.to_string_lossy().into_owned())
-                }))
-                .into_any_element(),
+            (Section::Changes, Some(_), _) => match self.tabs.get(self.active) {
+                Some(tab) => tab.changes.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             (Section::History, Some(_), _) => message_panel(
                 LucideIcon::GitGraph,
                 "History",
@@ -682,10 +670,10 @@ impl Workspace {
             )
             .into_any_element(),
         };
+        // The Changes view scrolls its own virtualized list.
         div()
             .id("workspace.list")
             .size_full()
-            .overflow_y_scroll()
             .bg(c.background)
             .child(body)
     }

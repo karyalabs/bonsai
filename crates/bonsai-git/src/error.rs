@@ -23,6 +23,12 @@ pub enum Error {
     Cancelled,
     #[error("{} is not a Git repository.", .0.display())]
     NotARepository(PathBuf),
+    #[error("Bonsai could not update {}: {source}", .path.display())]
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("Unexpected output from Git: {0}")]
     Parse(String),
 }
