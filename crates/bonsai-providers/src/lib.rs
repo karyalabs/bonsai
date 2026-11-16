@@ -17,7 +17,7 @@ pub use http::{BoxFuture, HttpClient, Method, Request, Response, form_encode, pe
 pub use oauth::{Pkce, Tokens};
 pub use remote_url::hosted_repository;
 pub use types::{
-    Account, Capabilities, Comment, Error, Issue, ItemKind, ItemQuery, ItemState, Label,
-    MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind,
-    PullRequest, RemoteRepository, RepositoryQuery, Result, StateFilter,
+    Account, Capabilities, Check, CheckState, Comment, Error, Issue, ItemKind, ItemQuery,
+    ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
+    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Result, StateFilter,
 };

@@ -433,3 +433,61 @@ fn comments_closes_and_reopens_on_each_provider() {
     assert!(matches!(reopen, Err(Error::Rejected(_))));
     assert!(bitbucket_client.finished());
 }
+
+#[test]
+fn reads_ci_checks_on_each_provider() {
+    use bonsai_providers::CheckState;
+    let github_client = Recorded::new(vec![(
+        Method::Get,
+        "https://api.github.com/repos/ada/engine/commits/abc123/check-runs?per_page=100",
+        json(
+            200,
+            r#"{"total_count":3,"check_runs":[
+              {"name":"core","status":"completed","conclusion":"success","html_url":"https://github.com/ada/engine/runs/1"},
+              {"name":"macos","status":"in_progress","conclusion":null,"html_url":null},
+              {"name":"lint","status":"completed","conclusion":"timed_out","html_url":null}]}"#,
+        ),
+    )]);
+    let checks = block_on(GitHub::new(&github_client).checks("t", "ada/engine", "abc123")).unwrap();
+    let states: Vec<_> = checks.iter().map(|c| c.state).collect();
+    assert_eq!(
+        states,
+        [
+            CheckState::Success,
+            CheckState::Pending,
+            CheckState::Failure
+        ]
+    );
+    assert_eq!(
+        checks[0].url.as_deref(),
+        Some("https://github.com/ada/engine/runs/1")
+    );
+
+    let gitlab_client = Recorded::new(vec![(
+        Method::Get,
+        "https://gitlab.com/api/v4/projects/team%2Fengine/repository/commits/abc123/statuses?per_page=100",
+        json(
+            200,
+            r#"[{"name":"test","status":"failed","target_url":null},{"name":"deploy","status":"manual","target_url":null}]"#,
+        ),
+    )]);
+    let checks =
+        block_on(GitLab::new(&gitlab_client).checks("t", "team/engine", "abc123")).unwrap();
+    assert_eq!(checks[0].state, CheckState::Failure);
+    assert_eq!(checks[1].state, CheckState::Skipped);
+
+    let bitbucket_client = Recorded::new(vec![(
+        Method::Get,
+        "https://api.bitbucket.org/2.0/repositories/analytical/engine/commit/abc123/statuses?pagelen=100",
+        json(
+            200,
+            r#"{"values":[{"key":"build-1","name":"Pipeline #4","state":"SUCCESSFUL","url":"https://bitbucket.org/x"},{"key":"lint","state":"INPROGRESS"}]}"#,
+        ),
+    )]);
+    let checks =
+        block_on(Bitbucket::new(&bitbucket_client).checks("t", "analytical/engine", "abc123"))
+            .unwrap();
+    assert_eq!(checks[0].name, "Pipeline #4");
+    assert_eq!(checks[1].name, "lint");
+    assert_eq!(checks[1].state, CheckState::Pending);
+}

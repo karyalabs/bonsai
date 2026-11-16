@@ -155,6 +155,8 @@ pub struct PullRequest {
     pub head: String,
     /// The repository the head branch is in, when it is a fork.
     pub head_fork: Option<String>,
+    /// The head commit, when the provider reports it.
+    pub head_sha: Option<String>,
     /// The branch it merges into.
     pub base: String,
     pub labels: Vec<Label>,
@@ -204,6 +206,26 @@ pub struct Comment {
     pub body: String,
     /// RFC 3339.
     pub created_at: String,
+}
+
+/// How far one CI check on a commit has got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum CheckState {
+    /// Queued or running.
+    Pending,
+    Success,
+    Failure,
+    /// Skipped, cancelled or neutral: neither passed nor failed.
+    Skipped,
+}
+
+/// One CI check (a check run, job or build status) on a commit.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Check {
+    pub name: String,
+    pub state: CheckState,
+    /// Where its details are.
+    pub url: Option<String>,
 }
 
 /// How a pull request is merged.
@@ -359,6 +381,14 @@ pub trait Provider: Send + Sync {
         full_name: &'a str,
         new: &'a NewIssue,
     ) -> BoxFuture<'a, Result<Issue>>;
+
+    /// The CI checks on a commit, by name.
+    fn checks<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        sha: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Check>>>;
 
     /// Adds a comment to a pull request's or issue's conversation.
     fn add_comment<'a>(

@@ -5,10 +5,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Comment, Error, HttpClient, Issue, ItemKind, ItemQuery,
-    ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
-    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result,
-    StateFilter, form_encode, github::next_link, oauth::Tokens, percent_encode,
+    Account, BoxFuture, Capabilities, Check, CheckState, Comment, Error, HttpClient, Issue,
+    ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository,
+    Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request,
+    Response, Result, StateFilter, form_encode, github::next_link, oauth::Tokens, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -477,6 +477,36 @@ impl<C: HttpClient> Provider for GitLab<C> {
         })
     }
 
+    fn checks<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        sha: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Check>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/repository/commits/{}/statuses?per_page=100",
+                self.project_url(full_name),
+                percent_encode(sha)
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let statuses: Vec<CommitStatus> = self.parse(&response.body)?;
+            Ok(statuses
+                .into_iter()
+                .map(|status| Check {
+                    state: match status.status.as_str() {
+                        "success" => CheckState::Success,
+                        "failed" => CheckState::Failure,
+                        "canceled" | "skipped" | "manual" => CheckState::Skipped,
+                        _ => CheckState::Pending,
+                    },
+                    name: status.name,
+                    url: status.target_url,
+                })
+                .collect())
+        })
+    }
+
     fn add_comment<'a>(
         &'a self,
         token: &'a str,
@@ -584,6 +614,13 @@ impl Note {
     }
 }
 
+#[derive(Deserialize)]
+struct CommitStatus {
+    name: String,
+    status: String,
+    target_url: Option<String>,
+}
+
 fn item_path(kind: ItemKind) -> &'static str {
     match kind {
         ItemKind::PullRequest => "merge_requests",
@@ -604,6 +641,7 @@ struct MergeRequest {
     work_in_progress: bool,
     source_branch: String,
     target_branch: String,
+    sha: Option<String>,
     source_project_id: Option<u64>,
     target_project_id: Option<u64>,
     #[serde(default)]
@@ -629,6 +667,7 @@ impl MergeRequest {
             author: self.author.map(User::into_person).unwrap_or_default(),
             state,
             head: self.source_branch,
+            head_sha: self.sha,
             head_fork: match (self.source_project_id, self.target_project_id) {
                 (Some(source), Some(target)) if source != target => {
                     Some(format!("project {source}"))
