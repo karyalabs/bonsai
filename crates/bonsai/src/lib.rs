@@ -1,6 +1,7 @@
 //! Bonsai, a native Git client for macOS.
 
 pub mod activity_panel;
+pub mod askpass;
 pub mod changes;
 pub mod commands;
 pub mod composer;
@@ -20,6 +21,7 @@ use ui::{app::AppConfig, app_theme};
 
 /// Opens Bonsai's window and runs until the app quits.
 pub fn run() {
+    askpass::enable();
     let application = gpui_kit::platform::application().with_assets(gpui_icons::LucideAssetSource);
     application.run(|cx| {
         let options = AppConfig::new("Bonsai")

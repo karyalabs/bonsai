@@ -39,3 +39,17 @@ API features.
   capabilities.
 - The askpass path must be covered by tests so a bad token never prompts in a
   hidden terminal.
+
+## Implementation notes
+
+- Git starts `GIT_ASKPASS` with the prompt as its only argument, so the
+  runner also sets `BONSAI_ASKPASS=1`; Bonsai's `main` checks it before
+  starting GPUI. `bonsai --askpass <prompt>` does the same by hand.
+- The connected accounts reach the askpass process in
+  `BONSAI_ASKPASS_ACCOUNTS` (host, account and Git user name, never a token).
+  The token is read from the Keychain (service `dev.bonsai.token`, account
+  `host/account`) by the askpass process itself.
+- Askpass answers HTTPS prompts, and plain HTTP only on loopback. A prompt
+  for another host, another user, or a host with two accounts and no user
+  in the URL is declined with exit code 1, so Git reports it could not read
+  a credential. Credential helpers run before askpass, as Git orders them.

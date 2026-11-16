@@ -10,6 +10,7 @@ default-run = "bonsai"
 
 [dependencies]
 bonsai-git = { path = "../bonsai-git" }
+bonsai-keychain = { path = "../bonsai-keychain" }
 # gpuicn pins: keep these four together and move them with `gpuicn update`.
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit"] }
 gpui-icons = "=0.7.0"

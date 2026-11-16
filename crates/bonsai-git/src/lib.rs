@@ -34,7 +34,9 @@ pub use log::{CommitInfo, LogScope};
 pub use purge::{PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange};
 pub use remote::RemoteFailure;
 pub use repository::Repository;
-pub use runner::{CancelToken, CommandLog, CommandRecord, Git, GitCommand, Output};
+pub use runner::{
+    ASKPASS_MODE_ENV, CancelToken, CommandLog, CommandRecord, Git, GitCommand, Output,
+};
 pub use snapshot::{
     Branch, Change, ChangeKind, ConflictKind, EntryStatus, Head, InProgress, Oid, Remote,
     RemoteBranch, Snapshot, Stash, Tag, Tracking,

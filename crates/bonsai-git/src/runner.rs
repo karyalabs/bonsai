@@ -19,6 +19,9 @@ use crate::{Error, GitVersion, Result, redact::redact};
 const RECORDED_STDOUT_LIMIT: usize = 16 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(5);
 
+/// Set for the askpass program, so Bonsai's binary answers the prompt.
+pub const ASKPASS_MODE_ENV: &str = "BONSAI_ASKPASS";
+
 /// Receives a record of every Git command once it finishes.
 pub trait CommandLog: Send + Sync {
     fn record(&self, record: &CommandRecord);
@@ -138,6 +141,8 @@ pub struct Git {
     program: PathBuf,
     version: GitVersion,
     askpass: Option<PathBuf>,
+    /// Extra environment for every command.
+    env: Vec<(OsString, OsString)>,
     log: Option<Arc<dyn CommandLog>>,
 }
 
@@ -182,6 +187,7 @@ impl Git {
             program,
             version,
             askpass: None,
+            env: Vec::new(),
             log: None,
         })
     }
@@ -197,10 +203,20 @@ impl Git {
     }
 
     /// Answers HTTPS credential prompts with this program (Bonsai's askpass
-    /// mode, ADR 3).
+    /// mode, ADR 3). Git runs it with the prompt as its only argument and
+    /// [`ASKPASS_MODE_ENV`] set, so Bonsai's binary knows to answer instead
+    /// of opening a window.
     #[must_use]
     pub fn with_askpass(mut self, program: impl Into<PathBuf>) -> Self {
         self.askpass = Some(program.into());
+        self
+    }
+
+    /// Sets an environment variable for every command, such as the accounts
+    /// askpass may answer for. Values are not recorded in the activity log.
+    #[must_use]
+    pub fn with_env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
         self
     }
 
@@ -260,7 +276,12 @@ impl Git {
         #[cfg(unix)]
         std::os::unix::process::CommandExt::process_group(&mut process, 0);
         if let Some(askpass) = &self.askpass {
-            process.env("GIT_ASKPASS", askpass);
+            process
+                .env("GIT_ASKPASS", askpass)
+                .env(ASKPASS_MODE_ENV, "1");
+        }
+        for (key, value) in &self.env {
+            process.env(key, value);
         }
         if let Some(cwd) = &command.cwd {
             process.current_dir(cwd);

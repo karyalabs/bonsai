@@ -98,7 +98,9 @@ impl Workspace {
     ) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
-        let git = Git::locate(None).map_err(|error| SharedString::from(error.to_string()));
+        let git = Git::locate(None)
+            .map(crate::askpass::configure)
+            .map_err(|error| SharedString::from(error.to_string()));
         let mut this = Self {
             git,
             tabs: Vec::new(),
