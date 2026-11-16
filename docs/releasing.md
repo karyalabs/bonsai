@@ -1,10 +1,12 @@
 # Releasing Bonsai
 
 A release is a Developer ID signed, notarized and stapled `Bonsai.dmg` on a
-draft GitHub release. The **Release** workflow
-(`.github/workflows/release.yml`) builds it on Karya's self-hosted Mac.
+GitHub release. The **Release** workflow
+(`.github/workflows/release.yml`) builds it on Karya's self-hosted Mac
+and publishes it as a GitHub release.
 `script/package_release.sh` does the packaging, and
-`script/create_github_draft_release.sh` creates the draft release. Both were
+`script/create_github_draft_release.sh` creates the release, attaches the
+files and then publishes it. Both were
 ported from the SwiftUI app's `stable` branch.
 
 ## Version
@@ -29,19 +31,34 @@ secrets' names, without showing their values.
 
 ## Steps
 
-1. Bump `version` in `Cargo.toml`, merge, and wait for CI on `main`.
-2. Run a dry run: `make release-dry-run`, or dispatch **Release** with
-   `dry_run` checked. It builds an ad-hoc signed DMG and uploads it as a
-   workflow artifact, without using any secrets.
-3. Run the release: `make release`, or dispatch **Release** with `dry_run`
-   cleared. After the environment's reviewers approve, it:
-   - imports the certificate into a temporary keychain;
-   - builds, signs and notarizes the app, then staples it;
-   - builds, signs and notarizes the DMG, then staples it;
-   - checks both with `spctl`;
-   - uploads the DMG and its manifest, and creates a draft GitHub release for
-     the tag `v<version>`.
-4. Read the draft release, then publish it by hand.
+Bumping the version is the release, as in gpuicn and Matty:
+
+1. Bump `version` in `Cargo.toml` in a pull request, and merge it.
+2. When CI passes on that commit on `main`, **Release** runs by itself:
+   - karya-karta, the Karya bot app, tags the commit `v<version>`;
+   - the self-hosted Mac imports the certificate into a temporary keychain,
+     builds, signs and notarizes the app and then the DMG, staples both and
+     checks them with `spctl`;
+   - it publishes the GitHub release with `Bonsai.dmg` and its manifest.
+     Versions before 1.0 are marked as prereleases.
+
+A commit whose version is already released does nothing. If a run fails,
+fix the cause and use **Re-run failed jobs**: a tag that already exists is
+kept, and a draft left by the failed run is replaced.
+
+To check packaging without releasing, run **Release** by hand with
+`dry_run` checked (`make release-dry-run`). It builds an ad-hoc signed DMG
+and uploads it as a workflow artifact, without any secrets.
+
+## Settings this needs (Arya, once)
+
+- The `release` environment has no required reviewers, so a release needs
+  no approval. Limit its deployment branches to `main` instead.
+- The organization secrets `KARYA_BOT_APP_ID` and `KARYA_BOT_PRIVATE_KEY`
+  are available to bonsai (Organization settings → Secrets and variables →
+  Actions, "Selected repositories").
+- If a `v*` tag ruleset protects bonsai's tags, karya-karta is on its bypass
+  list.
 
 The temporary keychain is deleted at the end, whether the run passed or not.
 

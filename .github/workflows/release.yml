@@ -1,29 +1,121 @@
 name: Release
 
+# Bumping the version in Cargo.toml and merging to main is the release, as in
+# the other Karya apps: once CI passes on that commit, this workflow tags it
+# v<version> with karya-karta (the Karya bot app), builds, signs and
+# notarizes Bonsai.dmg on the self-hosted Mac, and publishes the GitHub
+# release. A commit whose version is already released does nothing. Every
+# step skips work that is already done, so "Re-run failed jobs" is safe.
+#
+# Run it by hand for a dry run (an ad-hoc signed DMG as a workflow artifact,
+# with no secrets), or to retry a release.
 on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
   workflow_dispatch:
     inputs:
-      version:
-        description: Release version. Defaults to the Cargo workspace version.
-        required: false
-        type: string
       build_number:
         description: Build number. Defaults to the GitHub run number.
         required: false
         type: string
       dry_run:
-        description: Build and verify an ad-hoc signed DMG, without signing secrets, notarization or a draft release.
+        description: Build and verify an ad-hoc signed DMG, without signing secrets, notarization or a release.
         required: false
         default: true
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
+  plan:
+    # Only after CI passed on a push to main, or when run by hand.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    outputs:
+      release: ${{ steps.plan.outputs.release }}
+      dry_run: ${{ steps.plan.outputs.dry_run }}
+      version: ${{ steps.plan.outputs.version }}
+      tag: ${{ steps.plan.outputs.tag }}
+      sha: ${{ steps.plan.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+      - id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run }}
+        run: |
+          version="$(awk -F'"' '/^\[workspace.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *=/ { print $2; exit }' Cargo.toml)"
+          tag="v$version"
+          sha="$(git rev-parse HEAD)"
+          {
+            echo "version=$version"
+            echo "tag=$tag"
+            echo "sha=$sha"
+            echo "dry_run=$DRY_RUN"
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$DRY_RUN" == "true" ]]; then
+            echo "Dry run of $tag from $sha"
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [[ "$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)" == "false" ]]; then
+            echo "$tag is released already; bump the version in Cargo.toml to release again."
+            echo "release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          tagged="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}" | tail -n 1 | cut -f 1)"
+          if [[ -n "$tagged" && "$tagged" != "$sha" ]]; then
+            # An earlier run tagged this version and then failed: finish
+            # that release from the tagged commit.
+            echo "Finishing $tag from ${tagged:0:7}, where it was tagged."
+            echo "sha=$tagged" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Releasing $tag"
+          echo "release=true" >> "$GITHUB_OUTPUT"
+
+  tag:
+    needs: plan
+    if: needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      # karya-karta pushes the tag, as in gpuicn and Matty: only it may
+      # bypass a v* tag ruleset, and GITHUB_TOKEN may not push a ref whose
+      # commits change a workflow file.
+      - id: bot
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.KARYA_BOT_APP_ID }}
+          private-key: ${{ secrets.KARYA_BOT_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: ${{ github.event.repository.name }}
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          token: ${{ steps.bot.outputs.token }}
+      - env:
+          TAG: ${{ needs.plan.outputs.tag }}
+        run: |
+          if [[ -n "$(git ls-remote origin "refs/tags/$TAG")" ]]; then
+            echo "$TAG exists"
+          else
+            git push origin "HEAD:refs/tags/$TAG"
+          fi
+
   dry-run:
     name: Dry-run macOS artifact
-    if: ${{ inputs.dry_run == true }}
+    needs: plan
+    if: needs.plan.outputs.dry_run == 'true'
     # Karya's self-hosted Mac (the KARYA_MACOS_RUNNER organization variable,
     # as in CI), which has Xcode for codesign, notarytool and stapler.
     runs-on: ${{ fromJSON(vars.KARYA_MACOS_RUNNER || '"macos-15"') }}
@@ -31,6 +123,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
 
       - uses: karyalabs/.github/actions/self-hosted-prep@v1
       # Keep in step with rust-toolchain.toml.
@@ -49,11 +143,8 @@ jobs:
 
       - name: Resolve release metadata
         run: |
-          version="${{ inputs.version }}"
+          version="${{ needs.plan.outputs.version }}"
           build_number="${{ inputs.build_number }}"
-          if [[ -z "$version" ]]; then
-            version="$(awk -F'"' '/^\[workspace.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *=/ { print $2; exit }' Cargo.toml)"
-          fi
           if [[ -z "$build_number" ]]; then
             build_number="${{ github.run_number }}"
           fi
@@ -84,7 +175,10 @@ jobs:
 
   notarize:
     name: Notarized macOS artifact
-    if: ${{ inputs.dry_run != true }}
+    needs: [plan, tag]
+    if: needs.plan.outputs.release == 'true'
+    permissions:
+      contents: write
     # Karya's self-hosted Mac (the KARYA_MACOS_RUNNER organization variable,
     # as in CI), which has Xcode for codesign, notarytool and stapler.
     runs-on: ${{ fromJSON(vars.KARYA_MACOS_RUNNER || '"macos-15"') }}
@@ -97,6 +191,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
 
       - uses: karyalabs/.github/actions/self-hosted-prep@v1
       # Keep in step with rust-toolchain.toml.
@@ -115,11 +211,8 @@ jobs:
 
       - name: Resolve release metadata
         run: |
-          version="${{ inputs.version }}"
+          version="${{ needs.plan.outputs.version }}"
           build_number="${{ inputs.build_number }}"
-          if [[ -z "$version" ]]; then
-            version="$(awk -F'"' '/^\[workspace.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *=/ { print $2; exit }' Cargo.toml)"
-          fi
           if [[ -z "$build_number" ]]; then
             build_number="${{ github.run_number }}"
           fi
@@ -129,9 +222,6 @@ jobs:
             echo "BONSAI_RELEASE_DRY_RUN=false"
             echo "BONSAI_NOTARY_KEYCHAIN=$RUNNER_TEMP/bonsai-signing.keychain-db"
           } >> "$GITHUB_ENV"
-
-      - name: Validate source
-        run: make check
 
       - name: Check release secrets
         env:
@@ -226,9 +316,12 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Create draft GitHub release
+      - name: Publish the GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
+          BONSAI_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+          BONSAI_RELEASE_PUBLISH: "true"
+          GITHUB_SHA: ${{ needs.plan.outputs.sha }}
         run: make release-draft
 
       - name: Clean up signing keychain

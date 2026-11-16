@@ -49,5 +49,7 @@ release-draft:
 release-dry-run:
 	gh workflow run release.yml -f dry_run=true
 
+# A real release runs by itself when a version bump reaches main; this
+# retries one by hand.
 release:
 	gh workflow run release.yml -f dry_run=false
