@@ -63,11 +63,15 @@ fn backup_note(backup: Option<&std::path::Path>) -> String {
 
 fn failure_message(record: &CommandRecord) -> String {
     let stderr = record.stderr.trim();
-    if let Some(failure) = is_network(record)
-        .then(|| RemoteFailure::classify(stderr))
-        .flatten()
-    {
-        format!("{}\n\n{stderr}", failure.message())
+    let explanation = is_network(record)
+        .then(|| {
+            RemoteFailure::classify(stderr)
+                .map(RemoteFailure::message)
+                .or_else(|| crate::SyncFailure::classify(stderr).map(crate::SyncFailure::message))
+        })
+        .flatten();
+    if let Some(explanation) = explanation {
+        format!("{explanation}\n\n{stderr}")
     } else if stderr.is_empty() {
         format!(
             "`git {}` failed with exit code {}.",

@@ -22,6 +22,7 @@ use crate::{
     refs::RefsPanel,
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
+    sync_bar::SyncBar,
     ui::{
         button::{Button, ButtonVariant},
         command::{CommandEvent, CommandItem, CommandState, command_dialog_popup},
@@ -48,6 +49,7 @@ struct RepositoryTab {
     changes: Entity<ChangesView>,
     diff: Entity<DiffPane>,
     refs: Entity<RefsPanel>,
+    sync: Entity<SyncBar>,
     _events: Subscription,
     _changes_events: Subscription,
 }
@@ -144,6 +146,7 @@ impl Workspace {
             let changes = cx.new(|cx| ChangesView::new(model.clone(), cx));
             let diff = cx.new(|cx| DiffPane::new(model.clone(), cx));
             let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
+            let sync = cx.new(|cx| SyncBar::new(model.clone(), cx));
             let diff_target = diff.downgrade();
             let changes_events = cx.subscribe(&changes, move |_, _, event: &ChangesEvent, cx| {
                 let ChangesEvent::Focused(target, title) = event;
@@ -157,6 +160,7 @@ impl Workspace {
                 changes,
                 diff,
                 refs,
+                sync,
                 _changes_events: changes_events,
                 _events: events,
             });
@@ -472,6 +476,35 @@ impl Workspace {
         }
     }
 
+    fn active_sync(&self) -> Option<Entity<SyncBar>> {
+        self.tabs
+            .get(self.active)
+            .filter(|_| !self.welcome)
+            .map(|tab| tab.sync.clone())
+    }
+
+    fn on_fetch(&mut self, _: &commands::Fetch, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sync) = self.active_sync() {
+            sync.update(cx, SyncBar::fetch);
+        }
+    }
+
+    fn on_pull(&mut self, _: &commands::Pull, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sync) = self.active_sync() {
+            sync.update(cx, SyncBar::pull);
+        }
+    }
+
+    fn on_push(&mut self, _: &commands::Push, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(sync) = self.active_sync() {
+            let reason = sync.update(cx, SyncBar::push);
+            if let Some(reason) = reason {
+                self.message = Some(reason.into());
+                cx.notify();
+            }
+        }
+    }
+
     fn on_refresh(&mut self, _: &commands::Refresh, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(model) = self.active_model() {
             model.update(cx, RepositoryModel::refresh);
@@ -528,7 +561,11 @@ impl Workspace {
             .py(px(4.))
             .border_b_1()
             .border_color(theme.colors.border)
-            .child(tabs)
+            .child(div().flex_1().min_w_0().child(tabs))
+            .when_some(
+                self.tabs.get(self.active).filter(|_| !self.welcome),
+                |this, tab| this.child(tab.sync.clone()),
+            )
     }
 
     fn render_sidebar(
@@ -1061,6 +1098,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_history))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_commit))
+            .on_action(cx.listener(Self::on_fetch))
+            .on_action(cx.listener(Self::on_pull))
+            .on_action(cx.listener(Self::on_push))
             .size_full()
             .flex()
             .flex_col()

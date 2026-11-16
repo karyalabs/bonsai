@@ -129,6 +129,9 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.history",
         "repository.refresh",
         "repository.commit",
+        "repository.fetch",
+        "repository.pull",
+        "repository.push",
     ];
     for command in commands::COMMANDS {
         assert!(

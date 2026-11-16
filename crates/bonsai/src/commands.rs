@@ -20,6 +20,9 @@ actions!(
         ShowHistory,
         Refresh,
         Commit,
+        Fetch,
+        Pull,
+        Push,
     ]
 );
 
@@ -100,6 +103,9 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(ShowChanges, "view.changes", "Show Changes", "View", keys: ["secondary-1"], menu: Some(MenuPlacement::View), palette: true, separator: true, keywords: ["status", "working tree", "stage"]),
     command!(ShowHistory, "view.history", "Show History", "View", keys: ["secondary-2"], menu: Some(MenuPlacement::View), palette: true, keywords: ["log", "commits", "graph"]),
     command!(Commit, "repository.commit", "Commit", "Repository", keys: ["secondary-enter"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["save", "amend"]),
+    command!(Fetch, "repository.fetch", "Fetch", "Repository", keys: ["secondary-alt-f"], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["download", "update", "remote"]),
+    command!(Pull, "repository.pull", "Pull", "Repository", keys: ["secondary-alt-l"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["download", "merge", "rebase", "update"]),
+    command!(Push, "repository.push", "Push", "Repository", keys: ["secondary-alt-p"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["upload", "publish", "remote"]),
     command!(Refresh, "repository.refresh", "Refresh", "Repository", keys: ["secondary-r"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["reload", "status"]),
     command!(NextTab, "window.next-tab", "Show Next Tab", "Window", keys: ["ctrl-tab", "secondary-shift-]"], menu: Some(MenuPlacement::Window), palette: true),
     command!(PreviousTab, "window.previous-tab", "Show Previous Tab", "Window", keys: ["ctrl-shift-tab", "secondary-shift-["], menu: Some(MenuPlacement::Window), palette: true),

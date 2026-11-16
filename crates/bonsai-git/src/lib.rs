@@ -18,6 +18,7 @@ mod remote;
 mod repository;
 mod runner;
 mod snapshot;
+mod sync;
 mod version;
 mod worktree;
 
@@ -35,5 +36,6 @@ pub use snapshot::{
     Branch, Change, ChangeKind, ConflictKind, EntryStatus, Head, InProgress, Oid, Remote,
     RemoteBranch, Snapshot, Stash, Tag, Tracking,
 };
+pub use sync::{Progress, PullMode, PushRequest, SyncFailure};
 pub use version::GitVersion;
 pub use worktree::IgnoreRule;

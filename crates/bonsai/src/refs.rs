@@ -52,6 +52,21 @@ pub enum RefDialog {
     DeleteTag {
         name: String,
     },
+    AddRemote,
+    EditRemoteUrl {
+        name: String,
+        url: String,
+    },
+    RenameRemote {
+        name: String,
+    },
+    RemoveRemote {
+        name: String,
+    },
+    DeleteRemoteBranch {
+        remote: String,
+        branch: String,
+    },
     /// A switch was refused; offer to stash first.
     CheckoutBlocked {
         target: Checkout,
@@ -96,6 +111,7 @@ impl Checkout {
 /// Text inputs, created on first render because they need a window.
 struct Inputs {
     name: Entity<InputState>,
+    url: Entity<InputState>,
     message: Entity<TextareaState>,
     _subscriptions: Vec<Subscription>,
 }
@@ -235,12 +251,26 @@ impl RefsPanel {
             .unwrap_or_default()
     }
 
+    fn url_value(&self, cx: &gpui_kit::App) -> String {
+        self.inputs
+            .as_ref()
+            .map(|i| i.url.read(cx).value().trim().to_owned())
+            .unwrap_or_default()
+    }
+
     fn can_confirm(&self, cx: &gpui_kit::App) -> bool {
         match &self.dialog {
+            Some(RefDialog::AddRemote) => {
+                is_valid_ref_name(&self.name_value(cx)) && !self.url_value(cx).is_empty()
+            }
+            Some(RefDialog::EditRemoteUrl { url, .. }) => {
+                let new = self.url_value(cx);
+                !new.is_empty() && new != *url
+            }
             Some(RefDialog::CreateBranch { .. } | RefDialog::CreateTag { .. }) => {
                 is_valid_ref_name(&self.name_value(cx))
             }
-            Some(RefDialog::RenameBranch { name }) => {
+            Some(RefDialog::RenameBranch { name } | RefDialog::RenameRemote { name }) => {
                 let new = self.name_value(cx);
                 is_valid_ref_name(&new) && new != *name
             }
@@ -295,6 +325,41 @@ impl RefsPanel {
                 cx,
             ),
             RefDialog::CheckoutBlocked { target, .. } => self.stash_and_checkout(target, cx),
+            RefDialog::AddRemote => {
+                let url = self.url_value(cx);
+                self.run(
+                    format!("Add remote {value}"),
+                    move |repository| repository.add_remote(&value, &url),
+                    cx,
+                );
+            }
+            RefDialog::EditRemoteUrl { name, .. } => {
+                let url = self.url_value(cx);
+                self.run(
+                    format!("Change the URL of {name}"),
+                    move |repository| repository.set_remote_url(&name, &url),
+                    cx,
+                );
+            }
+            RefDialog::RenameRemote { name } => self.run(
+                format!("Rename remote {name} to {value}"),
+                move |repository| repository.rename_remote(&name, &value),
+                cx,
+            ),
+            RefDialog::RemoveRemote { name } => self.run(
+                format!("Remove remote {name}"),
+                move |repository| repository.remove_remote(&name),
+                cx,
+            ),
+            RefDialog::DeleteRemoteBranch { remote, branch } => {
+                self.model.update(cx, |model, cx| {
+                    model.run_network(
+                        format!("Delete {branch} on {remote}"),
+                        move |repository, _, _| repository.delete_remote_branch(&remote, &branch),
+                        cx,
+                    );
+                });
+            }
         }
     }
 
@@ -303,14 +368,30 @@ impl RefsPanel {
         let Some(inputs) = &self.inputs else {
             return;
         };
-        let initial = match &self.dialog {
-            Some(RefDialog::RenameBranch { name }) => name.clone(),
-            _ => String::new(),
+        let (initial, initial_url) = match &self.dialog {
+            Some(RefDialog::RenameBranch { name } | RefDialog::RenameRemote { name }) => {
+                (name.clone(), String::new())
+            }
+            Some(RefDialog::EditRemoteUrl { url, .. }) => (String::new(), url.clone()),
+            _ => (String::new(), String::new()),
         };
-        let (name, message) = (inputs.name.clone(), inputs.message.clone());
+        let edit_url = matches!(self.dialog, Some(RefDialog::EditRemoteUrl { .. }));
+        let (name, url, message) = (
+            inputs.name.clone(),
+            inputs.url.clone(),
+            inputs.message.clone(),
+        );
         name.update(cx, |input, cx| {
             input.set_value(initial, window, cx);
-            input.focus(window, cx);
+            if !edit_url {
+                input.focus(window, cx);
+            }
+        });
+        url.update(cx, |input, cx| {
+            input.set_value(initial_url, window, cx);
+            if edit_url {
+                input.focus(window, cx);
+            }
         });
         message.update(cx, |input, cx| input.set_value(String::new(), window, cx));
     }
@@ -325,15 +406,22 @@ impl RefsPanel {
                 .rows(3)
                 .placeholder("Message (optional; makes an annotated tag)")
         });
-        let subscriptions = vec![
-            cx.subscribe_in(&name, window, |this, _, event, window, cx| match event {
-                InputEvent::PressEnter { .. } => this.confirm(window, cx),
-                InputEvent::Change => cx.notify(),
-                _ => {}
-            }),
-        ];
+        let url = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("https://github.com/owner/repository.git")
+        });
+        let subscriptions = [&name, &url]
+            .into_iter()
+            .map(|input| {
+                cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
+                    InputEvent::PressEnter { .. } => this.confirm(window, cx),
+                    InputEvent::Change => cx.notify(),
+                    _ => {}
+                })
+            })
+            .collect();
         self.inputs = Some(Inputs {
             name,
+            url,
             message,
             _subscriptions: subscriptions,
         });
@@ -483,7 +571,76 @@ impl RefsPanel {
                     },
                 )),
             MenuItem::separator(),
+            MenuItem::new(
+                "refs.remote.delete",
+                format!("Delete {branch} on {remote}…"),
+            )
+            .icon(LucideIcon::Trash2)
+            .on_click(show(
+                &this,
+                RefDialog::DeleteRemoteBranch {
+                    remote: remote.to_owned(),
+                    branch: branch.to_owned(),
+                },
+            )),
             copy_item(full),
+        ]
+    }
+
+    fn remote_header_menu(&self, remote: &str, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let this = cx.entity().downgrade();
+        let name = remote.to_owned();
+        let url = self
+            .snapshot(cx)
+            .and_then(|s| s.remotes.iter().find(|r| r.name == remote))
+            .and_then(|r| r.fetch_url.clone())
+            .unwrap_or_default();
+        vec![
+            MenuItem::new("refs.remote.fetch", format!("Fetch {name}"))
+                .icon(LucideIcon::RefreshCw)
+                .on_click(with(&this, {
+                    let name = name.clone();
+                    move |view, _, cx| {
+                        let name = name.clone();
+                        view.model.update(cx, |model, cx| {
+                            model.run_network(
+                                format!("Fetch {name}"),
+                                move |repository, progress, cancel| {
+                                    repository.fetch(
+                                        Some(&name),
+                                        true,
+                                        Some(progress),
+                                        Some(cancel),
+                                    )
+                                },
+                                cx,
+                            );
+                        });
+                    }
+                })),
+            MenuItem::separator(),
+            MenuItem::new("refs.remote.edit-url", "Edit URL…")
+                .icon(LucideIcon::Link)
+                .on_click(show(
+                    &this,
+                    RefDialog::EditRemoteUrl {
+                        name: name.clone(),
+                        url: url.clone(),
+                    },
+                )),
+            MenuItem::new("refs.remote.rename", "Rename…")
+                .icon(LucideIcon::Pencil)
+                .on_click(show(&this, RefDialog::RenameRemote { name: name.clone() })),
+            MenuItem::new("refs.remote.remove", "Remove…")
+                .icon(LucideIcon::Trash2)
+                .on_click(show(&this, RefDialog::RemoveRemote { name: name.clone() })),
+            MenuItem::separator(),
+            MenuItem::new("refs.remote.copy-url", "Copy URL")
+                .icon(LucideIcon::Copy)
+                .disabled(url.is_empty())
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                }),
         ]
     }
 
@@ -626,6 +783,38 @@ impl RefsPanel {
                 "Delete",
                 true,
             ),
+            RefDialog::AddRemote => (
+                "Add Remote".to_owned(),
+                "Any URL Git understands works: HTTPS, SSH, or a path to another repository."
+                    .to_owned(),
+                "Add Remote",
+                false,
+            ),
+            RefDialog::EditRemoteUrl { name, .. } => (
+                format!("Edit {name} URL"),
+                "Fetches and pushes use the new URL.".to_owned(),
+                "Save",
+                false,
+            ),
+            RefDialog::RenameRemote { name } => (
+                format!("Rename {name}"),
+                "Remote branches and upstreams follow the new name.".to_owned(),
+                "Rename",
+                false,
+            ),
+            RefDialog::RemoveRemote { name } => (
+                format!("Remove {name}?"),
+                "Its remote branches disappear from Bonsai and branches stop tracking them. Nothing on the server changes."
+                    .to_owned(),
+                "Remove",
+                true,
+            ),
+            RefDialog::DeleteRemoteBranch { remote, branch } => (
+                format!("Delete {branch} on {remote}?"),
+                "This deletes the branch on the server for everyone. Local branches stay.".to_owned(),
+                "Delete on Remote",
+                true,
+            ),
             RefDialog::CheckoutBlocked { target, blocker } => {
                 let n = blocker.paths().len();
                 let what = match blocker {
@@ -648,7 +837,10 @@ impl RefsPanel {
             RefDialog::CreateBranch { .. }
                 | RefDialog::RenameBranch { .. }
                 | RefDialog::CreateTag { .. }
+                | RefDialog::AddRemote
+                | RefDialog::RenameRemote { .. }
         );
+        let with_url = matches!(open, RefDialog::AddRemote | RefDialog::EditRemoteUrl { .. });
         let name_value = self.name_value(cx);
         let invalid = with_name && !name_value.is_empty() && !is_valid_ref_name(&name_value);
         let can_confirm = self.can_confirm(cx);
@@ -656,6 +848,11 @@ impl RefsPanel {
             .inputs
             .as_ref()
             .map(|i| (i.name.clone(), i.message.clone()));
+        let url_input = self
+            .inputs
+            .as_ref()
+            .map(|i| i.url.clone())
+            .filter(|_| with_url);
         let paths: Vec<String> = match &open {
             RefDialog::CheckoutBlocked { blocker, .. } => blocker
                 .paths()
@@ -708,6 +905,9 @@ impl RefsPanel {
                             )
                         }),
                 )
+            })
+            .when_some(url_input, |this, url| {
+                this.child(Input::new(&url).aria_label("Remote URL"))
             })
             .when(!paths.is_empty(), |this| {
                 this.child(
@@ -869,30 +1069,60 @@ impl Render for RefsPanel {
                     remotes.push(&branch.remote);
                 }
             }
-            if !remotes.is_empty() {
-                list = list
-                    .child(div().h(px(12.)))
-                    .child(sidebar_group_label("REMOTES", cx));
-            }
+            list = list.child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(sidebar_group_label("REMOTES", cx))
+                    .child(
+                        Button::new("refs.add-remote")
+                            .variant(ButtonVariant::Ghost)
+                            .aria_label("Add Remote")
+                            .child(
+                                lucide(LucideIcon::Plus)
+                                    .size(px(12.))
+                                    .text_color(c.sidebar_foreground),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show(RefDialog::AddRemote, cx);
+                            })),
+                    ),
+            );
             for remote in remotes {
                 let collapsed = self.collapsed_remotes.contains(remote);
                 let key = remote.to_owned();
+                let menu_remote = remote.to_owned();
                 list = list.child(
-                    SidebarItem::new(
-                        SharedString::from(format!("remote:{remote}")),
-                        remote.to_owned(),
-                    )
-                    .icon(icon(if collapsed {
-                        LucideIcon::ChevronRight
-                    } else {
-                        LucideIcon::ChevronDown
-                    }))
-                    .on_activate(with(&this, move |view, _, cx| {
-                        if !view.collapsed_remotes.remove(&key) {
-                            view.collapsed_remotes.insert(key.clone());
-                        }
-                        cx.notify();
-                    })),
+                    div()
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _, _, cx| {
+                                let items = this.remote_header_menu(&menu_remote, cx);
+                                this.set_menu(items, cx);
+                            }),
+                        )
+                        .child(
+                            SidebarItem::new(
+                                SharedString::from(format!("remote:{remote}")),
+                                remote.to_owned(),
+                            )
+                            .icon(icon(if collapsed {
+                                LucideIcon::ChevronRight
+                            } else {
+                                LucideIcon::ChevronDown
+                            }))
+                            .on_activate(with(
+                                &this,
+                                move |view, _, cx| {
+                                    if !view.collapsed_remotes.remove(&key) {
+                                        view.collapsed_remotes.insert(key.clone());
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        ),
                 );
                 if collapsed {
                     continue;
