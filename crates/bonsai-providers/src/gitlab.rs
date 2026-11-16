@@ -5,8 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Error, HttpClient, NewRepository, Page, Provider,
-    ProviderKind, RemoteRepository, RepositoryQuery, Request, Response, Result, form_encode,
+    Account, BoxFuture, Capabilities, Error, HttpClient, Issue, ItemQuery, ItemState, Label,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
     github::next_link, oauth::Tokens, percent_encode,
 };
 
@@ -310,6 +311,224 @@ impl<C: HttpClient> Provider for GitLab<C> {
 
     fn git_username(&self, _: &Account) -> String {
         "oauth2".to_owned()
+    }
+
+    fn pull_requests<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        query: &'a ItemQuery,
+    ) -> BoxFuture<'a, Result<Page<PullRequest>>> {
+        Box::pin(async move {
+            // "closed" leaves out merged ones, so Closed reads everything
+            // and keeps what isn't open.
+            let state = match query.state {
+                StateFilter::Open => "opened",
+                StateFilter::Closed | StateFilter::All => "all",
+            };
+            let first = format!(
+                "{}/merge_requests?state={state}&order_by=updated_at&sort=desc&per_page={PER_PAGE}",
+                self.project_url(full_name)
+            );
+            let url = self.page_url(first, query.cursor.as_ref())?;
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let requests: Vec<MergeRequest> = self.parse(&response.body)?;
+            Ok(Page {
+                items: requests
+                    .into_iter()
+                    .map(MergeRequest::into_pull_request)
+                    .filter(|pull| query.state.keeps(pull.state))
+                    .collect(),
+                next: response.header("link").and_then(next_link),
+            })
+        })
+    }
+
+    fn issues<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        query: &'a ItemQuery,
+    ) -> BoxFuture<'a, Result<Page<Issue>>> {
+        Box::pin(async move {
+            let state = match query.state {
+                StateFilter::Open => "opened",
+                StateFilter::Closed => "closed",
+                StateFilter::All => "all",
+            };
+            let first = format!(
+                "{}/issues?state={state}&order_by=updated_at&sort=desc&per_page={PER_PAGE}",
+                self.project_url(full_name)
+            );
+            let url = self.page_url(first, query.cursor.as_ref())?;
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let issues: Vec<IssueBody> = self.parse(&response.body)?;
+            Ok(Page {
+                items: issues.into_iter().map(IssueBody::into_issue).collect(),
+                next: response.header("link").and_then(next_link),
+            })
+        })
+    }
+
+    fn create_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewPullRequest,
+    ) -> BoxFuture<'a, Result<PullRequest>> {
+        Box::pin(async move {
+            let title = if new.draft {
+                format!("Draft: {}", new.title)
+            } else {
+                new.title.clone()
+            };
+            let body = json!({
+                "source_branch": new.head,
+                "target_branch": new.base,
+                "title": title,
+                "description": new.body,
+            });
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{}/merge_requests", self.project_url(full_name)),
+                        body.to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(self
+                .parse::<MergeRequest>(&response.body)?
+                .into_pull_request())
+        })
+    }
+
+    fn pull_request_ref(&self, number: u64) -> Option<String> {
+        Some(format!("merge-requests/{number}/head"))
+    }
+}
+
+impl<C: HttpClient> GitLab<C> {
+    fn project_url(&self, full_name: &str) -> String {
+        format!("{}/projects/{}", self.api, percent_encode(full_name))
+    }
+
+    fn page_url(&self, first: String, cursor: Option<&String>) -> Result<String> {
+        match cursor {
+            Some(cursor) if cursor.starts_with(&format!("{}/", self.api)) => Ok(cursor.clone()),
+            Some(_) => Err(Error::Rejected(
+                "That page link is not from GitLab.".to_owned(),
+            )),
+            None => Ok(first),
+        }
+    }
+}
+
+impl User {
+    fn into_person(self) -> Person {
+        Person {
+            username: self.username,
+            display_name: self.name.filter(|n| !n.is_empty()),
+            avatar_url: self.avatar_url,
+        }
+    }
+}
+
+fn labels(names: Vec<String>) -> Vec<Label> {
+    names
+        .into_iter()
+        .map(|name| Label { name, color: None })
+        .collect()
+}
+
+#[derive(Deserialize)]
+struct MergeRequest {
+    iid: u64,
+    title: String,
+    description: Option<String>,
+    author: Option<User>,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    #[serde(default)]
+    work_in_progress: bool,
+    source_branch: String,
+    target_branch: String,
+    source_project_id: Option<u64>,
+    target_project_id: Option<u64>,
+    #[serde(default)]
+    labels: Vec<String>,
+    user_notes_count: Option<u32>,
+    created_at: String,
+    updated_at: String,
+    web_url: String,
+}
+
+impl MergeRequest {
+    fn into_pull_request(self) -> PullRequest {
+        let state = match self.state.as_str() {
+            "merged" => ItemState::Merged,
+            "closed" | "locked" => ItemState::Closed,
+            _ if self.draft || self.work_in_progress => ItemState::Draft,
+            _ => ItemState::Open,
+        };
+        PullRequest {
+            number: self.iid,
+            title: self.title,
+            body: self.description.unwrap_or_default(),
+            author: self.author.map(User::into_person).unwrap_or_default(),
+            state,
+            head: self.source_branch,
+            head_fork: match (self.source_project_id, self.target_project_id) {
+                (Some(source), Some(target)) if source != target => {
+                    Some(format!("project {source}"))
+                }
+                _ => None,
+            },
+            base: self.target_branch,
+            labels: labels(self.labels),
+            comments: self.user_notes_count,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            web_url: self.web_url,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct IssueBody {
+    iid: u64,
+    title: String,
+    description: Option<String>,
+    author: Option<User>,
+    state: String,
+    #[serde(default)]
+    labels: Vec<String>,
+    user_notes_count: Option<u32>,
+    created_at: String,
+    updated_at: String,
+    web_url: String,
+}
+
+impl IssueBody {
+    fn into_issue(self) -> Issue {
+        Issue {
+            number: self.iid,
+            title: self.title,
+            body: self.description.unwrap_or_default(),
+            author: self.author.map(User::into_person).unwrap_or_default(),
+            state: if self.state == "closed" {
+                ItemState::Closed
+            } else {
+                ItemState::Open
+            },
+            labels: labels(self.labels),
+            comments: self.user_notes_count,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            web_url: self.web_url,
+        }
     }
 }
 

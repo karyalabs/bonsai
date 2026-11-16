@@ -189,6 +189,47 @@ impl Repository {
         self.network(args, progress, cancel)
     }
 
+    /// Fetches `source` (such as `refs/pull/7/head`) from a remote into the
+    /// local branch `local`, then switches to it. When `local` is already
+    /// checked out, it fast-forwards instead. A local branch that has moved
+    /// on from the fetched commit is left alone, and Git says why.
+    pub fn fetch_into_branch(
+        &self,
+        remote: &str,
+        source: &str,
+        local: &str,
+        progress: Option<Progress>,
+        cancel: Option<CancelToken>,
+    ) -> Result<()> {
+        let head = self.git().run_unchecked(
+            &self
+                .git()
+                .command(["symbolic-ref", "--quiet", "--short", "HEAD"])
+                .cwd(self.root()),
+        )?;
+        let current = head.status.success() && head.stdout_lossy().trim() == local;
+        let target = if current {
+            source.to_owned()
+        } else {
+            format!("{source}:refs/heads/{local}")
+        };
+        let args = vec![
+            OsString::from("fetch"),
+            "--progress".into(),
+            "--".into(),
+            remote.into(),
+            target.into(),
+        ];
+        self.network(args, progress, cancel)?;
+        let args: Vec<OsString> = if current {
+            vec!["merge".into(), "--ff-only".into(), "FETCH_HEAD".into()]
+        } else {
+            vec!["switch".into(), "--no-guess".into(), local.into()]
+        };
+        self.git().run(&self.git().command(args).cwd(self.root()))?;
+        Ok(())
+    }
+
     /// Pulls the current branch's upstream.
     pub fn pull(
         &self,

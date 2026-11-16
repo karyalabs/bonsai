@@ -17,7 +17,7 @@ bonsai-providers = { path = "../bonsai-providers" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.12", features = ["font-kit"] }
 gpui-icons = "=0.7.0"
 gpui-kit = { version = "=0.10.0", default-features = false, features = ["component", "tree-sitter-languages"] }
-gpuicn = "=0.13.2"
+gpuicn = "=0.13.3"
 web-time = "1.1"
 futures = "0.3"
 notify = "8"

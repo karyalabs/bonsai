@@ -6,8 +6,9 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    Account, BoxFuture, Capabilities, Error, HttpClient, NewRepository, Page, Provider,
-    ProviderKind, RemoteRepository, RepositoryQuery, Request, Response, Result, form_encode,
+    Account, BoxFuture, Capabilities, Error, HttpClient, Issue, ItemQuery, ItemState, Label,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
     percent_encode,
 };
 
@@ -202,6 +203,113 @@ impl<C: HttpClient> GitHub<C> {
     }
 }
 
+impl<C: HttpClient> GitHub<C> {
+    fn repo_url(&self, full_name: &str) -> Result<String> {
+        let (owner, name) = full_name.split_once('/').ok_or(Error::NotFound)?;
+        Ok(format!(
+            "{}/repos/{}/{}",
+            self.api,
+            percent_encode(owner),
+            percent_encode(name)
+        ))
+    }
+
+    /// The first page's URL, or the cursor, checked to be on this host.
+    fn page_url(&self, first: String, cursor: Option<&String>) -> Result<String> {
+        match cursor {
+            Some(cursor) if cursor.starts_with(&format!("{}/", self.api)) => Ok(cursor.clone()),
+            Some(_) => Err(Error::Rejected(
+                "That page link is not from GitHub.".to_owned(),
+            )),
+            None => Ok(first),
+        }
+    }
+
+    async fn list_pulls(
+        &self,
+        token: &str,
+        full_name: &str,
+        query: &ItemQuery,
+    ) -> Result<Page<PullRequest>> {
+        let first = format!(
+            "{}/pulls?state={}&sort=updated&direction=desc&per_page={PER_PAGE}",
+            self.repo_url(full_name)?,
+            state_param(query.state)
+        );
+        let url = self.page_url(first, query.cursor.as_ref())?;
+        let response = self.send(Request::get(url), Some(token)).await?;
+        let pulls: Vec<Pull> = self.parse(&response.body)?;
+        Ok(Page {
+            items: pulls
+                .into_iter()
+                .map(|pull| pull.into_pull_request(full_name))
+                .collect(),
+            next: response.header("link").and_then(next_link),
+        })
+    }
+
+    async fn list_issues(
+        &self,
+        token: &str,
+        full_name: &str,
+        query: &ItemQuery,
+    ) -> Result<Page<Issue>> {
+        let first = format!(
+            "{}/issues?state={}&sort=updated&direction=desc&per_page={PER_PAGE}",
+            self.repo_url(full_name)?,
+            state_param(query.state)
+        );
+        let url = self.page_url(first, query.cursor.as_ref())?;
+        let response = self.send(Request::get(url), Some(token)).await?;
+        let issues: Vec<IssueBody> = self.parse(&response.body)?;
+        Ok(Page {
+            // GitHub lists pull requests as issues too.
+            items: issues
+                .into_iter()
+                .filter(|issue| issue.pull_request.is_none())
+                .map(IssueBody::into_issue)
+                .collect(),
+            next: response.header("link").and_then(next_link),
+        })
+    }
+
+    async fn open_pull(
+        &self,
+        token: &str,
+        full_name: &str,
+        new: &NewPullRequest,
+    ) -> Result<PullRequest> {
+        let body = json!({
+            "title": new.title,
+            "body": new.body,
+            "head": new.head,
+            "base": new.base,
+            "draft": new.draft,
+        });
+        let response = self
+            .send(
+                Request::post(
+                    format!("{}/pulls", self.repo_url(full_name)?),
+                    body.to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+        Ok(self
+            .parse::<Pull>(&response.body)?
+            .into_pull_request(full_name))
+    }
+}
+
+fn state_param(state: StateFilter) -> &'static str {
+    match state {
+        StateFilter::Open => "open",
+        StateFilter::Closed => "closed",
+        StateFilter::All => "all",
+    }
+}
+
 impl<C: HttpClient> Provider for GitHub<C> {
     fn kind(&self) -> ProviderKind {
         ProviderKind::GitHub
@@ -290,6 +398,37 @@ impl<C: HttpClient> Provider for GitHub<C> {
 
     fn git_username(&self, _: &Account) -> String {
         "x-access-token".to_owned()
+    }
+
+    fn pull_requests<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        query: &'a ItemQuery,
+    ) -> BoxFuture<'a, Result<Page<PullRequest>>> {
+        Box::pin(self.list_pulls(token, full_name, query))
+    }
+
+    fn issues<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        query: &'a ItemQuery,
+    ) -> BoxFuture<'a, Result<Page<Issue>>> {
+        Box::pin(self.list_issues(token, full_name, query))
+    }
+
+    fn create_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewPullRequest,
+    ) -> BoxFuture<'a, Result<PullRequest>> {
+        Box::pin(self.open_pull(token, full_name, new))
+    }
+
+    fn pull_request_ref(&self, number: u64) -> Option<String> {
+        Some(format!("pull/{number}/head"))
     }
 }
 
@@ -383,6 +522,136 @@ struct User {
 #[derive(Deserialize)]
 struct Login {
     login: String,
+}
+
+#[derive(Deserialize)]
+struct Author {
+    login: String,
+    avatar_url: Option<String>,
+}
+
+impl Author {
+    fn into_person(self) -> Person {
+        Person {
+            username: self.login,
+            display_name: None,
+            avatar_url: self.avatar_url,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LabelBody {
+    name: String,
+    color: Option<String>,
+}
+
+impl LabelBody {
+    fn into_label(self) -> Label {
+        Label {
+            name: self.name,
+            color: self.color.filter(|c| c.len() == 6),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FullName {
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+struct PullRef {
+    #[serde(rename = "ref")]
+    name: String,
+    repo: Option<FullName>,
+}
+
+#[derive(Deserialize)]
+struct Pull {
+    number: u64,
+    title: String,
+    body: Option<String>,
+    user: Option<Author>,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    merged_at: Option<String>,
+    head: PullRef,
+    base: PullRef,
+    #[serde(default)]
+    labels: Vec<LabelBody>,
+    comments: Option<u32>,
+    created_at: String,
+    updated_at: String,
+    html_url: String,
+}
+
+impl Pull {
+    fn into_pull_request(self, full_name: &str) -> PullRequest {
+        let state = match (self.state.as_str(), self.merged_at.is_some(), self.draft) {
+            (_, true, _) => ItemState::Merged,
+            ("closed", ..) => ItemState::Closed,
+            (_, _, true) => ItemState::Draft,
+            _ => ItemState::Open,
+        };
+        PullRequest {
+            number: self.number,
+            title: self.title,
+            body: self.body.unwrap_or_default(),
+            author: self.user.map(Author::into_person).unwrap_or_default(),
+            state,
+            head_fork: self
+                .head
+                .repo
+                .map(|r| r.full_name)
+                .filter(|r| !r.eq_ignore_ascii_case(full_name)),
+            head: self.head.name,
+            base: self.base.name,
+            labels: self.labels.into_iter().map(LabelBody::into_label).collect(),
+            comments: self.comments,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            web_url: self.html_url,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct IssueBody {
+    number: u64,
+    title: String,
+    body: Option<String>,
+    user: Option<Author>,
+    state: String,
+    #[serde(default)]
+    labels: Vec<LabelBody>,
+    comments: Option<u32>,
+    created_at: String,
+    updated_at: String,
+    html_url: String,
+    pull_request: Option<serde_json::Value>,
+}
+
+impl IssueBody {
+    fn into_issue(self) -> Issue {
+        Issue {
+            number: self.number,
+            title: self.title,
+            body: self.body.unwrap_or_default(),
+            author: self.user.map(Author::into_person).unwrap_or_default(),
+            state: if self.state == "closed" {
+                ItemState::Closed
+            } else {
+                ItemState::Open
+            },
+            labels: self.labels.into_iter().map(LabelBody::into_label).collect(),
+            comments: self.comments,
+            created_at: self.created_at,
+            updated_at: self.updated_at,
+            web_url: self.html_url,
+        }
+    }
 }
 
 #[derive(Deserialize)]

@@ -131,6 +131,8 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.changes",
         "view.history",
         "view.activity",
+        "view.pull-requests",
+        "view.issues",
         "repository.refresh",
         "repository.commit",
         "repository.commit-push",
@@ -330,4 +332,191 @@ fn errors_split_into_a_title_and_details() {
         Some("Push main to origin")
     );
     assert_eq!(super::success_title("Stage a.rs"), None);
+}
+
+mod hosted {
+    use std::sync::Arc;
+
+    use bonsai_git::{Git, Head, Repository};
+    use bonsai_keychain::{MemoryStore, Secret, TokenStore};
+    use bonsai_providers::{
+        Account, BoxFuture, HttpClient, ItemState, ProviderKind, Request, Response,
+    };
+    use gpui_kit::TestAppContext;
+
+    use super::setup;
+    use crate::{
+        accounts::{Accounts, Connected, SignInMethod, accounts_path},
+        commands,
+        hosted::{HostedEnv, HostedView},
+        session::Session,
+    };
+
+    /// Answers each request with the first body whose key the URL contains.
+    struct Canned(Vec<(&'static str, String)>);
+
+    impl HttpClient for Canned {
+        fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, String>> {
+            let body = self
+                .0
+                .iter()
+                .find(|(key, _)| request.url.contains(key))
+                .map(|(_, body)| body.clone());
+            Box::pin(async move {
+                body.map(|body| Response {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: body.into_bytes(),
+                })
+                .ok_or_else(|| format!("unexpected request: {}", request.url))
+            })
+        }
+    }
+
+    fn git(dir: &std::path::Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args([
+                "-c",
+                "user.name=Ada Lovelace",
+                "-c",
+                "user.email=ada@example.com",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    fn pull(number: u64, head: &str, fork: &str, draft: bool) -> String {
+        format!(
+            r#"{{"number":{number},"title":"Pull {number}","body":"About **{head}**.","user":{{"login":"grace"}},"state":"open","draft":{draft},"merged_at":null,"head":{{"ref":"{head}","repo":{{"full_name":"{fork}"}}}},"base":{{"ref":"main","repo":{{"full_name":"ada/engine"}}}},"labels":[{{"name":"ui","color":"a2eeef"}}],"created_at":"2026-11-10T09:00:00Z","updated_at":"2026-11-12T09:00:00Z","html_url":"https://github.com/ada/engine/pull/{number}"}}"#
+        )
+    }
+
+    #[gpui_kit::test]
+    fn lists_pull_requests_and_checks_them_out(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // The hosted repository, with a branch and a fork's pull ref.
+        let upstream = root.join("upstream");
+        Repository::init(&Git::locate(None).unwrap(), &upstream, Some("main")).unwrap();
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        git(&upstream, &["switch", "-q", "-c", "feature/sync"]);
+        git(&upstream, &["commit", "-q", "--allow-empty", "-m", "Sync"]);
+        git(&upstream, &["switch", "-q", "main"]);
+        git(
+            &upstream,
+            &["commit", "-q", "--allow-empty", "-m", "From a fork"],
+        );
+        let fork = git(&upstream, &["rev-parse", "HEAD"]);
+        git(&upstream, &["update-ref", "refs/pull/6/head", &fork]);
+        git(&upstream, &["reset", "-q", "--hard", "HEAD~1"]);
+
+        let local = root.join("engine");
+        git(
+            &root,
+            &["clone", "-q", upstream.to_str().unwrap(), "engine"],
+        );
+        let hosted = "https://github.com/ada/engine.git";
+        git(&local, &["remote", "set-url", "origin", hosted]);
+        git(
+            &local,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", upstream.display()),
+                hosted,
+            ],
+        );
+
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+        let mut accounts = Accounts::load(accounts_path(&root), store.clone());
+        accounts
+            .add(
+                Connected {
+                    account: Account {
+                        kind: ProviderKind::GitHub,
+                        host: "github.com".into(),
+                        api_url: "https://api.github.com".into(),
+                        username: "ada".into(),
+                        display_name: None,
+                        avatar_url: None,
+                    },
+                    method: SignInMethod::Token,
+                },
+                &Secret::new("t"),
+            )
+            .unwrap();
+        let client = Canned(vec![
+            (
+                "/repos/ada/engine/pulls",
+                format!(
+                    "[{},{}]",
+                    pull(7, "feature/sync", "ada/engine", false),
+                    pull(6, "layout", "grace/engine", true)
+                ),
+            ),
+            (
+                "/repos/ada/engine/issues",
+                r#"[{"number":9,"title":"Crash on empty repo","body":"","user":{"login":"margaret"},"state":"open","labels":[],"comments":3,"created_at":"2026-11-01T09:00:00Z","updated_at":"2026-11-02T09:00:00Z","html_url":"https://github.com/ada/engine/issues/9"}]"#.to_owned(),
+            ),
+        ]);
+
+        let (workspace, cx) = setup(cx, Session::default(), None);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_hosted_env(HostedEnv {
+                accounts_path: accounts_path(&root),
+                store,
+                client: Arc::new(client),
+            });
+            workspace.open_path(&local, true, cx).unwrap();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(commands::ShowPullRequests);
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.error(), None);
+            let numbers: Vec<u64> = view.items().iter().map(|i| i.number).collect();
+            assert_eq!(numbers, [7, 6]);
+            assert_eq!(view.items()[1].state, ItemState::Draft);
+            assert_eq!(view.selected().map(|i| i.number), Some(7));
+        });
+
+        // A pull request from the same repository: its own tracking branch.
+        view.update(cx, HostedView::check_out);
+        cx.run_until_parked();
+        let head = || {
+            let repository = Repository::open(&Git::locate(None).unwrap(), &local).unwrap();
+            match repository.snapshot().unwrap().head {
+                Head::Branch { name, .. } => name,
+                Head::Detached { .. } => "detached".into(),
+            }
+        };
+        assert_eq!(head(), "feature/sync");
+        assert_eq!(
+            git(
+                &local,
+                &["rev-parse", "--abbrev-ref", "feature/sync@{upstream}"]
+            ),
+            "origin/feature/sync"
+        );
+
+        // One from a fork: fetched by its pull ref into pr-6.
+        view.update(cx, |view, cx| view.select(6, cx));
+        view.update(cx, HostedView::check_out);
+        cx.run_until_parked();
+        assert_eq!(head(), "pr-6");
+        assert_eq!(git(&local, &["rev-parse", "HEAD"]), fork);
+
+        cx.dispatch_action(commands::ShowIssues);
+        cx.run_until_parked();
+        let issues = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
+        issues.read_with(cx, |view, _| {
+            assert_eq!(view.items().len(), 1);
+            assert_eq!(view.items()[0].comments, Some(3));
+            assert!(view.items()[0].pull.is_none());
+        });
+    }
 }
