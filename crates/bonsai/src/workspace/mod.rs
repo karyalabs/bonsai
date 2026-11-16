@@ -25,7 +25,7 @@ use crate::{
     activity_panel::ActivityPanel,
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
-    diff_pane::DiffPane,
+    diff_pane::{DiffPane, DiffPaneEvent},
     history::{HistoryEvent, HistoryView},
     publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
@@ -71,6 +71,7 @@ struct RepositoryTab {
     _history_events: Subscription,
     _changes_events: Subscription,
     _refs_events: Subscription,
+    _diff_events: Subscription,
 }
 
 pub struct Workspace {
@@ -326,6 +327,12 @@ impl Workspace {
                     }
                     cx.notify();
                 });
+            let history_target = history.downgrade();
+            let diff_events = cx.subscribe(&diff, move |this, _, event: &DiffPaneEvent, cx| {
+                let DiffPaneEvent::ShowInHistory(oid) = event;
+                let _ = history_target.update(cx, |history, cx| history.reveal(oid, cx));
+                this.set_section(Section::History, cx);
+            });
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -339,6 +346,7 @@ impl Workspace {
                 _changes_events: changes_events,
                 _history_events: history_events,
                 _refs_events: refs_events,
+                _diff_events: diff_events,
                 _events: events,
             });
             self.next_tab_id += 1;
