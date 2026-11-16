@@ -5,8 +5,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Error, HttpClient, NewRepository, Page, Provider,
-    ProviderKind, RemoteRepository, RepositoryQuery, Request, Response, Result, form_encode,
+    Account, BoxFuture, Capabilities, Error, HttpClient, Issue, ItemQuery, ItemState,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, form_encode,
     oauth::Tokens, percent_encode,
 };
 
@@ -368,6 +369,258 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
     /// [`BitbucketCredential::git_username`] instead.
     fn git_username(&self, account: &Account) -> String {
         account.username.clone()
+    }
+
+    fn pull_requests<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        query: &'a ItemQuery,
+    ) -> BoxFuture<'a, Result<Page<PullRequest>>> {
+        Box::pin(async move {
+            let states: &[&str] = match query.state {
+                StateFilter::Open => &["OPEN"],
+                StateFilter::Closed => &["MERGED", "DECLINED", "SUPERSEDED"],
+                StateFilter::All => &["OPEN", "MERGED", "DECLINED", "SUPERSEDED"],
+            };
+            let mut first = format!(
+                "{}/pullrequests?pagelen={PER_PAGE}&sort=-updated_on",
+                repo_url(full_name)?
+            );
+            for state in states {
+                first.push_str("&state=");
+                first.push_str(state);
+            }
+            let url = page_url(first, query.cursor.as_ref())?;
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let page: Values<Pull> = parse(&response.body)?;
+            Ok(Page {
+                items: page
+                    .values
+                    .into_iter()
+                    .map(|pull| pull.into_pull_request(full_name))
+                    .collect(),
+                next: page.next,
+            })
+        })
+    }
+
+    fn issues<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        query: &'a ItemQuery,
+    ) -> BoxFuture<'a, Result<Page<Issue>>> {
+        Box::pin(async move {
+            let mut first = format!(
+                "{}/issues?pagelen={PER_PAGE}&sort=-updated_on",
+                repo_url(full_name)?
+            );
+            let states: &[&str] = match query.state {
+                StateFilter::Open => &OPEN_ISSUE,
+                StateFilter::Closed => &CLOSED_ISSUE,
+                StateFilter::All => &[],
+            };
+            if !states.is_empty() {
+                let q = states
+                    .iter()
+                    .map(|s| format!("state = \"{s}\""))
+                    .collect::<Vec<_>>()
+                    .join(" OR ");
+                first.push_str("&q=");
+                first.push_str(&percent_encode(&q));
+            }
+            let url = page_url(first, query.cursor.as_ref())?;
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let page: Values<IssueBody> = parse(&response.body)?;
+            Ok(Page {
+                items: page.values.into_iter().map(IssueBody::into_issue).collect(),
+                next: page.next,
+            })
+        })
+    }
+
+    fn create_pull_request<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        new: &'a NewPullRequest,
+    ) -> BoxFuture<'a, Result<PullRequest>> {
+        Box::pin(async move {
+            let body = json!({
+                "title": new.title,
+                "description": new.body,
+                "source": { "branch": { "name": new.head } },
+                "destination": { "branch": { "name": new.base } },
+                "draft": new.draft,
+            });
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{}/pullrequests", repo_url(full_name)?),
+                        body.to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(parse::<Pull>(&response.body)?.into_pull_request(full_name))
+        })
+    }
+
+    fn pull_request_ref(&self, _: u64) -> Option<String> {
+        None
+    }
+}
+
+const OPEN_ISSUE: [&str; 3] = ["new", "open", "on hold"];
+const CLOSED_ISSUE: [&str; 5] = ["resolved", "invalid", "duplicate", "wontfix", "closed"];
+
+fn repo_url(full_name: &str) -> Result<String> {
+    let (workspace, slug) = full_name.split_once('/').ok_or(Error::NotFound)?;
+    Ok(format!(
+        "{API}/repositories/{}/{}",
+        percent_encode(workspace),
+        percent_encode(slug)
+    ))
+}
+
+fn page_url(first: String, cursor: Option<&String>) -> Result<String> {
+    match cursor {
+        Some(cursor) if cursor.starts_with(&format!("{API}/")) => Ok(cursor.clone()),
+        Some(_) => Err(Error::Rejected(
+            "That page link is not from Bitbucket.".to_owned(),
+        )),
+        None => Ok(first),
+    }
+}
+
+/// A user as pull requests and issues show them: Bitbucket leaves out the
+/// username there.
+#[derive(Deserialize)]
+struct Participant {
+    display_name: Option<String>,
+    nickname: Option<String>,
+    links: Option<UserLinks>,
+}
+
+impl Participant {
+    fn into_person(self) -> Person {
+        Person {
+            username: self
+                .nickname
+                .or_else(|| self.display_name.clone())
+                .unwrap_or_default(),
+            display_name: self.display_name.filter(|n| !n.is_empty()),
+            avatar_url: self.links.and_then(|l| l.avatar).map(|a| a.href),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct HtmlLinks {
+    html: Href,
+}
+
+#[derive(Deserialize)]
+struct FullName {
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+struct Endpoint {
+    branch: Branch,
+    repository: Option<FullName>,
+}
+
+#[derive(Deserialize)]
+struct Pull {
+    id: u64,
+    title: String,
+    description: Option<String>,
+    author: Option<Participant>,
+    state: String,
+    #[serde(default)]
+    draft: bool,
+    source: Endpoint,
+    destination: Endpoint,
+    comment_count: Option<u32>,
+    created_on: String,
+    updated_on: String,
+    links: HtmlLinks,
+}
+
+impl Pull {
+    fn into_pull_request(self, full_name: &str) -> PullRequest {
+        let state = match self.state.as_str() {
+            "MERGED" => ItemState::Merged,
+            "DECLINED" | "SUPERSEDED" => ItemState::Closed,
+            _ if self.draft => ItemState::Draft,
+            _ => ItemState::Open,
+        };
+        PullRequest {
+            number: self.id,
+            title: self.title,
+            body: self.description.unwrap_or_default(),
+            author: self
+                .author
+                .map(Participant::into_person)
+                .unwrap_or_default(),
+            state,
+            head: self.source.branch.name,
+            head_fork: self
+                .source
+                .repository
+                .map(|r| r.full_name)
+                .filter(|r| !r.eq_ignore_ascii_case(full_name)),
+            base: self.destination.branch.name,
+            labels: Vec::new(),
+            comments: self.comment_count,
+            created_at: self.created_on,
+            updated_at: self.updated_on,
+            web_url: self.links.html.href,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct Content {
+    raw: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct IssueBody {
+    id: u64,
+    title: String,
+    content: Option<Content>,
+    reporter: Option<Participant>,
+    state: String,
+    created_on: String,
+    updated_on: String,
+    links: HtmlLinks,
+}
+
+impl IssueBody {
+    fn into_issue(self) -> Issue {
+        Issue {
+            number: self.id,
+            title: self.title,
+            body: self.content.and_then(|c| c.raw).unwrap_or_default(),
+            author: self
+                .reporter
+                .map(Participant::into_person)
+                .unwrap_or_default(),
+            state: if OPEN_ISSUE.contains(&self.state.as_str()) {
+                ItemState::Open
+            } else {
+                ItemState::Closed
+            },
+            labels: Vec::new(),
+            comments: None,
+            created_at: self.created_on,
+            updated_at: self.updated_on,
+            web_url: self.links.html.href,
+        }
     }
 }
 

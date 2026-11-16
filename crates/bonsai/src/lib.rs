@@ -13,6 +13,7 @@ pub mod confirm;
 pub mod diff_pane;
 pub mod file_icon;
 pub mod history;
+pub mod hosted;
 pub mod http;
 pub mod publish_sheet;
 pub mod purge_sheet;

@@ -27,6 +27,7 @@ use crate::{
     commands::{self, COMMANDS},
     diff_pane::{DiffPane, DiffPaneEvent},
     history::{EditCommits, HistoryEvent, HistoryView},
+    hosted::{HostedEnv, HostedEvent, HostedKind, HostedView},
     publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     rebase_sheet::{RebaseEvent, RebaseSheet},
@@ -56,6 +57,18 @@ pub enum Section {
     Changes,
     History,
     Activity,
+    PullRequests,
+    Issues,
+}
+
+impl Section {
+    fn hosted(self) -> Option<HostedKind> {
+        match self {
+            Self::PullRequests => Some(HostedKind::PullRequests),
+            Self::Issues => Some(HostedKind::Issues),
+            _ => None,
+        }
+    }
 }
 
 struct RepositoryTab {
@@ -68,6 +81,9 @@ struct RepositoryTab {
     sync: Entity<SyncBar>,
     activity: Entity<ActivityPanel>,
     history: Entity<HistoryView>,
+    /// Built the first time their section opens.
+    pulls: Option<(Entity<HostedView>, Subscription)>,
+    issues: Option<(Entity<HostedView>, Subscription)>,
     _events: Subscription,
     _history_events: Subscription,
     _changes_events: Subscription,
@@ -109,6 +125,11 @@ pub struct Workspace {
     remote_browser: Option<(Entity<RemoteBrowser>, Subscription)>,
     /// A path to open Purge from History for on the next render.
     purge_requested: Option<PathBuf>,
+    /// Accounts and HTTP for pull requests and issues; built when first
+    /// needed unless a test set them.
+    hosted_env: Option<HostedEnv>,
+    /// Open the Accounts sheet on the next render.
+    accounts_requested: bool,
     /// Shows the welcome screen in place of the active tab (New Tab).
     welcome: bool,
     message: Option<SharedString>,
@@ -170,6 +191,8 @@ impl Workspace {
             publish: None,
             remote_browser: None,
             purge_requested: None,
+            hosted_env: None,
+            accounts_requested: false,
             welcome: false,
             message: None,
             message_details: None,
@@ -366,6 +389,8 @@ impl Workspace {
                 sync,
                 activity,
                 history,
+                pulls: None,
+                issues: None,
                 _changes_events: changes_events,
                 _history_events: history_events,
                 _refs_events: refs_events,
@@ -656,6 +681,9 @@ impl Workspace {
                     this.accounts_handle.close(window, cx);
                     this.accounts = None;
                     this.remote_browser = None;
+                    if let Some(view) = this.hosted_view() {
+                        view.update(cx, HostedView::activate);
+                    }
                     cx.notify();
                 }
             },
@@ -1057,9 +1085,76 @@ impl Workspace {
                 Section::Changes | Section::Activity => {
                     tab.changes.update(cx, ChangesView::refocus);
                 }
+                Section::PullRequests | Section::Issues => {}
             }
         }
+        if let Some(view) = self.ensure_hosted(cx) {
+            view.update(cx, HostedView::activate);
+        }
         cx.notify();
+    }
+
+    /// Accounts and HTTP for pull requests and issues, from now on.
+    pub fn set_hosted_env(&mut self, env: HostedEnv) {
+        self.hosted_env = Some(env);
+    }
+
+    fn hosted_env(&mut self) -> HostedEnv {
+        if self.hosted_env.is_none() {
+            self.hosted_env = Some(HostedEnv {
+                accounts_path: self.accounts_path(),
+                store: std::sync::Arc::from(bonsai_keychain::default_store()),
+                client: crate::http::default_client(),
+            });
+        }
+        self.hosted_env.clone().expect("set above")
+    }
+
+    /// The active tab's view for the current section, when that section is
+    /// pull requests or issues, building it on first use.
+    fn ensure_hosted(&mut self, cx: &mut Context<Self>) -> Option<Entity<HostedView>> {
+        let kind = self.section.hosted()?;
+        let active = self.active;
+        let model = self.tabs.get(active)?.model.clone();
+        let existing = {
+            let tab = &self.tabs[active];
+            match kind {
+                HostedKind::PullRequests => &tab.pulls,
+                HostedKind::Issues => &tab.issues,
+            }
+            .as_ref()
+            .map(|(view, _)| view.clone())
+        };
+        if let Some(view) = existing {
+            return Some(view);
+        }
+        let env = self.hosted_env();
+        let view = cx.new(|cx| HostedView::new(kind, model, env, cx));
+        let events = cx.subscribe(&view, |this, _, event: &HostedEvent, cx| match event {
+            HostedEvent::ManageAccounts => {
+                this.accounts_requested = true;
+                cx.notify();
+            }
+        });
+        view.update(cx, HostedView::activate);
+        let tab = &mut self.tabs[active];
+        let slot = match kind {
+            HostedKind::PullRequests => &mut tab.pulls,
+            HostedKind::Issues => &mut tab.issues,
+        };
+        *slot = Some((view.clone(), events));
+        Some(view)
+    }
+
+    /// The active tab's view for the current section, if it is built.
+    #[must_use]
+    pub fn hosted_view(&self) -> Option<Entity<HostedView>> {
+        let tab = self.tabs.get(self.active)?;
+        match self.section.hosted()? {
+            HostedKind::PullRequests => tab.pulls.as_ref(),
+            HostedKind::Issues => tab.issues.as_ref(),
+        }
+        .map(|(view, _)| view.clone())
     }
 
     fn on_changes(&mut self, _: &commands::ShowChanges, _: &mut Window, cx: &mut Context<Self>) {
@@ -1075,6 +1170,19 @@ impl Workspace {
     fn on_activity(&mut self, _: &commands::ShowActivity, _: &mut Window, cx: &mut Context<Self>) {
         self.set_section(Section::Activity, cx);
         cx.notify();
+    }
+
+    fn on_pull_requests(
+        &mut self,
+        _: &commands::ShowPullRequests,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_section(Section::PullRequests, cx);
+    }
+
+    fn on_issues(&mut self, _: &commands::ShowIssues, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(Section::Issues, cx);
     }
 
     /// Opens the activity log at the command behind the error banner.
@@ -1318,6 +1426,42 @@ impl Workspace {
                         cx.notify();
                     })),
             );
+        // Pull requests and issues, for a repository with a hosted remote.
+        let hosted = snapshot.is_some_and(|s| {
+            s.remotes.iter().any(|r| {
+                r.fetch_url
+                    .as_deref()
+                    .and_then(bonsai_providers::hosted_repository)
+                    .is_some()
+            })
+        });
+        if hosted {
+            sidebar = sidebar
+                .child(
+                    SidebarItem::new("workspace.section.pull-requests", "Pull Requests")
+                        .icon(
+                            lucide(LucideIcon::GitPullRequest)
+                                .size(px(16.))
+                                .text_color(c.sidebar_foreground),
+                        )
+                        .selected(self.section == Section::PullRequests)
+                        .on_activate(cx.listener(|this, _, _, cx| {
+                            this.set_section(Section::PullRequests, cx);
+                        })),
+                )
+                .child(
+                    SidebarItem::new("workspace.section.issues", "Issues")
+                        .icon(
+                            lucide(LucideIcon::CircleDot)
+                                .size(px(16.))
+                                .text_color(c.sidebar_foreground),
+                        )
+                        .selected(self.section == Section::Issues)
+                        .on_activate(cx.listener(|this, _, _, cx| {
+                            this.set_section(Section::Issues, cx);
+                        })),
+                );
+        }
         if let Some(tab) = self.tabs.get(self.active) {
             sidebar = sidebar.child(tab.refs.clone());
         }
@@ -1358,6 +1502,10 @@ impl Workspace {
                 Some(tab) => tab.history.clone().into_any_element(),
                 None => div().into_any_element(),
             },
+            (Section::PullRequests | Section::Issues, Some(_), _) => match self.hosted_view() {
+                Some(view) => view.into_any_element(),
+                None => div().into_any_element(),
+            },
         };
         // The Changes view scrolls its own virtualized list.
         div()
@@ -1374,8 +1522,12 @@ impl Workspace {
             .border_l_1()
             .border_color(theme.colors.border)
             .bg(theme.colors.background)
-            .when_some(self.tabs.get(self.active), |this, tab| {
-                this.child(tab.diff.clone())
+            .map(|this| match self.hosted_view() {
+                Some(view) => this.child(HostedView::render_detail(&view, cx)),
+                None => match self.tabs.get(self.active) {
+                    Some(tab) => this.child(tab.diff.clone()),
+                    None => this,
+                },
             })
     }
 
@@ -1856,6 +2008,12 @@ impl Render for Workspace {
         if let Some((model, request)) = self.rebase_request.take() {
             self.show_rebase(model, request, window, cx);
         }
+        if std::mem::take(&mut self.accounts_requested) {
+            self.show_accounts(window, cx);
+        }
+        if !self.welcome {
+            self.ensure_hosted(cx);
+        }
         if self.welcome || self.tabs.is_empty() {
             self.ensure_remote_browser(window, cx);
         }
@@ -1945,6 +2103,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_purge))
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
+            .on_action(cx.listener(Self::on_pull_requests))
+            .on_action(cx.listener(Self::on_issues))
             .on_action(cx.listener(Self::on_accounts))
             .on_action(cx.listener(Self::on_settings))
             .on_action(cx.listener(Self::on_terminal))

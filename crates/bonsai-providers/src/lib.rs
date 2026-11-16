@@ -7,6 +7,7 @@ mod github;
 mod gitlab;
 mod http;
 mod oauth;
+mod remote_url;
 mod types;
 
 pub use bitbucket::{Bitbucket, BitbucketCredential};
@@ -14,7 +15,9 @@ pub use github::{DeviceCode, DevicePoll, GitHub};
 pub use gitlab::GitLab;
 pub use http::{BoxFuture, HttpClient, Method, Request, Response, form_encode, percent_encode};
 pub use oauth::{Pkce, Tokens};
+pub use remote_url::hosted_repository;
 pub use types::{
-    Account, Capabilities, Error, NewRepository, Page, Provider, ProviderKind, RemoteRepository,
-    RepositoryQuery, Result,
+    Account, Capabilities, Error, Issue, ItemQuery, ItemState, Label, NewPullRequest,
+    NewRepository, Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository,
+    RepositoryQuery, Result, StateFilter,
 };

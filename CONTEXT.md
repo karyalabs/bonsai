@@ -60,6 +60,12 @@ A repository listed by a provider account. It may or may not be cloned
 locally.
 _Avoid_: Cloud repo, online repo
 
+**Pull request**:
+A request on a provider to merge one branch into another; GitLab calls it a
+merge request. Bonsai lists a repository's pull requests and issues from the
+first remote, `origin` first, on a host with a signed-in account.
+_Avoid_: PR (in UI text), merge request (except on GitLab)
+
 **Publish**:
 Creating a remote repository on a provider for a local repository that has no
 remote, adding it as `origin` and pushing the current branch.

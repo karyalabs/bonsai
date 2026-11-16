@@ -146,6 +146,68 @@ impl HttpClient for CurlClient {
     }
 }
 
+/// Debug builds only: answers requests from a JSON file named by
+/// `BONSAI_HTTP_REPLAY`, `{"url substring": "body", ...}`, so screenshots
+/// and demos show hosted data with no network or account.
+#[cfg(debug_assertions)]
+pub struct Replay(Vec<(String, String)>);
+
+#[cfg(debug_assertions)]
+impl Replay {
+    #[must_use]
+    pub fn from_env() -> Option<Self> {
+        let path = std::env::var_os("BONSAI_HTTP_REPLAY")?;
+        let text = std::fs::read_to_string(path).ok()?;
+        let map: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text).ok()?;
+        Some(Self(
+            map.into_iter()
+                .map(|(k, v)| (k, v.as_str().map_or_else(|| v.to_string(), str::to_owned)))
+                .collect(),
+        ))
+    }
+}
+
+#[cfg(debug_assertions)]
+impl HttpClient for Replay {
+    fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, String>> {
+        let found = self
+            .0
+            .iter()
+            .find(|(key, _)| request.url.contains(key.as_str()))
+            .map(|(_, body)| body.clone());
+        Box::pin(async move {
+            Ok(match found {
+                Some(body) => Response {
+                    status: 200,
+                    headers: Vec::new(),
+                    body: body.into_bytes(),
+                },
+                None => Response {
+                    status: 404,
+                    headers: Vec::new(),
+                    body: b"{}".to_vec(),
+                },
+            })
+        })
+    }
+}
+
+/// The client the app uses: the system's curl, or a replay in debug builds.
+#[must_use]
+pub fn default_client() -> std::sync::Arc<dyn HttpClient> {
+    #[cfg(debug_assertions)]
+    if let Some(replay) = Replay::from_env() {
+        return std::sync::Arc::new(replay);
+    }
+    std::sync::Arc::new(CurlClient::default())
+}
+
+/// Whether requests are replayed, so a missing token is not an error.
+#[must_use]
+pub fn replaying() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("BONSAI_HTTP_REPLAY").is_some()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
