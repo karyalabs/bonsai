@@ -31,7 +31,7 @@ pub use commit::Signing;
 pub use diff::{DiffOptions, DiffOutput, DiffTarget, Whitespace};
 pub use error::{Error, Result};
 pub use integrate::{Integration, MergeMode, OperationAction, ResetMode, Side};
-pub use log::{CommitInfo, LogScope};
+pub use log::{CommitDetails, CommitInfo, LogFilter, LogScope, SignatureStatus};
 pub use patch::{ApplyMode, LinePosition, LineSide, partial_patch};
 pub use purge::{PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange};
 pub use remote::RemoteFailure;

@@ -1,6 +1,6 @@
 use std::{fmt::Write as _, path::Path, time::Instant};
 
-use bonsai_git::{Git, LogScope, Repository};
+use bonsai_git::{Git, LogFilter, LogScope, Repository, SignatureStatus};
 
 fn git() -> Git {
     Git::locate(None).expect("git is installed")
@@ -101,4 +101,95 @@ fn walks_one_hundred_thousand_commits() {
     assert_eq!(all.len(), 100_000);
     eprintln!("first page of 500: {first_page:?}; all 100,000: {whole:?}");
     assert!(first_page.as_secs() < 5);
+}
+
+#[test]
+fn filters_by_message_author_and_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    std::fs::create_dir(dir.path().join("docs")).unwrap();
+    std::fs::write(dir.path().join("docs/guide.md"), "g").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(dir.path(), &["commit", "-qm", "Write the guide"]);
+    std::fs::write(dir.path().join("app.rs"), "a").unwrap();
+    run(dir.path(), &["add", "."]);
+    run(
+        dir.path(),
+        &[
+            "-c",
+            "user.name=Grace",
+            "commit",
+            "-qm",
+            "Fix the [app] crash",
+        ],
+    );
+    let summaries = |filter: LogFilter| -> Vec<String> {
+        repository
+            .log_filtered(&LogScope::All, &filter, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.summary)
+            .collect()
+    };
+    // Fixed strings, so brackets are not a pattern; case is ignored.
+    assert_eq!(
+        summaries(LogFilter {
+            message: Some("[APP]".into()),
+            ..LogFilter::default()
+        }),
+        ["Fix the [app] crash"]
+    );
+    assert_eq!(
+        summaries(LogFilter {
+            author: Some("grace".into()),
+            ..LogFilter::default()
+        }),
+        ["Fix the [app] crash"]
+    );
+    assert_eq!(
+        summaries(LogFilter {
+            path: Some("docs".into()),
+            ..LogFilter::default()
+        }),
+        ["Write the guide"]
+    );
+    // Both must match.
+    assert_eq!(
+        summaries(LogFilter {
+            message: Some("guide".into()),
+            author: Some("grace".into()),
+            path: None,
+        }),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn reads_a_commits_details() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    run(dir.path(), &["commit", "--allow-empty", "-qm", "base"]);
+    run(
+        dir.path(),
+        &[
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "Summary line",
+            "-m",
+            "Body with | bars\nand lines.",
+        ],
+    );
+    let head = repository.log(&LogScope::Head, 0, 1).unwrap().remove(0);
+    let details = repository.commit_details(&head.oid).unwrap();
+    assert_eq!(details.oid, head.oid);
+    assert_eq!(details.parents.len(), 1);
+    assert_eq!(details.author_name, "Ada");
+    assert_eq!(details.committer_email, "ada@example.com");
+    assert!(
+        details
+            .message
+            .starts_with("Summary line\n\nBody with | bars")
+    );
+    assert_eq!(details.signature, SignatureStatus::Unsigned);
 }

@@ -2,8 +2,8 @@
 //! GPUI Kit's diff, unified or side by side.
 
 use bonsai_git::{
-    ApplyMode, DiffOptions, DiffOutput, DiffTarget, LinePosition, LineSide, Whitespace,
-    partial_patch,
+    ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, LinePosition, LineSide,
+    SignatureStatus, Whitespace, partial_patch,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -50,6 +50,8 @@ pub struct DiffPane {
     whitespace: Whitespace,
     /// The patch on screen, for building partial patches from a selection.
     patch: Option<String>,
+    /// The shown commit's message, people and signature.
+    details: Option<CommitDetails>,
     discard: DialogHandle,
     /// The partial patch the open Discard Lines dialog will reverse.
     pending_discard: Option<String>,
@@ -84,6 +86,7 @@ impl DiffPane {
             status: PaneStatus::Nothing,
             whitespace: Whitespace::Show,
             patch: None,
+            details: None,
             discard: DialogHandle::new(false),
             pending_discard: None,
             error: None,
@@ -145,6 +148,14 @@ impl DiffPane {
             },
             ..DiffOptions::default()
         };
+        let details_target = target.clone();
+        let details_repository = repository.clone();
+        let details = cx.background_spawn(async move {
+            match details_target {
+                DiffTarget::Commit(oid) => details_repository.commit_details(&oid).ok(),
+                _ => None,
+            }
+        });
         let task = cx.background_spawn(async move {
             repository
                 .diff(&target, options)
@@ -158,10 +169,12 @@ impl DiffPane {
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
+            let details = details.await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation != generation {
                     return;
                 }
+                this.details = details;
                 this.patch = None;
                 this.status = match result {
                     Ok(Ok((files, _))) if files.is_empty() => {
@@ -301,6 +314,95 @@ impl DiffPane {
             });
             true
         })
+    }
+
+    #[must_use]
+    pub fn details(&self) -> Option<&CommitDetails> {
+        self.details.as_ref()
+    }
+
+    fn render_details(details: &CommitDetails, theme: &UiTheme) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let when = |time: i64| {
+            u64::try_from(time)
+                .ok()
+                .map(|s| std::time::UNIX_EPOCH + std::time::Duration::from_secs(s))
+                .map(crate::activity_panel::ago)
+                .unwrap_or_default()
+        };
+        let (signature, signature_color) = match details.signature {
+            SignatureStatus::Unsigned => (None, c.muted_foreground),
+            SignatureStatus::Good => (Some("Signature verified"), c.success),
+            SignatureStatus::GoodUntrusted => (Some("Signed with an untrusted key"), c.warning),
+            SignatureStatus::Bad => (Some("Bad signature"), c.destructive),
+            SignatureStatus::Unknown => (Some("Signed, could not verify"), c.muted_foreground),
+        };
+        let (summary, body) = details
+            .message
+            .split_once('\n')
+            .map_or((details.message.as_str(), ""), |(s, b)| (s, b.trim()));
+        let short = |oid: &bonsai_git::Oid| oid.as_str().chars().take(7).collect::<String>();
+        let mut people = format!(
+            "{} <{}> · {}",
+            details.author_name,
+            details.author_email,
+            when(details.author_time)
+        );
+        if details.committer_email != details.author_email {
+            people.push_str(" · committed by ");
+            people.push_str(&details.committer_name);
+        }
+        let parents = match details.parents.len() {
+            0 => "Root commit".to_owned(),
+            _ => format!(
+                "Parents {}",
+                details
+                    .parents
+                    .iter()
+                    .map(short)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        };
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .px(px(12.))
+            .py(px(8.))
+            .border_b_1()
+            .border_color(c.border)
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                    .child(summary.to_owned()),
+            )
+            .when(!body.is_empty(), |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(c.muted_foreground)
+                        .child(body.to_owned()),
+                )
+            })
+            .child(div().text_xs().text_color(c.muted_foreground).child(people))
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(
+                        div()
+                            .font_family(theme.fonts.mono.clone())
+                            .child(short(&details.oid)),
+                    )
+                    .child(parents)
+                    .when_some(signature, |this, signature| {
+                        this.child(div().text_color(signature_color).child(signature))
+                    }),
+            )
     }
 
     fn render_message(
@@ -475,6 +577,12 @@ impl Render for DiffPane {
             .flex()
             .flex_col()
             .when(self.target.is_some(), |this| this.child(toolbar))
+            .when_some(
+                self.details
+                    .as_ref()
+                    .filter(|_| matches!(self.target, Some(DiffTarget::Commit(_)))),
+                |this, details| this.child(Self::render_details(details, &theme)),
+            )
             .when_some(self.error.clone(), |this, error| {
                 this.child(
                     div()

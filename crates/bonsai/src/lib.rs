@@ -9,6 +9,7 @@ pub mod commands;
 pub mod composer;
 pub mod confirm;
 pub mod diff_pane;
+pub mod history;
 pub mod http;
 pub mod publish_sheet;
 pub mod purge_sheet;

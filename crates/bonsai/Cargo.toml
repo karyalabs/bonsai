@@ -10,6 +10,7 @@ default-run = "bonsai"
 
 [dependencies]
 bonsai-git = { path = "../bonsai-git" }
+bonsai-graph = { path = "../bonsai-graph" }
 bonsai-keychain = { path = "../bonsai-keychain" }
 bonsai-providers = { path = "../bonsai-providers" }
 # gpuicn pins: keep these four together and move them with `gpuicn update`.

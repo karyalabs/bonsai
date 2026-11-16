@@ -381,6 +381,12 @@ impl ChangesView {
         cx.notify();
     }
 
+    /// Shows the focused change in the diff pane again, such as after the
+    /// History view had it.
+    pub fn refocus(&mut self, cx: &mut Context<Self>) {
+        self.emit_focus(cx);
+    }
+
     fn emit_focus(&mut self, cx: &mut Context<Self>) {
         let (target, title) = self
             .focused_row()

@@ -702,6 +702,7 @@ name = "bonsai"
 version = "0.2.0"
 dependencies = [
  "bonsai-git",
+ "bonsai-graph",
  "bonsai-keychain",
  "bonsai-providers",
  "futures",

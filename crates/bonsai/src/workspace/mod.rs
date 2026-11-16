@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 mod clone;
 
-use bonsai_git::{Git, Head, Repository, Snapshot};
+use bonsai_git::{DiffTarget, Git, Head, Repository, Snapshot};
 pub use clone::{CloneDialog, CloneEvent};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -22,6 +22,7 @@ use crate::{
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     diff_pane::DiffPane,
+    history::{HistoryEvent, HistoryView},
     publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     refs::{RefDialog, RefsEvent, RefsPanel},
@@ -59,7 +60,9 @@ struct RepositoryTab {
     refs: Entity<RefsPanel>,
     sync: Entity<SyncBar>,
     activity: Entity<ActivityPanel>,
+    history: Entity<HistoryView>,
     _events: Subscription,
+    _history_events: Subscription,
     _changes_events: Subscription,
     _refs_events: Subscription,
 }
@@ -230,8 +233,11 @@ impl Workspace {
                 &changes,
                 move |this, _, event: &ChangesEvent, cx| match event {
                     ChangesEvent::Focused(target, title) => {
-                        let _ = diff_target
-                            .update(cx, |diff, cx| diff.show(target.clone(), title.clone(), cx));
+                        if this.section != Section::History {
+                            let _ = diff_target.update(cx, |diff, cx| {
+                                diff.show(target.clone(), title.clone(), cx);
+                            });
+                        }
                     }
                     ChangesEvent::Purge(path) => {
                         this.purge_requested = Some(path.clone());
@@ -240,6 +246,20 @@ impl Workspace {
                 },
             );
             let activity = cx.new(|cx| ActivityPanel::new(model.clone(), cx));
+            let history = cx.new(|cx| HistoryView::new(model.clone(), refs.clone(), cx));
+            let diff_target = diff.downgrade();
+            let history_events =
+                cx.subscribe(&history, move |this, _, event: &HistoryEvent, cx| {
+                    let HistoryEvent::Selected(selected) = event;
+                    if this.section == Section::History {
+                        let (target, title) = selected
+                            .clone()
+                            .map_or((None, SharedString::default()), |(oid, summary)| {
+                                (Some(DiffTarget::Commit(oid)), summary)
+                            });
+                        let _ = diff_target.update(cx, |diff, cx| diff.show(target, title, cx));
+                    }
+                });
             let diff_target = diff.downgrade();
             let refs_events = cx.subscribe(&refs, move |this, _, event: &RefsEvent, cx| {
                 let RefsEvent::ShowDiff(target, title) = event;
@@ -258,7 +278,9 @@ impl Workspace {
                 refs,
                 sync,
                 activity,
+                history,
                 _changes_events: changes_events,
+                _history_events: history_events,
                 _refs_events: refs_events,
                 _events: events,
             });
@@ -886,18 +908,36 @@ impl Workspace {
         cx.notify();
     }
 
+    /// Switches the list pane, and the diff pane to what that section has
+    /// selected.
+    pub fn set_section(&mut self, section: Section, cx: &mut Context<Self>) {
+        if self.section == section {
+            return;
+        }
+        self.section = section;
+        if let Some(tab) = self.tabs.get(self.active) {
+            match section {
+                Section::History => tab.history.update(cx, HistoryView::emit_selection),
+                Section::Changes | Section::Activity => {
+                    tab.changes.update(cx, ChangesView::refocus);
+                }
+            }
+        }
+        cx.notify();
+    }
+
     fn on_changes(&mut self, _: &commands::ShowChanges, _: &mut Window, cx: &mut Context<Self>) {
-        self.section = Section::Changes;
+        self.set_section(Section::Changes, cx);
         cx.notify();
     }
 
     fn on_history(&mut self, _: &commands::ShowHistory, _: &mut Window, cx: &mut Context<Self>) {
-        self.section = Section::History;
+        self.set_section(Section::History, cx);
         cx.notify();
     }
 
     fn on_activity(&mut self, _: &commands::ShowActivity, _: &mut Window, cx: &mut Context<Self>) {
-        self.section = Section::Activity;
+        self.set_section(Section::Activity, cx);
         cx.notify();
     }
 
@@ -907,7 +947,7 @@ impl Workspace {
             tab.activity
                 .update(cx, ActivityPanel::select_latest_failure);
         }
-        self.section = Section::Activity;
+        self.set_section(Section::Activity, cx);
         cx.notify();
     }
 
@@ -915,9 +955,9 @@ impl Workspace {
         if self.welcome {
             return;
         }
-        if let Some(tab) = self.tabs.get(self.active) {
-            self.section = Section::Changes;
-            tab.changes.update(cx, ChangesView::commit);
+        if let Some(changes) = self.tabs.get(self.active).map(|tab| tab.changes.clone()) {
+            self.set_section(Section::Changes, cx);
+            changes.update(cx, ChangesView::commit);
         }
     }
 
@@ -1078,7 +1118,7 @@ impl Workspace {
                     })
                     .selected(self.section == Section::Changes)
                     .on_activate(cx.listener(|this, _, _, cx| {
-                        this.section = Section::Changes;
+                        this.set_section(Section::Changes, cx);
                         cx.notify();
                     })),
             )
@@ -1091,7 +1131,7 @@ impl Workspace {
                     )
                     .selected(self.section == Section::History)
                     .on_activate(cx.listener(|this, _, _, cx| {
-                        this.section = Section::History;
+                        this.set_section(Section::History, cx);
                         cx.notify();
                     })),
             )
@@ -1104,7 +1144,7 @@ impl Workspace {
                     )
                     .selected(self.section == Section::Activity)
                     .on_activate(cx.listener(|this, _, _, cx| {
-                        this.section = Section::Activity;
+                        this.set_section(Section::Activity, cx);
                         cx.notify();
                     })),
             );
@@ -1144,13 +1184,10 @@ impl Workspace {
                 Some(tab) => tab.activity.clone().into_any_element(),
                 None => div().into_any_element(),
             },
-            (Section::History, Some(_), _) => message_panel(
-                LucideIcon::GitGraph,
-                "History",
-                "The commit graph appears here.".into(),
-                cx,
-            )
-            .into_any_element(),
+            (Section::History, Some(_), _) => match self.tabs.get(self.active) {
+                Some(tab) => tab.history.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
         };
         // The Changes view scrolls its own virtualized list.
         div()
