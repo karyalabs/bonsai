@@ -13,8 +13,8 @@ use std::{
 use bonsai_git::Snapshot;
 use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
-    Comment, HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, MergeMethod, Person,
-    Provider, ProviderKind, PullRequest, StateFilter, hosted_repository,
+    Check, CheckState, Comment, HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label,
+    MergeMethod, Person, Provider, ProviderKind, PullRequest, StateFilter, hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -121,6 +121,7 @@ fn availability(snapshot: Option<&Snapshot>, accounts: &[Connected]) -> Availabi
 pub struct PullInfo {
     pub head: String,
     pub head_fork: Option<String>,
+    pub head_sha: Option<String>,
     pub base: String,
 }
 
@@ -156,6 +157,7 @@ impl From<PullRequest> for Item {
             pull: Some(PullInfo {
                 head: p.head,
                 head_fork: p.head_fork,
+                head_sha: p.head_sha,
                 base: p.base,
             }),
         }
@@ -275,6 +277,8 @@ pub struct HostedView {
     started: bool,
     /// Each item's comments, by number, loaded when it is first shown.
     conversations: std::collections::HashMap<u64, Conversation>,
+    /// Each pull request's CI checks, by number, loaded with its comments.
+    checks: std::collections::HashMap<u64, Checks>,
     merge_method: MergeMethod,
     /// The pull request being merged.
     merging: Option<u64>,
@@ -294,6 +298,60 @@ pub enum Conversation {
     Loading,
     Loaded(Vec<Comment>),
     Failed(SharedString),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Checks {
+    Loading,
+    Loaded(Vec<Check>),
+    Failed(SharedString),
+}
+
+/// One line for a set of checks, and the state it stands for: any failure,
+/// else anything pending, else success.
+fn checks_summary(checks: &[Check]) -> (CheckState, String) {
+    let count = |state| checks.iter().filter(|c| c.state == state).count();
+    let (failed, pending, passed) = (
+        count(CheckState::Failure),
+        count(CheckState::Pending),
+        count(CheckState::Success),
+    );
+    let checks_word = |n: usize| if n == 1 { "check" } else { "checks" };
+    if failed > 0 {
+        (
+            CheckState::Failure,
+            format!("{failed} failing {}", checks_word(failed)),
+        )
+    } else if pending > 0 {
+        (
+            CheckState::Pending,
+            format!("{pending} {} running", checks_word(pending)),
+        )
+    } else if passed > 0 {
+        (CheckState::Success, "All checks passed".to_owned())
+    } else {
+        (CheckState::Skipped, "All checks skipped".to_owned())
+    }
+}
+
+fn check_icon(state: CheckState) -> LucideIcon {
+    match state {
+        CheckState::Success => LucideIcon::CircleCheck,
+        CheckState::Failure => LucideIcon::CircleX,
+        CheckState::Pending => LucideIcon::CircleDashed,
+        CheckState::Skipped => LucideIcon::CircleMinus,
+    }
+}
+
+fn check_color(state: CheckState, cx: &App) -> gpui_kit::Hsla {
+    let c = &UiTheme::read(cx).colors;
+    match state {
+        CheckState::Success => c.success,
+        CheckState::Failure => c.destructive,
+        CheckState::Pending => c.warning,
+        CheckState::Skipped => c.muted_foreground,
+    }
+    .into()
 }
 
 const MERGE_METHODS: [(MergeMethod, &str, &str); 3] = [
@@ -326,6 +384,7 @@ impl HostedView {
             generation: 0,
             started: false,
             conversations: std::collections::HashMap::new(),
+            checks: std::collections::HashMap::new(),
             merge_method: MergeMethod::Merge,
             merging: None,
             action_error: None,
@@ -418,6 +477,43 @@ impl HostedView {
         self.conversations.get(&number)
     }
 
+    /// A pull request's CI checks, if they have been asked for.
+    #[must_use]
+    pub fn checks(&self, number: u64) -> Option<&Checks> {
+        self.checks.get(&number)
+    }
+
+    /// Loads the selected pull request's checks the first time it is shown.
+    fn load_checks(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected() else {
+            return;
+        };
+        let number = item.number;
+        let Some(sha) = item.pull.as_ref().and_then(|p| p.head_sha.clone()) else {
+            return;
+        };
+        if self.checks.contains_key(&number) {
+            return;
+        }
+        let Ok((target, api, provider)) = self.session() else {
+            return;
+        };
+        self.checks.insert(number, Checks::Loading);
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider.checks(&api, &target.full_name, &sha).await;
+            let _ = this.update(cx, |this, cx| {
+                this.checks.insert(
+                    number,
+                    match result {
+                        Ok(checks) => Checks::Loaded(checks),
+                        Err(error) => Checks::Failed(error.to_string().into()),
+                    },
+                );
+                cx.notify();
+            });
+        }));
+    }
+
     pub fn set_merge_method(&mut self, method: MergeMethod, cx: &mut Context<Self>) {
         self.merge_method = method;
         cx.notify();
@@ -444,6 +540,7 @@ impl HostedView {
 
     /// Loads the selected item's comments the first time it is shown.
     pub fn load_conversation(&mut self, cx: &mut Context<Self>) {
+        self.load_checks(cx);
         let Some(number) = self.selected else {
             return;
         };
@@ -1037,6 +1134,66 @@ impl HostedView {
                     ),
                 )
         });
+        let checks_box = match this.checks(item.number) {
+            Some(Checks::Loaded(checks)) if !checks.is_empty() => {
+                let (state, summary) = checks_summary(checks);
+                let mut list = div()
+                    .flex()
+                    .flex_col()
+                    .p(px(10.))
+                    .gap(px(6.))
+                    .rounded(px(8.))
+                    .border_1()
+                    .border_color(c.border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .text_sm()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(
+                                lucide(check_icon(state))
+                                    .size(px(16.))
+                                    .text_color(check_color(state, cx)),
+                            )
+                            .child(summary),
+                    );
+                for (i, check) in checks.iter().enumerate() {
+                    let url = check.url.clone();
+                    list = list.child(
+                        div()
+                            .id(("hosted.check", i))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .pl(px(24.))
+                            .text_xs()
+                            .when(url.is_some(), gpui_kit::Styled::cursor_pointer)
+                            .on_click(move |_, _, cx| {
+                                if let Some(url) = &url {
+                                    cx.open_url(url);
+                                }
+                            })
+                            .child(
+                                lucide(check_icon(check.state))
+                                    .size(px(12.))
+                                    .text_color(check_color(check.state, cx)),
+                            )
+                            .child(check.name.clone()),
+                    );
+                }
+                Some(list.into_any_element())
+            }
+            Some(Checks::Failed(error)) => Some(
+                div()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(format!("Couldn't load checks: {error}"))
+                    .into_any_element(),
+            ),
+            _ => None,
+        };
         let mergeable = item.pull.is_some() && item.state == ItemState::Open;
         let merging = this.merging == Some(item.number);
         let merge_method = this.merge_method;
@@ -1045,6 +1202,14 @@ impl HostedView {
             .as_ref()
             .filter(|(n, _)| *n == item.number)
             .map(|(_, e)| e.clone());
+        let (merge_note, merge_color) = match this.checks(item.number) {
+            Some(Checks::Loaded(checks)) if !checks.is_empty() => match checks_summary(checks).0 {
+                CheckState::Failure => ("Some checks failed", c.destructive),
+                CheckState::Pending => ("Checks are still running", c.warning),
+                _ => ("Ready to merge", c.success),
+            },
+            _ => ("Ready to merge", c.success),
+        };
         let merge_row = mergeable.then(|| {
             let selected = MERGE_METHODS
                 .iter()
@@ -1090,9 +1255,9 @@ impl HostedView {
                 .child(
                     lucide(LucideIcon::GitMerge)
                         .size(px(16.))
-                        .text_color(c.success),
+                        .text_color(merge_color),
                 )
-                .child(div().flex_1().text_sm().child("Ready to merge"))
+                .child(div().flex_1().text_sm().child(merge_note))
                 .child(group)
                 .child(
                     Button::new("hosted.merge")
@@ -1268,6 +1433,7 @@ impl HostedView {
                         )
                     }),
             )
+            .children(checks_box)
             .children(merge_row)
             .when_some(action_error, |this, error| {
                 this.child(div().text_xs().text_color(c.destructive).child(error))

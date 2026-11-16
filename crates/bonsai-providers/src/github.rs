@@ -6,10 +6,10 @@ use serde::Deserialize;
 use serde_json::json;
 
 use crate::{
-    Account, BoxFuture, Capabilities, Comment, Error, HttpClient, Issue, ItemKind, ItemQuery,
-    ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
-    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result,
-    StateFilter, form_encode, percent_encode,
+    Account, BoxFuture, Capabilities, Check, CheckState, Comment, Error, HttpClient, Issue,
+    ItemKind, ItemQuery, ItemState, Label, MergeMethod, NewIssue, NewPullRequest, NewRepository,
+    Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request,
+    Response, Result, StateFilter, form_encode, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -592,6 +592,40 @@ impl<C: HttpClient> Provider for GitHub<C> {
         Box::pin(self.open_issue(token, full_name, new))
     }
 
+    fn checks<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        sha: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Check>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/commits/{}/check-runs?per_page=100",
+                self.repo_url(full_name)?,
+                percent_encode(sha)
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let runs: CheckRuns = self.parse(&response.body)?;
+            Ok(runs
+                .check_runs
+                .into_iter()
+                .map(|run| Check {
+                    state: match (run.status.as_str(), run.conclusion.as_deref()) {
+                        ("completed", Some("success")) => CheckState::Success,
+                        (
+                            "completed",
+                            Some("failure" | "timed_out" | "action_required" | "startup_failure"),
+                        ) => CheckState::Failure,
+                        ("completed", _) => CheckState::Skipped,
+                        _ => CheckState::Pending,
+                    },
+                    name: run.name,
+                    url: run.html_url,
+                })
+                .collect())
+        })
+    }
+
     fn add_comment<'a>(
         &'a self,
         token: &'a str,
@@ -743,6 +777,19 @@ impl LabelBody {
 }
 
 #[derive(Deserialize)]
+struct CheckRuns {
+    check_runs: Vec<CheckRun>,
+}
+
+#[derive(Deserialize)]
+struct CheckRun {
+    name: String,
+    status: String,
+    conclusion: Option<String>,
+    html_url: Option<String>,
+}
+
+#[derive(Deserialize)]
 struct FullName {
     full_name: String,
 }
@@ -751,6 +798,7 @@ struct FullName {
 struct PullRef {
     #[serde(rename = "ref")]
     name: String,
+    sha: Option<String>,
     repo: Option<FullName>,
 }
 
@@ -794,6 +842,7 @@ impl Pull {
                 .map(|r| r.full_name)
                 .filter(|r| !r.eq_ignore_ascii_case(full_name)),
             head: self.head.name,
+            head_sha: self.head.sha,
             base: self.base.name,
             labels: self.labels.into_iter().map(LabelBody::into_label).collect(),
             comments: self.comments,

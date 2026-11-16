@@ -394,7 +394,7 @@ mod hosted {
 
     fn pull(number: u64, head: &str, fork: &str, draft: bool) -> String {
         format!(
-            r#"{{"number":{number},"title":"Pull {number}","body":"About **{head}**.","user":{{"login":"grace"}},"state":"open","draft":{draft},"merged_at":null,"head":{{"ref":"{head}","repo":{{"full_name":"{fork}"}}}},"base":{{"ref":"main","repo":{{"full_name":"ada/engine"}}}},"labels":[{{"name":"ui","color":"a2eeef"}}],"created_at":"2026-11-10T09:00:00Z","updated_at":"2026-11-12T09:00:00Z","html_url":"https://github.com/ada/engine/pull/{number}"}}"#
+            r#"{{"number":{number},"title":"Pull {number}","body":"About **{head}**.","user":{{"login":"grace"}},"state":"open","draft":{draft},"merged_at":null,"head":{{"ref":"{head}","sha":"abc{number}","repo":{{"full_name":"{fork}"}}}},"base":{{"ref":"main","repo":{{"full_name":"ada/engine"}}}},"labels":[{{"name":"ui","color":"a2eeef"}}],"created_at":"2026-11-10T09:00:00Z","updated_at":"2026-11-12T09:00:00Z","html_url":"https://github.com/ada/engine/pull/{number}"}}"#
         )
     }
 
@@ -803,6 +803,11 @@ mod hosted {
                     r#"{"user":{"login":"ada","type":"User"},"body":"Looks good","created_at":"2026-11-16T09:00:00Z"}"#.into(),
                 ),
                 (Method::Patch, "/issues/7", r#"{"number":7}"#.into()),
+                (
+                    Method::Get,
+                    "/commits/abc7/check-runs",
+                    r#"{"check_runs":[{"name":"core","status":"completed","conclusion":"success","html_url":null},{"name":"macos","status":"in_progress","conclusion":null,"html_url":null}]}"#.into(),
+                ),
             ],
             sent: std::sync::Mutex::new(Vec::new()),
         });
@@ -821,6 +826,13 @@ mod hosted {
         let view = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
         view.update(cx, HostedView::load_conversation);
         cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let Some(crate::hosted::Checks::Loaded(checks)) = view.checks(7) else {
+                panic!("checks load");
+            };
+            assert_eq!(checks.len(), 2);
+            assert_eq!(checks[1].state, bonsai_providers::CheckState::Pending);
+        });
         let composer = view
             .read_with(cx, |view, _| view.composer().cloned())
             .expect("the comment box is shown");

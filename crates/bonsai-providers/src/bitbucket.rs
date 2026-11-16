@@ -5,10 +5,10 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    Account, BoxFuture, Capabilities, Comment, Error, HttpClient, Issue, ItemKind, ItemQuery,
-    ItemState, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider,
-    ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result,
-    StateFilter, form_encode, oauth::Tokens, percent_encode,
+    Account, BoxFuture, Capabilities, Check, CheckState, Comment, Error, HttpClient, Issue,
+    ItemKind, ItemQuery, ItemState, MergeMethod, NewIssue, NewPullRequest, NewRepository, Page,
+    Person, Provider, ProviderKind, PullRequest, RemoteRepository, RepositoryQuery, Request,
+    Response, Result, StateFilter, form_encode, oauth::Tokens, percent_encode,
 };
 
 const HOST: &str = "bitbucket.org";
@@ -537,6 +537,37 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
         })
     }
 
+    fn checks<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        sha: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Check>>> {
+        Box::pin(async move {
+            let url = format!(
+                "{}/commit/{}/statuses?pagelen=100",
+                repo_url(full_name)?,
+                percent_encode(sha)
+            );
+            let response = self.send(Request::get(url), Some(token)).await?;
+            let page: Values<BuildStatus> = parse(&response.body)?;
+            Ok(page
+                .values
+                .into_iter()
+                .map(|status| Check {
+                    state: match status.state.as_str() {
+                        "SUCCESSFUL" => CheckState::Success,
+                        "FAILED" => CheckState::Failure,
+                        "STOPPED" => CheckState::Skipped,
+                        _ => CheckState::Pending,
+                    },
+                    name: status.name.unwrap_or(status.key),
+                    url: status.url,
+                })
+                .collect())
+        })
+    }
+
     fn add_comment<'a>(
         &'a self,
         token: &'a str,
@@ -598,6 +629,19 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
     fn pull_request_ref(&self, _: u64) -> Option<String> {
         None
     }
+}
+
+#[derive(Deserialize)]
+struct CommitHash {
+    hash: String,
+}
+
+#[derive(Deserialize)]
+struct BuildStatus {
+    key: String,
+    name: Option<String>,
+    state: String,
+    url: Option<String>,
 }
 
 fn item_path(kind: ItemKind) -> &'static str {
@@ -664,6 +708,7 @@ struct FullName {
 #[derive(Deserialize)]
 struct Endpoint {
     branch: Branch,
+    commit: Option<CommitHash>,
     repository: Option<FullName>,
 }
 
@@ -701,6 +746,7 @@ impl Pull {
                 .map(Participant::into_person)
                 .unwrap_or_default(),
             state,
+            head_sha: self.source.commit.map(|c| c.hash),
             head: self.source.branch.name,
             head_fork: self
                 .source
