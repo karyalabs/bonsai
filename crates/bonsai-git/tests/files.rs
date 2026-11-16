@@ -73,3 +73,24 @@ fn lists_a_commits_files() {
     );
     assert!(repository.files_at(Some("nope")).is_err());
 }
+
+#[test]
+fn stops_tracking_and_ignores_a_file_but_keeps_it_on_disk() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".env"), "TOKEN=1\n").unwrap();
+    std::fs::write(root.join("main.rs"), "\n").unwrap();
+    run(root, &["add", "--all"]);
+
+    repository.stop_tracking(&[PathBuf::from(".env")]).unwrap();
+    assert_eq!(
+        repository.tracked_files().unwrap(),
+        [PathBuf::from("main.rs")]
+    );
+    assert!(root.join(".env").exists());
+    assert_eq!(
+        std::fs::read_to_string(root.join(".gitignore")).unwrap(),
+        "/.env\n"
+    );
+}

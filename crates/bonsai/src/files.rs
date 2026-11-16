@@ -598,6 +598,18 @@ impl FilesView {
                 }),
         ];
         if at_work_tree {
+            let untrack = path.clone();
+            items.push(
+                MenuItem::new("files.stop-tracking", "Stop Tracking and Ignore")
+                    .icon(LucideIcon::EyeOff)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let path = untrack.clone();
+                            let _ = this.update(cx, |view, cx| view.stop_tracking(path, cx));
+                        }
+                    }),
+            );
             items.push(
                 MenuItem::new("files.reveal", "Reveal in Finder")
                     .icon(LucideIcon::FolderOpen)
@@ -615,6 +627,19 @@ impl FilesView {
                 .on_click(emit(&this, FilesEvent::Purge, &path)),
         );
         items
+    }
+
+    /// Removes `path` from the index and adds it to `.gitignore`, keeping
+    /// the file. Changes shows the staged removal, ready to commit.
+    pub fn stop_tracking(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        let name = format!("Stop tracking {}", path.to_string_lossy());
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.stop_tracking(&[path]),
+                cx,
+            );
+        });
     }
 
     #[must_use]
