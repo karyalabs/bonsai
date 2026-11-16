@@ -3,7 +3,10 @@
 
 use std::path::{Path, PathBuf};
 
-use bonsai_git::{Change, ChangeKind, DiffTarget, EntryStatus, IgnoreRule, Snapshot};
+use bonsai_git::{
+    Change, ChangeKind, DiffTarget, EntryStatus, IgnoreRule, InProgress, OperationAction, Side,
+    Snapshot,
+};
 use gpui_icons::LucideIcon;
 use gpui_kit::{
     AppContext as _, ClipboardItem, Context, ElementId, Entity, EventEmitter,
@@ -430,6 +433,103 @@ impl ChangesView {
         });
     }
 
+    fn resolve_with(&mut self, paths: Vec<PathBuf>, side: Side, cx: &mut Context<Self>) {
+        let name = describe(
+            if side == Side::Ours {
+                "Keep our version of"
+            } else {
+                "Keep their version of"
+            },
+            &paths,
+        );
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.resolve_with(&paths, side),
+                cx,
+            );
+        });
+    }
+
+    /// Continues, skips or aborts the merge, rebase or pick in progress.
+    pub fn resolve_operation(&mut self, action: OperationAction, cx: &mut Context<Self>) {
+        let name = match action {
+            OperationAction::Continue => "Continue",
+            OperationAction::Skip => "Skip",
+            OperationAction::Abort => "Abort",
+        };
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.resolve_operation(action).map(|_| ()),
+                cx,
+            );
+        });
+    }
+
+    fn render_operation(
+        &self,
+        operation: InProgress,
+        conflicts: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = UiTheme::read(cx).clone();
+        let c = &theme.colors;
+        let name = match operation {
+            InProgress::Merge => "Merge",
+            InProgress::Rebase => "Rebase",
+            InProgress::ApplyMailbox => "Applying patches",
+            InProgress::CherryPick => "Cherry-pick",
+            InProgress::Revert => "Revert",
+            InProgress::Bisect => "Bisect",
+        };
+        let detail = if conflicts > 0 {
+            format!(
+                "{name} stopped: resolve {conflicts} conflicted file{}, then continue.",
+                if conflicts == 1 { "" } else { "s" }
+            )
+        } else if operation == InProgress::Bisect {
+            "Bisect in progress.".to_owned()
+        } else {
+            format!("{name} in progress. Every conflict is resolved.")
+        };
+        let mut buttons = div().flex().gap(px(4.));
+        for (action, label, id) in [
+            (OperationAction::Abort, "Abort", "changes.op.abort"),
+            (OperationAction::Skip, "Skip", "changes.op.skip"),
+            (OperationAction::Continue, "Continue", "changes.op.continue"),
+        ] {
+            if !action.applies_to(operation) {
+                continue;
+            }
+            buttons = buttons.child(
+                Button::new(id)
+                    .variant(if action == OperationAction::Continue {
+                        ButtonVariant::Default
+                    } else {
+                        ButtonVariant::Outline
+                    })
+                    .label(label)
+                    .disabled(action == OperationAction::Continue && conflicts > 0)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.resolve_operation(action, cx)),
+                    ),
+            );
+        }
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(8.))
+            .px(px(12.))
+            .py(px(8.))
+            .bg(c.muted)
+            .border_b_1()
+            .border_color(c.border)
+            .child(div().text_sm().child(detail))
+            .child(buttons)
+    }
+
     fn absolute(&self, path: &Path, cx: &gpui_kit::App) -> PathBuf {
         self.model.read(cx).repository().root().join(path)
     }
@@ -446,6 +546,59 @@ impl ChangesView {
             }
         };
         let mut items = Vec::new();
+        if !targets.conflicted.is_empty() {
+            let operation = self.model.read(cx).snapshot().and_then(|s| s.operation);
+            for side in [Side::Ours, Side::Theirs] {
+                let paths = targets.conflicted.clone();
+                items.push(
+                    MenuItem::new(
+                        if side == Side::Ours {
+                            "changes.ours"
+                        } else {
+                            "changes.theirs"
+                        },
+                        side.label(operation),
+                    )
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let paths = paths.clone();
+                            let _ = this.update(cx, |view, cx| view.resolve_with(paths, side, cx));
+                        }
+                    }),
+                );
+            }
+            let paths = targets.conflicted.clone();
+            items.push(
+                MenuItem::new("changes.mark-resolved", "Mark Resolved")
+                    .icon(LucideIcon::Check)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let paths = paths.clone();
+                            let _ = this.update(cx, |view, cx| view.stage(paths, cx));
+                        }
+                    }),
+            );
+            if let [path] = targets.conflicted.as_slice() {
+                let path = path.clone();
+                items.push(
+                    MenuItem::new("changes.open-editor", "Open in Editor")
+                        .icon(LucideIcon::SquarePen)
+                        .on_click({
+                            let this = this.clone();
+                            move |_, _, cx| {
+                                if let Ok(path) =
+                                    this.read_with(cx, |view, cx| view.absolute(&path, cx))
+                                {
+                                    cx.open_with_system(&path);
+                                }
+                            }
+                        }),
+                );
+            }
+            items.push(MenuItem::separator());
+        }
         let stageable = targets.stageable().len();
         items.push(
             MenuItem::new("changes.stage", "Stage")
@@ -746,10 +899,18 @@ impl Render for ChangesView {
                 VirtualListEvent::Activate(_) => view.toggle_selection(cx),
             });
         });
+        let operation = self.model.read(cx).snapshot().and_then(|s| s.operation);
+        let conflicts = self
+            .rows
+            .iter()
+            .filter(|r| r.group == Group::Conflicted && r.change.is_some())
+            .count();
+        let banner = operation.map(|operation| self.render_operation(operation, conflicts, cx));
         div()
             .size_full()
             .flex()
             .flex_col()
+            .children(banner)
             .child(
                 div()
                     .flex()
@@ -959,6 +1120,60 @@ mod tests {
             });
             cx.run_until_parked();
             assert!(!dir.path().join("b.txt").exists());
+        }
+
+        #[gpui_kit::test]
+        fn conflicts_resolve_with_a_side_and_the_merge_continues(cx: &mut TestAppContext) {
+            cx.update(crate::ui::theme::init);
+            let dir = tempfile::tempdir().unwrap();
+            let root = dir.path();
+            let git = Git::locate(None).unwrap();
+            let repository = Repository::init(&git, root, Some("main")).unwrap();
+            let run = |args: &[&str]| {
+                git.run(&git.command(args.iter().copied()).cwd(root))
+                    .unwrap();
+            };
+            for (key, value) in [
+                ("user.name", "Bonsai"),
+                ("user.email", "bonsai@example.com"),
+                ("commit.gpgsign", "false"),
+            ] {
+                run(&["config", key, value]);
+            }
+            std::fs::write(root.join("a.txt"), "base").unwrap();
+            run(&["add", "."]);
+            run(&["commit", "-qm", "base"]);
+            run(&["switch", "-qc", "topic"]);
+            std::fs::write(root.join("a.txt"), "topic").unwrap();
+            run(&["commit", "-qam", "topic"]);
+            run(&["switch", "-q", "main"]);
+            std::fs::write(root.join("a.txt"), "main").unwrap();
+            run(&["commit", "-qam", "main"]);
+            assert_eq!(
+                repository
+                    .merge("topic", bonsai_git::MergeMode::Default)
+                    .unwrap(),
+                bonsai_git::Integration::Conflicts
+            );
+
+            let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+            let view = cx.new(|cx| ChangesView::new(model.clone(), cx));
+            cx.run_until_parked();
+            view.read_with(cx, |view, _| {
+                assert!(view.rows().iter().any(|r| r.group == Group::Conflicted));
+            });
+            view.update(cx, |view, cx| {
+                view.resolve_with(vec![PathBuf::from("a.txt")], Side::Ours, cx);
+            });
+            cx.run_until_parked();
+            assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "main");
+            view.update(cx, |view, cx| {
+                view.resolve_operation(OperationAction::Continue, cx);
+            });
+            cx.run_until_parked();
+            model.read_with(cx, |model, _| {
+                assert_eq!(model.snapshot().unwrap().operation, None);
+            });
         }
     }
 }

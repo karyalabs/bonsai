@@ -6,7 +6,9 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use bonsai_git::{Branch, CheckoutBlocker, Head, Snapshot, is_valid_ref_name};
+use bonsai_git::{
+    Branch, CheckoutBlocker, Head, MergeMode, ResetMode, Snapshot, is_valid_ref_name,
+};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
     AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
@@ -51,6 +53,10 @@ pub enum RefDialog {
     },
     DeleteTag {
         name: String,
+    },
+    /// Reset the current branch to a revision, discarding changes.
+    ResetHard {
+        target: String,
     },
     AddRemote,
     EditRemoteUrl {
@@ -234,6 +240,85 @@ impl RefsPanel {
         });
     }
 
+    /// The current branch's name, or `None` when detached or unborn.
+    fn current_branch(&self, cx: &gpui_kit::App) -> Option<String> {
+        match &self.snapshot(cx)?.head {
+            Head::Branch { name, oid: Some(_) } => Some(name.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn merge(&mut self, revision: String, cx: &mut Context<Self>) {
+        let name = format!("Merge {revision}");
+        self.run(
+            name,
+            move |repository| repository.merge(&revision, MergeMode::Default).map(|_| ()),
+            cx,
+        );
+    }
+
+    pub fn rebase(&mut self, onto: String, cx: &mut Context<Self>) {
+        let name = format!("Rebase onto {onto}");
+        self.run(
+            name,
+            move |repository| repository.rebase(&onto).map(|_| ()),
+            cx,
+        );
+    }
+
+    pub fn reset(&mut self, target: String, mode: ResetMode, cx: &mut Context<Self>) {
+        let name = format!("Reset to {target}");
+        self.run(name, move |repository| repository.reset(&target, mode), cx);
+    }
+
+    /// Merge, rebase and reset items for a revision other than HEAD.
+    fn integrate_items(&self, revision: &str, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let Some(current) = self.current_branch(cx) else {
+            return Vec::new();
+        };
+        if current == revision {
+            return Vec::new();
+        }
+        let this = cx.entity().downgrade();
+        let rev = revision.to_owned();
+        let reset = vec![
+            MenuItem::new("refs.reset.soft", "Soft: keep changes staged").on_click(with(&this, {
+                let rev = rev.clone();
+                move |view, _, cx| view.reset(rev.clone(), ResetMode::Soft, cx)
+            })),
+            MenuItem::new("refs.reset.mixed", "Mixed: keep changes unstaged").on_click(with(
+                &this,
+                {
+                    let rev = rev.clone();
+                    move |view, _, cx| view.reset(rev.clone(), ResetMode::Mixed, cx)
+                },
+            )),
+            MenuItem::new("refs.reset.hard", "Hard: discard changes…").on_click(show(
+                &this,
+                RefDialog::ResetHard {
+                    target: rev.clone(),
+                },
+            )),
+        ];
+        vec![
+            MenuItem::separator(),
+            MenuItem::new("refs.merge", format!("Merge {rev} into {current}"))
+                .icon(LucideIcon::GitMerge)
+                .on_click(with(&this, {
+                    let rev = rev.clone();
+                    move |view, _, cx| view.merge(rev.clone(), cx)
+                })),
+            MenuItem::new("refs.rebase", format!("Rebase {current} onto {rev}"))
+                .icon(LucideIcon::GitPullRequestArrow)
+                .on_click(with(&this, {
+                    let rev = rev.clone();
+                    move |view, _, cx| view.rebase(rev.clone(), cx)
+                })),
+            MenuItem::submenu("refs.reset", format!("Reset {current} to {rev}"), reset)
+                .icon(LucideIcon::RotateCcw),
+        ]
+    }
+
     fn run(
         &self,
         name: String,
@@ -325,6 +410,7 @@ impl RefsPanel {
                 cx,
             ),
             RefDialog::CheckoutBlocked { target, .. } => self.stash_and_checkout(target, cx),
+            RefDialog::ResetHard { target } => self.reset(target, ResetMode::Hard, cx),
             RefDialog::AddRemote => {
                 let url = self.url_value(cx);
                 self.run(
@@ -545,6 +631,8 @@ impl RefsPanel {
                     },
                 )),
         );
+        items.extend(self.integrate_items(&name, cx));
+        items.push(MenuItem::separator());
         items.push(copy_item(name));
         items
     }
@@ -553,7 +641,8 @@ impl RefsPanel {
         let this = cx.entity().downgrade();
         let full = format!("{remote}/{branch}");
         let target = self.remote_checkout(remote, branch, cx);
-        vec![
+        let integrate = self.integrate_items(&full, cx);
+        let mut items = vec![
             MenuItem::new(
                 "refs.remote.checkout",
                 format!("Switch to {}", target.label()),
@@ -583,8 +672,11 @@ impl RefsPanel {
                     branch: branch.to_owned(),
                 },
             )),
-            copy_item(full),
-        ]
+        ];
+        items.extend(integrate);
+        items.push(MenuItem::separator());
+        items.push(copy_item(full));
+        items
     }
 
     fn remote_header_menu(&self, remote: &str, cx: &mut Context<Self>) -> Vec<MenuItem> {
@@ -707,6 +799,8 @@ impl RefsPanel {
                 .icon(LucideIcon::Trash2)
                 .on_click(show(&this, RefDialog::DeleteTag { name: name.clone() })),
         );
+        items.extend(self.integrate_items(&name, cx));
+        items.push(MenuItem::separator());
         items.push(copy_item(name));
         items
     }
@@ -781,6 +875,13 @@ impl RefsPanel {
                 format!("Delete tag {name}?"),
                 "This deletes the local tag only. Remote copies stay.".to_owned(),
                 "Delete",
+                true,
+            ),
+            RefDialog::ResetHard { target } => (
+                format!("Reset {current} to {target}?"),
+                "Every uncommitted change is discarded and commits after it leave the branch. The commits stay in the reflog for a while."
+                    .to_owned(),
+                "Reset and Discard",
                 true,
             ),
             RefDialog::AddRemote => (
