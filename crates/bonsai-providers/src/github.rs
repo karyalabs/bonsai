@@ -7,8 +7,8 @@ use serde_json::json;
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, MergeMethod, NewIssue,
-    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, LineTarget, MergeMethod,
+    NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
     RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
     form_encode, percent_encode,
 };
@@ -649,6 +649,54 @@ impl<C: HttpClient> Provider for GitHub<C> {
                     }
                 })
                 .collect())
+        })
+    }
+
+    fn add_line_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        head_sha: &'a str,
+        target: &'a LineTarget,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<LineComment>> {
+        Box::pin(async move {
+            let (line, side) = match (target.new_line, target.old_line) {
+                (Some(line), _) => (line, "RIGHT"),
+                (None, Some(line)) => (line, "LEFT"),
+                (None, None) => return Err(Error::Rejected("Pick a line to comment on.".into())),
+            };
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{}/pulls/{number}/comments", self.repo_url(full_name)?),
+                        json!({
+                            "body": body,
+                            "commit_id": head_sha,
+                            "path": target.path,
+                            "line": line,
+                            "side": side,
+                        })
+                        .to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            let c: ReviewComment = self.parse(&response.body)?;
+            let left = c.side.as_deref() == Some("LEFT");
+            Ok(LineComment {
+                path: c.path,
+                line: if left { None } else { c.line },
+                old_line: if left { c.line } else { None },
+                comment: CommentBody {
+                    user: c.user,
+                    body: c.body,
+                    created_at: c.created_at,
+                }
+                .into_comment(),
+            })
         })
     }
 

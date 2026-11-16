@@ -805,6 +805,11 @@ mod hosted {
                 (Method::Patch, "/issues/7", r#"{"number":7}"#.into()),
                 (Method::Post, "/pulls/7/reviews", r#"{"id":1}"#.into()),
                 (
+                    Method::Post,
+                    "/pulls/7/comments",
+                    r#"{"path":"src/sync.rs","line":2,"side":"RIGHT","user":{"login":"ada"},"body":"Nice","created_at":"2026-11-16T09:00:00Z"}"#.into(),
+                ),
+                (
                     Method::Get,
                     "/pulls/7/comments",
                     r#"[{"path":"src/sync.rs","line":1,"side":"RIGHT","user":{"login":"grace"},"body":"Why?","created_at":"2026-11-12T09:00:00Z"}]"#.into(),
@@ -854,6 +859,30 @@ mod hosted {
             assert_eq!(files[0].additions, 2);
             assert_eq!(view.line_comments(7)[0].comment.body, "Why?");
         });
+        view.update(cx, |view, cx| {
+            view.set_line_target(
+                Some(bonsai_providers::LineTarget {
+                    path: "src/sync.rs".into(),
+                    old_path: None,
+                    old_line: None,
+                    new_line: Some(2),
+                }),
+                cx,
+            );
+        });
+        let line_composer = view
+            .read_with(cx, |view, _| view.line_composer().cloned())
+            .expect("the line comment box exists");
+        line_composer.update_in(cx, |input, window, cx| input.set_value("Nice", window, cx));
+        view.update_in(cx, HostedView::send_line_comment);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.line_comments(7).len(), 2);
+            assert_eq!(view.line_comments(7)[1].line, Some(2));
+        });
+        let line_sent = client.sent.lock().unwrap().last().unwrap().1.clone();
+        assert_eq!(line_sent["commit_id"], "abc7");
+        assert_eq!(line_sent["line"], 2);
         view.update(cx, |view, cx| view.show_files(false, cx));
         let composer = view
             .read_with(cx, |view, _| view.composer().cloned())
@@ -874,7 +903,7 @@ mod hosted {
             composer.read_with(cx, |input, _| input.value().to_string()),
             ""
         );
-        assert_eq!(client.sent.lock().unwrap()[0].1["body"], "Looks good");
+        assert_eq!(client.sent.lock().unwrap()[1].1["body"], "Looks good");
 
         view.update_in(cx, |view, window, cx| {
             view.review(bonsai_providers::Verdict::Approve, window, cx);
@@ -883,7 +912,7 @@ mod hosted {
         view.read_with(cx, |view, _| {
             assert_eq!(view.reviewed(7), Some(bonsai_providers::Verdict::Approve));
         });
-        assert_eq!(client.sent.lock().unwrap()[1].1["event"], "APPROVE");
+        assert_eq!(client.sent.lock().unwrap()[2].1["event"], "APPROVE");
 
         view.update(cx, HostedView::toggle_open);
         cx.run_until_parked();
@@ -896,7 +925,7 @@ mod hosted {
             assert_eq!(view.selected().unwrap().state, ItemState::Open);
         });
         let sent = client.sent.lock().unwrap();
-        assert_eq!(sent[2].1["state"], "closed");
-        assert_eq!(sent[3].1["state"], "open");
+        assert_eq!(sent[3].1["state"], "closed");
+        assert_eq!(sent[4].1["state"], "open");
     }
 }

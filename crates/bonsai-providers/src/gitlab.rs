@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, MergeMethod, NewIssue,
-    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, LineTarget, MergeMethod,
+    NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
     RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
     form_encode, github::next_link, oauth::Tokens, percent_encode,
 };
@@ -555,6 +555,70 @@ impl<C: HttpClient> Provider for GitLab<C> {
         })
     }
 
+    fn add_line_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        _: &'a str,
+        target: &'a LineTarget,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<LineComment>> {
+        Box::pin(async move {
+            // A position names the merge request's diff by its three commits.
+            let mr_url = format!("{}/merge_requests/{number}", self.project_url(full_name));
+            let response = self.send(Request::get(mr_url.clone()), Some(token)).await?;
+            let refs = self.parse::<DiffRefsBody>(&response.body)?.diff_refs;
+            let mut position = json!({
+                "position_type": "text",
+                "base_sha": refs.base_sha,
+                "start_sha": refs.start_sha,
+                "head_sha": refs.head_sha,
+                "new_path": target.path,
+                "old_path": target.old_path.as_ref().unwrap_or(&target.path),
+            });
+            if let Some(line) = target.new_line {
+                position["new_line"] = json!(line);
+            }
+            if let Some(line) = target.old_line {
+                position["old_line"] = json!(line);
+            }
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{mr_url}/discussions"),
+                        json!({ "body": body, "position": position }).to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            let discussion: Discussion = self.parse(&response.body)?;
+            let note = discussion
+                .notes
+                .into_iter()
+                .next()
+                .ok_or_else(|| Error::Parse {
+                    host: self.host.clone(),
+                    message: "a discussion without notes".to_owned(),
+                })?;
+            Ok(LineComment {
+                path: target.path.clone(),
+                line: target.new_line,
+                old_line: target
+                    .new_line
+                    .is_none()
+                    .then_some(target.old_line)
+                    .flatten(),
+                comment: Comment {
+                    author: note.author.map(User::into_person).unwrap_or_default(),
+                    body: note.body,
+                    created_at: note.created_at,
+                },
+            })
+        })
+    }
+
     fn changed_files<'a>(
         &'a self,
         token: &'a str,
@@ -729,6 +793,19 @@ impl Note {
             created_at: self.created_at,
         }
     }
+}
+
+#[derive(Deserialize)]
+struct DiffRefsBody {
+    diff_refs: DiffRefs,
+}
+
+#[derive(Deserialize)]
+#[allow(clippy::struct_field_names)] // GitLab's names.
+struct DiffRefs {
+    base_sha: String,
+    start_sha: String,
+    head_sha: String,
 }
 
 #[derive(Deserialize)]

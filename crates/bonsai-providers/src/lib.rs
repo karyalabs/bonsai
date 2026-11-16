@@ -18,7 +18,7 @@ pub use oauth::{Pkce, Tokens};
 pub use remote_url::hosted_repository;
 pub use types::{
     Account, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange, Issue,
-    ItemKind, ItemQuery, ItemState, Label, LineComment, MergeMethod, NewIssue, NewPullRequest,
-    NewRepository, Page, Person, Provider, ProviderKind, PullRequest, RemoteRepository,
-    RepositoryQuery, Result, StateFilter, Verdict, count_lines,
+    ItemKind, ItemQuery, ItemState, Label, LineComment, LineTarget, MergeMethod, NewIssue,
+    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    RemoteRepository, RepositoryQuery, Result, StateFilter, Verdict, count_lines,
 };
