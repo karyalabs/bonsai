@@ -294,7 +294,7 @@ impl<C: HttpClient> Provider for GitHub<C> {
 }
 
 /// The URL marked `rel="next"` in a `Link` header.
-fn next_link(link: &str) -> Option<String> {
+pub(crate) fn next_link(link: &str) -> Option<String> {
     link.split(',').find_map(|part| {
         let (url, params) = part.split_once(';')?;
         params
