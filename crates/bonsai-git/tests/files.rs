@@ -40,3 +40,36 @@ fn lists_tracked_files_but_not_untracked_or_ignored_ones() {
             .to_vec()
     );
 }
+
+#[test]
+fn lists_a_commits_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    let root = dir.path();
+    for (key, value) in [
+        ("user.name", "Ada"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        run(root, &["config", key, value]);
+    }
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/old.rs"), "old\n").unwrap();
+    run(root, &["add", "--all"]);
+    run(root, &["commit", "-qm", "first"]);
+    run(root, &["tag", "v1"]);
+    run(root, &["rm", "-q", "src/old.rs"]);
+    std::fs::write(root.join("new.rs"), "new\n").unwrap();
+    run(root, &["add", "--all"]);
+    run(root, &["commit", "-qm", "second"]);
+
+    assert_eq!(
+        repository.files_at(Some("v1")).unwrap(),
+        [PathBuf::from("src/old.rs")]
+    );
+    assert_eq!(
+        repository.files_at(Some("main")).unwrap(),
+        [PathBuf::from("new.rs")]
+    );
+    assert!(repository.files_at(Some("nope")).is_err());
+}

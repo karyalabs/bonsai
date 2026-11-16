@@ -160,6 +160,67 @@ fn files_lists_tracked_files_shows_one_and_offers_its_actions(cx: &mut TestAppCo
 }
 
 #[gpui_kit::test]
+fn files_browses_a_commit_from_history(cx: &mut TestAppContext) {
+    use crate::files::Content;
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap()
+            .stdout_lossy()
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    std::fs::write(path.join("notes.md"), "first\n").unwrap();
+    git(&["add", "--all"]);
+    git(&["commit", "-qm", "first"]);
+    let first = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    git(&["rm", "-q", "notes.md"]);
+    std::fs::write(path.join("later.md"), "later\n").unwrap();
+    git(&["add", "--all"]);
+    git(&["commit", "-qm", "second"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+
+    workspace.update(cx, |w, cx| {
+        w.browse_files(&bonsai_git::Oid::new(first.clone()), cx);
+    });
+    cx.run_until_parked();
+    let files = workspace.read_with(cx, |w, _| {
+        assert_eq!(w.section(), Section::Files);
+        w.files_view().unwrap()
+    });
+    files.read_with(cx, |files, _| {
+        assert_eq!(files.revision().unwrap().label.as_ref(), &first[..7]);
+        assert_eq!(files.paths(), [std::path::PathBuf::from("notes.md")]);
+    });
+    files.update(cx, |files, cx| {
+        files.reveal(std::path::Path::new("notes.md"), cx);
+    });
+    cx.run_until_parked();
+    files.read_with(cx, |files, _| match files.content() {
+        Some(Content::Text { lines, .. }) => assert_eq!(lines.as_slice(), ["first"]),
+        _ => panic!("shows the committed text, not the work tree"),
+    });
+
+    files.update(cx, |files, cx| files.set_revision(None, cx));
+    cx.run_until_parked();
+    files.read_with(cx, |files, _| {
+        assert_eq!(files.paths(), [std::path::PathBuf::from("later.md")]);
+        assert!(matches!(files.content(), Some(Content::Missing)));
+    });
+}
+
+#[gpui_kit::test]
 fn the_command_palette_opens(cx: &mut TestAppContext) {
     let (workspace, cx) = setup(cx, Session::default(), None);
     cx.dispatch_action(commands::ShowCommandPalette);

@@ -11,12 +11,19 @@ impl Repository {
     /// # Errors
     /// When `git ls-files` fails.
     pub fn tracked_files(&self) -> Result<Vec<PathBuf>> {
-        let output = self.git().run(
-            &self
-                .git()
-                .command(["ls-files", "-z", "--full-name"])
-                .cwd(self.root()),
-        )?;
+        self.files_at(None)
+    }
+
+    /// Every file in `rev`'s tree, or in the index for `None`.
+    ///
+    /// # Errors
+    /// When Git can't list them, such as for an unknown revision.
+    pub fn files_at(&self, rev: Option<&str>) -> Result<Vec<PathBuf>> {
+        let args: Vec<&str> = match rev {
+            Some(rev) => vec!["ls-tree", "-r", "-z", "--name-only", "--full-tree", rev],
+            None => vec!["ls-files", "-z", "--full-name"],
+        };
+        let output = self.git().run(&self.git().command(args).cwd(self.root()))?;
         Ok(output
             .stdout
             .split(|&b| b == 0)

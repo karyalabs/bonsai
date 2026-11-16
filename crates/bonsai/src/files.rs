@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use bonsai_git::Oid;
+use bonsai_git::{FileVersion, Oid};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::component::{ActiveTheme as _, Rope, highlighter::SyntaxHighlighter};
 use gpui_kit::{
@@ -26,11 +26,12 @@ use crate::{
         button::{Button, ButtonSize, ButtonVariant},
         context_menu::context_menu,
         input::{Input, InputEvent, InputState},
-        menu::{MenuItem, MenuState},
+        menu::{Menu, MenuItem, MenuState},
         theme::UiTheme,
         tooltip::text_tooltip,
         tree::{Tree, TreeEvent, TreeNode, TreeRow, TreeRowKind, TreeState},
     },
+    workspace::title_bar::ghost_trigger,
 };
 
 /// Files larger than this show a note instead of their text.
@@ -81,9 +82,21 @@ pub enum Content {
     Failed(SharedString),
 }
 
+/// A commit, branch or tag whose files Files shows instead of the work tree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Revision {
+    /// What Git reads, such as a branch name or a commit hash.
+    pub spec: String,
+    /// What the header shows.
+    pub label: SharedString,
+}
+
 pub struct FilesView {
     model: Entity<RepositoryModel>,
     status: ListStatus,
+    /// `None` for the work tree.
+    revision: Option<Revision>,
+    revisions: Entity<MenuState>,
     paths: Arc<Vec<PathBuf>>,
     tree: TreeState,
     filter: Option<(Entity<InputState>, Subscription)>,
@@ -183,11 +196,20 @@ pub fn read_content(absolute: &Path) -> Content {
     if bytes > MAX_BYTES {
         return Content::TooLarge { bytes };
     }
-    let data = match std::fs::read(absolute) {
-        Ok(data) => data,
-        Err(error) => return Content::Failed(error.to_string().into()),
-    };
-    if let Some(format) = image_format(absolute) {
+    match std::fs::read(absolute) {
+        Ok(data) => classify(absolute, data),
+        Err(error) => Content::Failed(error.to_string().into()),
+    }
+}
+
+/// What `data`, the contents of `path`, shows as.
+#[must_use]
+pub fn classify(path: &Path, data: Vec<u8>) -> Content {
+    let bytes = data.len() as u64;
+    if bytes > MAX_BYTES {
+        return Content::TooLarge { bytes };
+    }
+    if let Some(format) = image_format(path) {
         return Content::Image {
             image: Arc::new(Image::from_bytes(format, data)),
             bytes,
@@ -306,8 +328,11 @@ pub fn parse_syntax(path: &Path, lines: &[SharedString]) -> Option<Syntax> {
 impl FilesView {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
-            if matches!(event, RepositoryEvent::SnapshotChanged) && this.status != ListStatus::Idle
-            {
+            if !matches!(event, RepositoryEvent::SnapshotChanged) {
+                return;
+            }
+            this.rebuild_revisions(cx);
+            if this.status != ListStatus::Idle {
                 this.load(cx);
                 this.reload_content(cx);
             }
@@ -316,6 +341,8 @@ impl FilesView {
         Self {
             model,
             status: ListStatus::Idle,
+            revision: None,
+            revisions: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(260.))),
             paths: Arc::default(),
             tree,
             filter: None,
@@ -335,6 +362,7 @@ impl FilesView {
     /// Reads the file list the first time Files opens.
     pub fn activate(&mut self, cx: &mut Context<Self>) {
         if self.status == ListStatus::Idle {
+            self.rebuild_revisions(cx);
             self.load(cx);
         }
     }
@@ -376,7 +404,8 @@ impl FilesView {
             self.status = ListStatus::Loading;
         }
         let repository = self.model.read(cx).repository().clone();
-        let task = cx.background_spawn(async move { repository.tracked_files() });
+        let rev = self.revision.as_ref().map(|r| r.spec.clone());
+        let task = cx.background_spawn(async move { repository.files_at(rev.as_deref()) });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
@@ -471,9 +500,18 @@ impl FilesView {
         if self.content.is_none() {
             self.content = Some(Content::Loading);
         }
-        let absolute = self.model.read(cx).repository().root().join(path);
+        let repository = self.model.read(cx).repository().clone();
+        let absolute = repository.root().join(&path);
+        let rev = self.revision.as_ref().map(|r| r.spec.clone());
         let task = cx.background_spawn(async move {
-            let content = read_content(&absolute);
+            let content = match rev {
+                None => read_content(&absolute),
+                Some(rev) => match repository.file_version(&path, &FileVersion::Commit(rev)) {
+                    Ok(Some(data)) => classify(&absolute, data),
+                    Ok(None) => Content::Missing,
+                    Err(error) => Content::Failed(error.to_string().into()),
+                },
+            };
             let syntax = match &content {
                 Content::Text { lines, .. } => parse_syntax(&absolute, lines).map(Arc::new),
                 _ => None,
@@ -512,7 +550,8 @@ impl FilesView {
             return;
         };
         let model = self.model.clone();
-        let view = cx.new(|cx| BlameView::new(&model, path, None, cx).close_label("Show File"));
+        let rev = self.revision.as_ref().map(|r| Oid::new(r.spec.clone()));
+        let view = cx.new(|cx| BlameView::new(&model, path, rev, cx).close_label("Show File"));
         let events = cx.subscribe(&view, |this, _, event: &BlameEvent, cx| match event {
             BlameEvent::Close => {
                 this.blame = None;
@@ -539,7 +578,8 @@ impl FilesView {
         };
         let copy = path.to_string_lossy().into_owned();
         let reveal = absolute.clone();
-        vec![
+        let at_work_tree = self.revision.is_none();
+        let mut items = vec![
             MenuItem::new("files.blame", "Blame")
                 .icon(LucideIcon::ScrollText)
                 .on_click({
@@ -556,16 +596,108 @@ impl FilesView {
                 .on_click(move |_, _, cx| {
                     cx.write_to_clipboard(ClipboardItem::new_string(copy.clone()));
                 }),
-            MenuItem::new("files.reveal", "Reveal in Finder")
-                .icon(LucideIcon::FolderOpen)
-                .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
-            MenuItem::new("files.open", "Open in Default App")
-                .icon(LucideIcon::ExternalLink)
-                .on_click(move |_, _, cx| cx.open_with_system(&absolute)),
+        ];
+        if at_work_tree {
+            items.push(
+                MenuItem::new("files.reveal", "Reveal in Finder")
+                    .icon(LucideIcon::FolderOpen)
+                    .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
+            );
+            items.push(
+                MenuItem::new("files.open", "Open in Default App")
+                    .icon(LucideIcon::ExternalLink)
+                    .on_click(move |_, _, cx| cx.open_with_system(&absolute)),
+            );
+        }
+        items.push(
             MenuItem::new("files.purge", "Purge from History…")
                 .icon(LucideIcon::Eraser)
                 .on_click(emit(&this, FilesEvent::Purge, &path)),
-        ]
+        );
+        items
+    }
+
+    #[must_use]
+    pub fn revision(&self) -> Option<&Revision> {
+        self.revision.as_ref()
+    }
+
+    /// Shows `revision`'s files, or the work tree's for `None`, keeping
+    /// the selected path when it is there too.
+    pub fn set_revision(&mut self, revision: Option<Revision>, cx: &mut Context<Self>) {
+        if self.revision == revision {
+            self.activate(cx);
+            return;
+        }
+        self.revision = revision;
+        self.status = ListStatus::Loading;
+        self.blame = None;
+        self.content = None;
+        self.syntax = None;
+        self.load(cx);
+        self.reload_content(cx);
+        self.rebuild_menu(cx);
+        self.rebuild_revisions(cx);
+    }
+
+    /// The revision menu: the work tree, then branches and tags.
+    fn rebuild_revisions(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let pick = |revision: Option<Revision>| {
+            let this = this.clone();
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+                let revision = revision.clone();
+                let _ = this.update(cx, |view, cx| view.set_revision(revision, cx));
+            }
+        };
+        let current = self.revision.as_ref().map(|r| r.spec.clone());
+        let mut items = vec![
+            MenuItem::new("files.rev.work-tree", "Work Tree")
+                .icon(LucideIcon::HardDrive)
+                .checked(current.is_none())
+                .on_click(pick(None)),
+        ];
+        if let Some(snapshot) = self.model.read(cx).snapshot() {
+            if !snapshot.branches.is_empty() {
+                items.push(MenuItem::separator());
+                items.push(MenuItem::label("files.rev.branches", "Branches"));
+            }
+            for branch in &snapshot.branches {
+                items.push(
+                    MenuItem::new(
+                        SharedString::from(format!("files.rev.branch.{}", branch.name)),
+                        branch.name.clone(),
+                    )
+                    .icon(LucideIcon::GitBranch)
+                    .checked(current.as_deref() == Some(branch.name.as_str()))
+                    .on_click(pick(Some(Revision {
+                        spec: branch.name.clone(),
+                        label: branch.name.clone().into(),
+                    }))),
+                );
+            }
+            if !snapshot.tags.is_empty() {
+                items.push(MenuItem::separator());
+                items.push(MenuItem::label("files.rev.tags", "Tags"));
+            }
+            for tag in &snapshot.tags {
+                let spec = format!("refs/tags/{}", tag.name);
+                items.push(
+                    MenuItem::new(
+                        SharedString::from(format!("files.rev.tag.{}", tag.name)),
+                        tag.name.clone(),
+                    )
+                    .icon(LucideIcon::Tag)
+                    .checked(current.as_deref() == Some(spec.as_str()))
+                    .on_click(pick(Some(Revision {
+                        spec,
+                        label: tag.name.clone().into(),
+                    }))),
+                );
+            }
+        }
+        self.revisions
+            .update(cx, |menu, cx| menu.set_items(items, cx));
     }
 
     fn rebuild_menu(&mut self, cx: &mut Context<Self>) {
@@ -696,6 +828,12 @@ impl FilesView {
                     "This file is {}. Open it in its default app to read it.",
                     byte_size(bytes)
                 ),
+                &theme,
+            ),
+            Some(Content::Missing) if self.revision.is_some() => message(
+                LucideIcon::FileX,
+                "Not in this revision",
+                "This file isn't in the chosen branch, tag or commit.",
                 &theme,
             ),
             Some(Content::Missing) => message(
@@ -841,15 +979,17 @@ impl FilesView {
                     },
                 ),
             )
-            .child(
-                icon_button(
-                    "files.header.reveal",
-                    LucideIcon::FolderOpen,
-                    "Reveal in Finder",
-                    theme,
+            .when(self.revision.is_none(), |this| {
+                this.child(
+                    icon_button(
+                        "files.header.reveal",
+                        LucideIcon::FolderOpen,
+                        "Reveal in Finder",
+                        theme,
+                    )
+                    .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
                 )
-                .on_click(move |_, _, cx| cx.reveal_path(&reveal)),
-            )
+            })
     }
 
     fn render_text(
@@ -974,6 +1114,11 @@ impl Render for FilesView {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let filter = self.ensure_filter(window, cx);
+        let revision_label: SharedString = self
+            .revision
+            .as_ref()
+            .map_or_else(|| "Work Tree".into(), |r| r.label.clone());
+        let at_revision = self.revision.is_some();
         let body = match &self.status {
             ListStatus::Idle | ListStatus::Loading => div()
                 .p(px(16.))
@@ -1007,6 +1152,34 @@ impl Render for FilesView {
                     .py(px(8.))
                     .border_b_1()
                     .border_color(c.border)
+                    .child(
+                        Menu::new(&self.revisions, "Show files from")
+                            .trigger_style_with(ghost_trigger(&theme, ButtonSize::Sm))
+                            .trigger(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .max_w(px(160.))
+                                    .child(
+                                        lucide(if at_revision {
+                                            LucideIcon::GitCommitHorizontal
+                                        } else {
+                                            LucideIcon::HardDrive
+                                        })
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(c.foreground),
+                                    )
+                                    .child(div().min_w_0().truncate().child(revision_label))
+                                    .child(
+                                        lucide(LucideIcon::ChevronDown)
+                                            .size(px(12.))
+                                            .flex_none()
+                                            .text_color(c.muted_foreground),
+                                    ),
+                            ),
+                    )
                     .child(
                         div()
                             .flex_1()

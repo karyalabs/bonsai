@@ -52,6 +52,8 @@ pub enum HistoryEvent {
     Selected(Option<(Oid, SharedString)>),
     /// Open Edit Commits.
     EditCommits(EditCommits),
+    /// Show this commit's files in Files.
+    BrowseFiles(Oid),
 }
 
 /// An interactive rebase to plan: the commits after `base` (`None`: every
@@ -630,7 +632,18 @@ impl HistoryView {
                 let _ = refs.update(cx, |refs, cx| f(refs, cx));
             }
         };
+        let browse = oid.clone();
         let mut items = vec![
+            MenuItem::new("history.browse", "Browse Files")
+                .icon(LucideIcon::FolderTree)
+                .on_click({
+                    let this = this.clone();
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |_, cx| {
+                            cx.emit(HistoryEvent::BrowseFiles(browse.clone()));
+                        });
+                    }
+                }),
             MenuItem::new("history.copy", "Copy Hash")
                 .icon(LucideIcon::Copy)
                 .on_click({

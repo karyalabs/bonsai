@@ -7,7 +7,7 @@ mod branch_picker;
 mod clone;
 pub(crate) mod title_bar;
 
-use bonsai_git::{DiffTarget, Git, Repository, Snapshot};
+use bonsai_git::{DiffTarget, Git, Oid, Repository, Snapshot};
 pub use branch_picker::{BranchChoice, branch_items, parse_choice};
 pub use clone::{CloneDialog, CloneEvent};
 use gpui_icons::{LucideIcon, lucide};
@@ -27,7 +27,7 @@ use crate::{
     commands::{self, COMMANDS},
     create_pull_sheet::{CreatePullEvent, CreatePullSheet},
     diff_pane::{DiffPane, DiffPaneEvent},
-    files::{FilesEvent, FilesView},
+    files::{FilesEvent, FilesView, Revision},
     history::{EditCommits, HistoryEvent, HistoryView},
     hosted::{HostedEnv, HostedEvent, HostedKind, HostedView},
     new_issue_sheet::{NewIssueEvent, NewIssueSheet},
@@ -354,6 +354,10 @@ impl Workspace {
                         HistoryEvent::EditCommits(request) => {
                             this.rebase_request = Some((history_model.clone(), request.clone()));
                             cx.notify();
+                            return;
+                        }
+                        HistoryEvent::BrowseFiles(oid) => {
+                            this.browse_files(oid, cx);
                             return;
                         }
                     };
@@ -1364,6 +1368,25 @@ impl Workspace {
         };
         *slot = Some((view.clone(), events));
         Some(view)
+    }
+
+    /// Shows `oid`'s files in Files.
+    pub fn browse_files(&mut self, oid: &Oid, cx: &mut Context<Self>) {
+        let Some(files) = self.files_view() else {
+            return;
+        };
+        let label: String = oid.as_str().chars().take(7).collect();
+        files.update(cx, |files, cx| {
+            files.set_revision(
+                Some(Revision {
+                    spec: oid.as_str().to_owned(),
+                    label: label.into(),
+                }),
+                cx,
+            );
+        });
+        self.set_section(Section::Files, cx);
+        cx.notify();
     }
 
     /// The active tab's Files view.
