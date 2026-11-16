@@ -14,8 +14,8 @@ use bonsai_git::Snapshot;
 use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
     ChangedFile, Check, CheckState, Comment, FileChange, HttpClient, Issue, ItemKind, ItemQuery,
-    ItemState, Label, LineComment, MergeMethod, Person, Provider, ProviderKind, PullRequest,
-    StateFilter, Verdict, hosted_repository,
+    ItemState, Label, LineComment, LineTarget, MergeMethod, Person, Provider, ProviderKind,
+    PullRequest, StateFilter, Verdict, hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -284,6 +284,11 @@ pub struct HostedView {
     files: std::collections::HashMap<u64, Files>,
     /// Each pull request's line comments, loaded with its files.
     line_comments: std::collections::HashMap<u64, Vec<LineComment>>,
+    /// The editor for a new line comment, and the line it is for.
+    line_composer: Option<Entity<TextareaState>>,
+    line_target: Option<(u64, LineTarget)>,
+    /// The pull request a line comment is being sent on.
+    posting_line: Option<u64>,
     /// Whether a pull request's detail shows its conversation or its files.
     showing_files: bool,
     merge_method: MergeMethod,
@@ -455,6 +460,9 @@ impl HostedView {
             checks: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
             line_comments: std::collections::HashMap::new(),
+            line_composer: None,
+            line_target: None,
+            posting_line: None,
             showing_files: false,
             merge_method: MergeMethod::Merge,
             merging: None,
@@ -737,6 +745,78 @@ impl HostedView {
             cx.observe(&composer, |_, _, cx| cx.notify()).detach();
             self.composer = Some(composer);
         }
+        if self.line_composer.is_none() {
+            let composer = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .rows(2)
+                    .placeholder("Comment on this line (Markdown)")
+            });
+            cx.observe(&composer, |_, _, cx| cx.notify()).detach();
+            self.line_composer = Some(composer);
+        }
+    }
+
+    /// The new line comment's editor.
+    #[must_use]
+    pub fn line_composer(&self) -> Option<&Entity<TextareaState>> {
+        self.line_composer.as_ref()
+    }
+
+    /// Opens a comment box under a line of the selected pull request's diff,
+    /// or closes it with `None`.
+    pub fn set_line_target(&mut self, target: Option<LineTarget>, cx: &mut Context<Self>) {
+        self.line_target = self.selected.zip(target);
+        self.action_error = None;
+        cx.notify();
+    }
+
+    /// Sends the line composer's text as a comment on the chosen line.
+    pub fn send_line_comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((number, target)), Some(composer)) =
+            (self.line_target.clone(), self.line_composer.clone())
+        else {
+            return;
+        };
+        let body = composer.read(cx).value().trim().to_owned();
+        if body.is_empty() || self.posting_line.is_some() {
+            return;
+        }
+        let Some(sha) = self
+            .items
+            .iter()
+            .find(|i| i.number == number)
+            .and_then(|i| i.pull.as_ref())
+            .and_then(|p| p.head_sha.clone())
+        else {
+            return;
+        };
+        let (repo, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((number, error));
+                cx.notify();
+                return;
+            }
+        };
+        self.posting_line = Some(number);
+        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = provider
+                .add_line_comment(&api, &repo.full_name, number, &sha, &target, &body)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.posting_line = None;
+                match result {
+                    Ok(comment) => {
+                        this.line_comments.entry(number).or_default().push(comment);
+                        this.line_target = None;
+                        composer.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     /// Sends the composer's text as a comment on the selected item, and adds
@@ -1587,7 +1667,7 @@ impl HostedView {
         };
         let showing_files = item.pull.is_some() && this.showing_files;
         let files = if showing_files {
-            this.render_files(item.number, cx)
+            Self::render_files(view, item.number, cx)
         } else {
             div().into_any_element()
         };
@@ -1760,10 +1840,11 @@ impl HostedView {
             .into_any_element()
     }
 
-    fn render_files(&self, number: u64, cx: &App) -> AnyElement {
+    fn render_files(view: &Entity<Self>, number: u64, cx: &App) -> AnyElement {
+        let this = view.read(cx);
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
-        let files = match self.files(number) {
+        let files = match this.files(number) {
             None | Some(Files::Loading) => {
                 return div()
                     .text_sm()
@@ -1815,7 +1896,7 @@ impl HostedView {
                         .text_color(c.destructive)
                         .child(format!("−{}", file.deletions)),
                 );
-            let comments: Vec<&LineComment> = self
+            let comments: Vec<&LineComment> = this
                 .line_comments(number)
                 .iter()
                 .filter(|c| c.path == file.path)
@@ -1844,7 +1925,38 @@ impl HostedView {
                                 here.push(*comment);
                             }
                         }
-                        let row = div().px(px(10.)).whitespace_nowrap();
+                        let target = LineTarget {
+                            path: file.path.clone(),
+                            old_path: file.old_path.clone(),
+                            old_line: old,
+                            new_line: new,
+                        };
+                        let commentable = old.is_some() || new.is_some();
+                        let open_here = this
+                            .line_target
+                            .as_ref()
+                            .is_some_and(|(n, t)| *n == number && *t == target);
+                        let on_click = view.clone();
+                        let row = div()
+                            .id(SharedString::from(format!(
+                                "hosted.line.{i}.{}.{}",
+                                old.unwrap_or(0),
+                                new.unwrap_or(0)
+                            )))
+                            .px(px(10.))
+                            .whitespace_nowrap()
+                            .when(commentable, |row| {
+                                row.cursor_pointer()
+                                    .hover(|row| {
+                                        row.bg(gpui_kit::Hsla::from(c.primary).opacity(0.08))
+                                    })
+                                    .on_click(move |_, _, cx| {
+                                        let target = target.clone();
+                                        on_click.update(cx, |this, cx| {
+                                            this.set_line_target(Some(target), cx);
+                                        });
+                                    })
+                            });
                         let row = if line.starts_with("@@") {
                             row.text_color(c.muted_foreground)
                                 .bg(gpui_kit::Hsla::from(c.muted).opacity(0.5))
@@ -1862,6 +1974,9 @@ impl HostedView {
                         }));
                         for comment in here {
                             lines = lines.child(line_comment_card(comment, &theme));
+                        }
+                        if open_here {
+                            lines = lines.children(Self::render_line_composer(view, &theme, cx));
                         }
                     }
                     if total > PATCH_LINES {
@@ -1927,6 +2042,77 @@ impl HostedView {
             );
         }
         list.into_any_element()
+    }
+}
+
+impl HostedView {
+    fn render_line_composer(
+        view: &Entity<Self>,
+        theme: &UiTheme,
+        cx: &App,
+    ) -> Option<impl IntoElement> {
+        let this = view.read(cx);
+        let composer = this.line_composer.clone()?;
+        let empty = composer.read(cx).value().trim().is_empty();
+        let posting = this.posting_line.is_some();
+        let error = this
+            .line_target
+            .as_ref()
+            .and_then(|(n, _)| this.action_error.as_ref().filter(|(e, _)| e == n))
+            .map(|(_, e)| e.clone());
+        let c = &theme.colors;
+        let cancel = view.clone();
+        let send = view.clone();
+        Some(
+            div()
+                .px(px(10.))
+                .py(px(6.))
+                .font_family(theme.fonts.body.clone())
+                .whitespace_normal()
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .p(px(8.))
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c.border)
+                        .bg(c.background)
+                        .child(Textarea::new(&composer).aria_label("Line comment"))
+                        .when_some(error, |this, error| {
+                            this.child(div().text_xs().text_color(c.destructive).child(error))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .justify_end()
+                                .gap(px(8.))
+                                .child(
+                                    Button::new("hosted.line-comment.cancel")
+                                        .variant(ButtonVariant::Outline)
+                                        .size(ButtonSize::Sm)
+                                        .label("Cancel")
+                                        .on_click(move |_, _, cx| {
+                                            cancel.update(cx, |this, cx| {
+                                                this.set_line_target(None, cx);
+                                            });
+                                        }),
+                                )
+                                .child(
+                                    Button::new("hosted.line-comment.send")
+                                        .size(ButtonSize::Sm)
+                                        .label(if posting { "Commenting…" } else { "Comment" })
+                                        .disabled(empty || posting)
+                                        .on_click(move |_, window, cx| {
+                                            send.update(cx, |this, cx| {
+                                                this.send_line_comment(window, cx);
+                                            });
+                                        }),
+                                ),
+                        ),
+                ),
+        )
     }
 }
 

@@ -219,6 +219,18 @@ pub struct LineComment {
     pub comment: Comment,
 }
 
+/// The line of a pull request's diff a new comment is on.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct LineTarget {
+    pub path: String,
+    /// The path before a rename.
+    pub old_path: Option<String>,
+    /// The old file's line: set for removed and unchanged lines.
+    pub old_line: Option<u32>,
+    /// The new file's line: set for added and unchanged lines.
+    pub new_line: Option<u32>,
+}
+
 /// What a review says about a pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Verdict {
@@ -461,6 +473,18 @@ pub trait Provider: Send + Sync {
         full_name: &'a str,
         number: u64,
     ) -> BoxFuture<'a, Result<Vec<LineComment>>>;
+
+    /// Comments on one line of a pull request's diff at `head_sha`, its
+    /// head commit.
+    fn add_line_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        head_sha: &'a str,
+        target: &'a LineTarget,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<LineComment>>;
 
     /// The files a pull request changes, the first 100.
     fn changed_files<'a>(

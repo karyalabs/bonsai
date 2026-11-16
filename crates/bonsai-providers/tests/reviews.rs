@@ -647,3 +647,97 @@ fn reads_line_comments_on_each_provider() {
     assert_eq!(comments.len(), 1);
     assert_eq!((comments[0].line, comments[0].old_line), (None, Some(3)));
 }
+
+#[test]
+fn comments_on_lines_on_each_provider() {
+    use bonsai_providers::LineTarget;
+    let added = LineTarget {
+        path: "src/a.rs".into(),
+        old_path: None,
+        old_line: None,
+        new_line: Some(12),
+    };
+    let removed = LineTarget {
+        path: "src/a.rs".into(),
+        old_path: None,
+        old_line: Some(4),
+        new_line: None,
+    };
+    let github_client = Recorded::new(vec![(
+        Method::Post,
+        "https://api.github.com/repos/ada/engine/pulls/7/comments",
+        json(
+            201,
+            r#"{"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Keep this","created_at":"2026-11-16T09:00:00Z"}"#,
+        ),
+    )]);
+    let comment = block_on(GitHub::new(&github_client).add_line_comment(
+        "t",
+        "ada/engine",
+        7,
+        "abc",
+        &removed,
+        "Keep this",
+    ))
+    .unwrap();
+    assert_eq!(comment.old_line, Some(4));
+    let sent: serde_json::Value =
+        serde_json::from_slice(&github_client.requests()[0].body).unwrap();
+    assert_eq!(sent["side"], "LEFT");
+    assert_eq!(sent["commit_id"], "abc");
+
+    let gitlab_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4",
+            json(
+                200,
+                r#"{"iid":4,"diff_refs":{"base_sha":"b1","start_sha":"s1","head_sha":"h1"}}"#,
+            ),
+        ),
+        (
+            Method::Post,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions",
+            json(
+                201,
+                r#"{"notes":[{"body":"Nice","system":false,"author":{"username":"ada"},"created_at":"2026-11-16T09:00:00Z"}]}"#,
+            ),
+        ),
+    ]);
+    let comment = block_on(GitLab::new(&gitlab_client).add_line_comment(
+        "t",
+        "team/engine",
+        4,
+        "",
+        &added,
+        "Nice",
+    ))
+    .unwrap();
+    assert_eq!(comment.line, Some(12));
+    let sent: serde_json::Value =
+        serde_json::from_slice(&gitlab_client.requests()[1].body).unwrap();
+    assert_eq!(sent["position"]["head_sha"], "h1");
+    assert_eq!(sent["position"]["new_line"], 12);
+    assert!(sent["position"].get("old_line").is_none());
+
+    let bitbucket_client = Recorded::new(vec![(
+        Method::Post,
+        "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments",
+        json(
+            201,
+            r#"{"user":{"display_name":"Ada Lovelace"},"content":{"raw":"Hm"},"created_on":"2026-11-16T09:00:00Z","inline":{"path":"src/a.rs","to":12}}"#,
+        ),
+    )]);
+    block_on(Bitbucket::new(&bitbucket_client).add_line_comment(
+        "t",
+        "analytical/engine",
+        12,
+        "",
+        &added,
+        "Hm",
+    ))
+    .unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&bitbucket_client.requests()[0].body).unwrap();
+    assert_eq!(sent["inline"]["to"], 12);
+}

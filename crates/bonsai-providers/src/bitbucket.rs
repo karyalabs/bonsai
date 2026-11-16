@@ -6,8 +6,8 @@ use serde_json::{Value, json};
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, LineComment, MergeMethod, NewIssue,
-    NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
+    HttpClient, Issue, ItemKind, ItemQuery, ItemState, LineComment, LineTarget, MergeMethod,
+    NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
     RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
     form_encode, oauth::Tokens, percent_encode,
 };
@@ -596,6 +596,46 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
                     })
                 })
                 .collect())
+        })
+    }
+
+    fn add_line_comment<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        _: &'a str,
+        target: &'a LineTarget,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<LineComment>> {
+        Box::pin(async move {
+            let mut inline = json!({ "path": target.path });
+            match (target.new_line, target.old_line) {
+                (Some(line), _) => inline["to"] = json!(line),
+                (None, Some(line)) => inline["from"] = json!(line),
+                (None, None) => return Err(Error::Rejected("Pick a line to comment on.".into())),
+            }
+            let response = self
+                .send(
+                    Request::post(
+                        format!("{}/pullrequests/{number}/comments", repo_url(full_name)?),
+                        json!({ "content": { "raw": body }, "inline": inline }).to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            let comment: CommentBody = parse(&response.body)?;
+            Ok(LineComment {
+                path: target.path.clone(),
+                line: target.new_line,
+                old_line: target
+                    .new_line
+                    .is_none()
+                    .then_some(target.old_line)
+                    .flatten(),
+                comment: comment.into_comment(),
+            })
         })
     }
 
