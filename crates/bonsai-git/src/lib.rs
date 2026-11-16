@@ -11,6 +11,7 @@ mod clone;
 mod commit;
 mod diff;
 mod error;
+mod files;
 mod integrate;
 mod log;
 mod patch;

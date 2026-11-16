@@ -52,6 +52,8 @@ pub struct BlameView {
     /// The commit under the pointer; its lines are highlighted.
     hovered: Option<usize>,
     scroll: UniformListScrollHandle,
+    /// The header button that closes Blame.
+    close_label: &'static str,
 }
 
 impl EventEmitter<BlameEvent> for BlameView {}
@@ -91,7 +93,15 @@ impl BlameView {
             blame: Arc::default(),
             hovered: None,
             scroll: UniformListScrollHandle::new(),
+            close_label: "Show Diff",
         }
+    }
+
+    /// Names the header button that closes Blame, "Show Diff" by default.
+    #[must_use]
+    pub fn close_label(mut self, label: &'static str) -> Self {
+        self.close_label = label;
+        self
     }
 
     #[must_use]
@@ -163,15 +173,17 @@ impl BlameView {
                         .text_xs()
                         .text_color(c.muted_foreground)
                         .child(format!(
-                            "· {} lines, {} commits, {} {}",
-                            self.blame.lines.len(),
-                            self.blame
-                                .commits
-                                .iter()
-                                .filter(|commit| !commit.is_uncommitted())
-                                .count(),
-                            authors,
-                            if authors == 1 { "author" } else { "authors" }
+                            "· {}, {}, {}",
+                            plural(self.blame.lines.len(), "line"),
+                            plural(
+                                self.blame
+                                    .commits
+                                    .iter()
+                                    .filter(|commit| !commit.is_uncommitted())
+                                    .count(),
+                                "commit"
+                            ),
+                            plural(authors, "author")
                         )),
                 )
             })
@@ -180,7 +192,7 @@ impl BlameView {
                 Button::new("blame.close")
                     .variant(ButtonVariant::Ghost)
                     .size(ButtonSize::Sm)
-                    .label("Show Diff")
+                    .label(self.close_label)
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(BlameEvent::Close))),
             )
     }
@@ -349,6 +361,15 @@ impl BlameView {
                     .child(short_ago(&when)),
             )
             .into_any_element()
+    }
+}
+
+/// "1 line", "2 lines".
+fn plural(count: usize, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
     }
 }
 

@@ -27,6 +27,7 @@ use crate::{
     commands::{self, COMMANDS},
     create_pull_sheet::{CreatePullEvent, CreatePullSheet},
     diff_pane::{DiffPane, DiffPaneEvent},
+    files::{FilesEvent, FilesView},
     history::{EditCommits, HistoryEvent, HistoryView},
     hosted::{HostedEnv, HostedEvent, HostedKind, HostedView},
     new_issue_sheet::{NewIssueEvent, NewIssueSheet},
@@ -58,6 +59,7 @@ use crate::{
 pub enum Section {
     Changes,
     History,
+    Files,
     Activity,
     PullRequests,
     Issues,
@@ -91,6 +93,7 @@ struct RepositoryTab {
     sync: Entity<SyncBar>,
     activity: Entity<ActivityPanel>,
     history: Entity<HistoryView>,
+    files: Entity<FilesView>,
     /// Built the first time their section opens.
     pulls: Option<(Entity<HostedView>, Subscription)>,
     issues: Option<(Entity<HostedView>, Subscription)>,
@@ -99,6 +102,7 @@ struct RepositoryTab {
     _changes_events: Subscription,
     _refs_events: Subscription,
     _diff_events: Subscription,
+    _files_events: Subscription,
 }
 
 pub struct Workspace {
@@ -397,6 +401,24 @@ impl Workspace {
                 let _ = history_target.update(cx, |history, cx| history.reveal(oid, cx));
                 this.set_section(Section::History, cx);
             });
+            let files = cx.new(|cx| FilesView::new(model.clone(), cx));
+            let files_history = history.downgrade();
+            let files_events = cx.subscribe(&files, move |this, _, event: &FilesEvent, cx| {
+                match event {
+                    FilesEvent::Purge(path) => this.purge_requested = Some(path.clone()),
+                    FilesEvent::History(path) => {
+                        let search = format!("path:{}", path.to_string_lossy());
+                        let _ =
+                            files_history.update(cx, |history, cx| history.set_search(&search, cx));
+                        this.set_section(Section::History, cx);
+                    }
+                    FilesEvent::ShowCommit(oid) => {
+                        let _ = files_history.update(cx, |history, cx| history.reveal(oid, cx));
+                        this.set_section(Section::History, cx);
+                    }
+                }
+                cx.notify();
+            });
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -407,12 +429,14 @@ impl Workspace {
                 sync,
                 activity,
                 history,
+                files,
                 pulls: None,
                 issues: None,
                 _changes_events: changes_events,
                 _history_events: history_events,
                 _refs_events: refs_events,
                 _diff_events: diff_events,
+                _files_events: files_events,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -1272,6 +1296,7 @@ impl Workspace {
                 Section::Changes | Section::Activity => {
                     tab.changes.update(cx, ChangesView::refocus);
                 }
+                Section::Files => tab.files.update(cx, FilesView::activate),
                 Section::PullRequests | Section::Issues => {}
             }
         }
@@ -1341,6 +1366,12 @@ impl Workspace {
         Some(view)
     }
 
+    /// The active tab's Files view.
+    #[must_use]
+    pub fn files_view(&self) -> Option<Entity<FilesView>> {
+        self.tabs.get(self.active).map(|tab| tab.files.clone())
+    }
+
     /// The active tab's view for the current section, if it is built.
     #[must_use]
     pub fn hosted_view(&self) -> Option<Entity<HostedView>> {
@@ -1359,6 +1390,11 @@ impl Workspace {
 
     fn on_history(&mut self, _: &commands::ShowHistory, _: &mut Window, cx: &mut Context<Self>) {
         self.set_section(Section::History, cx);
+        cx.notify();
+    }
+
+    fn on_files(&mut self, _: &commands::ShowFiles, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(Section::Files, cx);
         cx.notify();
     }
 
@@ -1609,6 +1645,19 @@ impl Workspace {
                     })),
             )
             .child(
+                SidebarItem::new("workspace.section.files", "Files")
+                    .icon(
+                        lucide(LucideIcon::FolderTree)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    )
+                    .selected(self.section == Section::Files)
+                    .on_activate(cx.listener(|this, _, _, cx| {
+                        this.set_section(Section::Files, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
                 SidebarItem::new("workspace.section.activity", "Activity")
                     .icon(
                         lucide(LucideIcon::ScrollText)
@@ -1697,6 +1746,10 @@ impl Workspace {
                 Some(tab) => tab.history.clone().into_any_element(),
                 None => div().into_any_element(),
             },
+            (Section::Files, Some(_), _) => match self.tabs.get(self.active) {
+                Some(tab) => tab.files.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
             (Section::PullRequests | Section::Issues, Some(_), _) => match self.hosted_view() {
                 Some(view) => view.into_any_element(),
                 None => div().into_any_element(),
@@ -1719,6 +1772,10 @@ impl Workspace {
             .bg(theme.colors.background)
             .map(|this| match self.hosted_view() {
                 Some(view) => this.child(HostedView::render_detail(&view, cx)),
+                None if self.section == Section::Files => match self.tabs.get(self.active) {
+                    Some(tab) => this.child(FilesView::render_detail(&tab.files, cx)),
+                    None => this,
+                },
                 None => match self.tabs.get(self.active) {
                     Some(tab) => this.child(tab.diff.clone()),
                     None => this,
@@ -2292,6 +2349,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_toggle_sidebar))
             .on_action(cx.listener(Self::on_changes))
             .on_action(cx.listener(Self::on_history))
+            .on_action(cx.listener(Self::on_files))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_commit_and_push))

@@ -104,6 +104,62 @@ fn keyboard_commands_switch_tabs_sections_and_close(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn files_lists_tracked_files_shows_one_and_offers_its_actions(cx: &mut TestAppContext) {
+    use crate::files::{Content, FilesEvent};
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap();
+    };
+    std::fs::create_dir_all(path.join("src")).unwrap();
+    std::fs::write(path.join("src/main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(path.join(".env"), "TOKEN=1\n").unwrap();
+    git(&["add", "--all"]);
+    std::fs::write(path.join("untracked.txt"), "no\n").unwrap();
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+
+    cx.dispatch_action(commands::ShowFiles);
+    cx.run_until_parked();
+    let files = workspace.read_with(cx, |w, _| {
+        assert_eq!(w.section(), Section::Files);
+        w.files_view().unwrap()
+    });
+    files.read_with(cx, |files, _| {
+        assert_eq!(
+            files.paths(),
+            [".env", "src/main.rs"].map(std::path::PathBuf::from)
+        );
+    });
+
+    files.update(cx, |files, cx| {
+        files.reveal(std::path::Path::new("src/main.rs"), cx);
+    });
+    cx.run_until_parked();
+    files.read_with(cx, |files, _| match files.content() {
+        Some(Content::Text { lines, .. }) => assert_eq!(lines.as_slice(), ["fn main() {}"]),
+        _ => panic!("shows the text"),
+    });
+    files.update(cx, crate::files::FilesView::toggle_blame);
+    files.read_with(cx, |files, _| assert!(files.blame_view().is_some()));
+
+    files.update(cx, |_, cx| {
+        cx.emit(FilesEvent::History("src/main.rs".into()));
+    });
+    cx.run_until_parked();
+    workspace.read_with(cx, |w, _| assert_eq!(w.section(), Section::History));
+
+    files.update(cx, |_, cx| cx.emit(FilesEvent::Purge(".env".into())));
+    cx.run_until_parked();
+    workspace.read_with(cx, |w, _| assert!(w.purge.is_some(), "opens Purge"));
+}
+
+#[gpui_kit::test]
 fn the_command_palette_opens(cx: &mut TestAppContext) {
     let (workspace, cx) = setup(cx, Session::default(), None);
     cx.dispatch_action(commands::ShowCommandPalette);
@@ -130,6 +186,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.toggle-sidebar",
         "view.changes",
         "view.history",
+        "view.files",
         "view.activity",
         "view.pull-requests",
         "view.issues",
