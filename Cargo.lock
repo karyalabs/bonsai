@@ -740,6 +740,12 @@ dependencies = [
 [[package]]
 name = "bonsai-providers"
 version = "0.2.0"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
 
 [[package]]
 name = "borsh"
