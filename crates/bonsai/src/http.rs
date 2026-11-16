@@ -54,6 +54,10 @@ fn config(request: &Request) -> Result<String, String> {
         "show-error".to_owned(),
         "include".to_owned(),
         "max-time = 60".to_owned(),
+        // Follow redirects, such as Bitbucket's diffs. curl drops the
+        // Authorization header if a redirect leaves the host.
+        "location".to_owned(),
+        "max-redirs = 5".to_owned(),
         "proto = \"=https,http\"".to_owned(),
         // No Expect: 100-continue round trip.
         "header = \"Expect:\"".to_owned(),
@@ -93,8 +97,11 @@ fn parse(output: &[u8]) -> Result<Response, String> {
             .and_then(|line| line.split_whitespace().nth(1))
             .and_then(|code| code.parse().ok())
             .ok_or("The response had no status.")?;
-        // Interim responses (100 Continue) come before the real one.
-        if (100..200).contains(&status) {
+        // Interim responses (100 Continue) and followed redirects come
+        // before the real one.
+        if (100..200).contains(&status)
+            || ((300..400).contains(&status) && body.starts_with(b"HTTP/"))
+        {
             rest = body;
             continue;
         }
@@ -277,6 +284,43 @@ mod tests {
     }
 
     #[test]
+    fn follows_redirects_on_the_same_host() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for reply in [
+                "HTTP/1.1 302 Found\r\nLocation: /diff/x\r\nContent-Length: 0\r\n\r\n",
+                "HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ndiff",
+            ] {
+                let (stream, _) = listener.accept().unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut head = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    head.push(line.trim().to_owned());
+                }
+                let mut stream = stream;
+                stream.write_all(reply.as_bytes()).unwrap();
+                seen.push(head);
+            }
+            seen
+        });
+        let request = Request::get(format!("http://127.0.0.1:{port}/pullrequests/1/diff"))
+            .header("Authorization", "Bearer t");
+        let response = futures::executor::block_on(CurlClient::default().send(request)).unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"diff");
+        let seen = server.join().unwrap();
+        assert!(seen[1][0].starts_with("GET /diff/x"));
+        assert!(seen[1].iter().any(|h| h == "Authorization: Bearer t"));
+    }
+
+    #[test]
     fn reports_connection_failures() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -286,6 +330,18 @@ mod tests {
         )
         .unwrap_err();
         assert_ne!(error, "");
+    }
+
+    #[test]
+    fn skips_followed_redirects() {
+        let response = parse(
+            b"HTTP/2 302 \r\nlocation: /diff/x\r\n\r\nHTTP/2 200 \r\ncontent-type: text/plain\r\n\r\ndiff --git",
+        )
+        .unwrap();
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, b"diff --git");
+        // An unfollowed redirect is the answer.
+        assert_eq!(parse(b"HTTP/2 304 \r\n\r\n").unwrap().status, 304);
     }
 
     #[test]
