@@ -29,6 +29,12 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+    #[error("{message}{}", backup_note(.backup.as_deref()))]
+    Purge {
+        message: String,
+        /// The safety backup, when one was written before the failure.
+        backup: Option<PathBuf>,
+    },
     #[error("Unexpected output from Git: {0}")]
     Parse(String),
 }
@@ -44,6 +50,15 @@ impl Error {
             _ => None,
         }
     }
+}
+
+fn backup_note(backup: Option<&std::path::Path>) -> String {
+    backup.map_or_else(String::new, |path| {
+        format!(
+            "\n\nThe original history is saved in {}. Restore it from the purge sheet.",
+            path.display()
+        )
+    })
 }
 
 fn failure_message(record: &CommandRecord) -> String {

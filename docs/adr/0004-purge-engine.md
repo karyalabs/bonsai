@@ -44,3 +44,18 @@ commit and object while the file stayed on disk.
   fixture tests (merges, tags, renames off, non-UTF-8 paths, submodules).
 - Signed commits lose their signatures, and commit hashes change; the UI must
   say so before the user confirms.
+
+## Implementation notes (2026-11-16)
+
+- The scan uses path-limited `git log --full-history --no-merges` with
+  `:(literal)` and `:(glob)` pathspecs instead of gix; the stream filter and
+  the final verification match paths in Rust with the same rules.
+- Remote-tracking refs are rewritten with the branches, so the old objects
+  can be pruned. A later fetch brings them back until the remote is
+  force-pushed, which the purge sheet must say.
+- Stash entries built on history that has the paths are dropped, after
+  being saved in the backup bundle under temporary `refs/bonsai/purge-stash/*`
+  refs. Expiring reflogs empties the stash, so the other entries are stored
+  again afterwards. Restoring puts the dropped entries back.
+- The export is held in memory; with `--no-data` it is a few hundred bytes
+  per commit.
