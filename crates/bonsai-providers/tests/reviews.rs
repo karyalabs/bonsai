@@ -598,3 +598,52 @@ fn approves_and_requests_changes_on_each_provider() {
     .unwrap();
     assert!(bitbucket_client.finished());
 }
+
+#[test]
+fn reads_line_comments_on_each_provider() {
+    let github_client = Recorded::new(vec![(
+        Method::Get,
+        "https://api.github.com/repos/ada/engine/pulls/7/comments?per_page=100",
+        json(
+            200,
+            r#"[{"path":"src/a.rs","line":12,"side":"RIGHT","user":{"login":"grace"},"body":"Rename?","created_at":"2026-11-12T09:00:00Z"},
+                {"path":"src/a.rs","line":4,"side":"LEFT","user":{"login":"ada"},"body":"Why remove?","created_at":"2026-11-12T09:00:00Z"},
+                {"path":"src/b.rs","line":null,"side":"RIGHT","user":{"login":"ada"},"body":"Outdated","created_at":"2026-11-12T09:00:00Z"}]"#,
+        ),
+    )]);
+    let comments =
+        block_on(GitHub::new(&github_client).line_comments("t", "ada/engine", 7)).unwrap();
+    assert_eq!((comments[0].line, comments[0].old_line), (Some(12), None));
+    assert_eq!((comments[1].line, comments[1].old_line), (None, Some(4)));
+    assert_eq!((comments[2].line, comments[2].old_line), (None, None));
+
+    let gitlab_client = Recorded::new(vec![(
+        Method::Get,
+        "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4/discussions?per_page=100",
+        json(
+            200,
+            r#"[{"notes":[{"body":"Looks fine","system":false,"author":{"username":"ada"},"created_at":"2026-11-12T09:00:00Z"}]},
+                {"notes":[{"body":"Off by one","system":false,"author":{"username":"grace"},"created_at":"2026-11-12T09:00:00Z",
+                           "position":{"old_path":"a.rs","new_path":"a.rs","old_line":null,"new_line":7}}]}]"#,
+        ),
+    )]);
+    let comments =
+        block_on(GitLab::new(&gitlab_client).line_comments("t", "team/engine", 4)).unwrap();
+    assert_eq!(comments.len(), 1, "only notes on lines");
+    assert_eq!(comments[0].line, Some(7));
+
+    let bitbucket_client = Recorded::new(vec![(
+        Method::Get,
+        "https://api.bitbucket.org/2.0/repositories/analytical/engine/pullrequests/12/comments?pagelen=100&sort=created_on",
+        json(
+            200,
+            r#"{"values":[{"user":{"display_name":"Ada Lovelace"},"content":{"raw":"General"},"created_on":"2026-11-12T09:00:00Z"},
+                          {"user":{"display_name":"Grace Hopper"},"content":{"raw":"Here"},"created_on":"2026-11-12T09:00:00Z","inline":{"path":"b.md","from":3,"to":null}}]}"#,
+        ),
+    )]);
+    let comments =
+        block_on(Bitbucket::new(&bitbucket_client).line_comments("t", "analytical/engine", 12))
+            .unwrap();
+    assert_eq!(comments.len(), 1);
+    assert_eq!((comments[0].line, comments[0].old_line), (None, Some(3)));
+}

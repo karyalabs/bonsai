@@ -14,8 +14,8 @@ use bonsai_git::Snapshot;
 use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
     ChangedFile, Check, CheckState, Comment, FileChange, HttpClient, Issue, ItemKind, ItemQuery,
-    ItemState, Label, MergeMethod, Person, Provider, ProviderKind, PullRequest, StateFilter,
-    Verdict, hosted_repository,
+    ItemState, Label, LineComment, MergeMethod, Person, Provider, ProviderKind, PullRequest,
+    StateFilter, Verdict, hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -282,6 +282,8 @@ pub struct HostedView {
     checks: std::collections::HashMap<u64, Checks>,
     /// Each pull request's changed files, loaded when Files is first shown.
     files: std::collections::HashMap<u64, Files>,
+    /// Each pull request's line comments, loaded with its files.
+    line_comments: std::collections::HashMap<u64, Vec<LineComment>>,
     /// Whether a pull request's detail shows its conversation or its files.
     showing_files: bool,
     merge_method: MergeMethod,
@@ -314,6 +316,44 @@ pub enum Files {
     Loading,
     Loaded(Vec<ChangedFile>),
     Failed(SharedString),
+}
+
+/// Each line of a unified diff's hunks with its old and new line number:
+/// `None` on the side a line isn't on, and for `@@` headers.
+#[must_use]
+pub fn line_numbers(patch: &str) -> Vec<(Option<u32>, Option<u32>)> {
+    let (mut old, mut new) = (0u32, 0u32);
+    patch
+        .lines()
+        .map(|line| {
+            if let Some(header) = line.strip_prefix("@@ ") {
+                // @@ -12,3 +14,5 @@
+                let mut parts = header.split_whitespace();
+                let start = |part: Option<&str>, sign: char| {
+                    part.and_then(|p| p.strip_prefix(sign))
+                        .and_then(|p| p.split(',').next())
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .unwrap_or(1)
+                };
+                old = start(parts.next(), '-');
+                new = start(parts.next(), '+');
+                (None, None)
+            } else if line.starts_with('+') {
+                new += 1;
+                (None, Some(new - 1))
+            } else if line.starts_with('-') {
+                old += 1;
+                (Some(old - 1), None)
+            } else if line.starts_with('\\') {
+                // "\ No newline at end of file"
+                (None, None)
+            } else {
+                old += 1;
+                new += 1;
+                (Some(old - 1), Some(new - 1))
+            }
+        })
+        .collect()
 }
 
 /// Lines of one file's diff shown before pointing to the browser.
@@ -414,6 +454,7 @@ impl HostedView {
             conversations: std::collections::HashMap::new(),
             checks: std::collections::HashMap::new(),
             files: std::collections::HashMap::new(),
+            line_comments: std::collections::HashMap::new(),
             showing_files: false,
             merge_method: MergeMethod::Merge,
             merging: None,
@@ -550,7 +591,13 @@ impl HostedView {
             let result = provider
                 .changed_files(&api, &target.full_name, number)
                 .await;
+            // Without line comments the files still show.
+            let comments = provider
+                .line_comments(&api, &target.full_name, number)
+                .await
+                .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
+                this.line_comments.insert(number, comments);
                 this.files.insert(
                     number,
                     match result {
@@ -561,6 +608,12 @@ impl HostedView {
                 cx.notify();
             });
         }));
+    }
+
+    /// A pull request's line comments, once its files have loaded.
+    #[must_use]
+    pub fn line_comments(&self, number: u64) -> &[LineComment] {
+        self.line_comments.get(&number).map_or(&[], Vec::as_slice)
     }
 
     /// A pull request's CI checks, if they have been asked for.
@@ -1762,6 +1815,12 @@ impl HostedView {
                         .text_color(c.destructive)
                         .child(format!("−{}", file.deletions)),
                 );
+            let comments: Vec<&LineComment> = self
+                .line_comments(number)
+                .iter()
+                .filter(|c| c.path == file.path)
+                .collect();
+            let mut placed = vec![false; comments.len()];
             let body = match &file.patch {
                 Some(patch) => {
                     let mut lines = div()
@@ -1771,7 +1830,20 @@ impl HostedView {
                         .font_family(theme.fonts.mono.clone())
                         .text_xs();
                     let total = patch.lines().count();
-                    for line in patch.lines().take(PATCH_LINES) {
+                    let numbers = line_numbers(patch);
+                    for (line, (old, new)) in patch.lines().zip(numbers).take(PATCH_LINES) {
+                        let mut here = Vec::new();
+                        for (k, comment) in comments.iter().enumerate() {
+                            let matches = match (comment.line, comment.old_line) {
+                                (Some(n), _) => new == Some(n) && !line.starts_with('-'),
+                                (None, Some(n)) => old == Some(n) && line.starts_with('-'),
+                                (None, None) => false,
+                            };
+                            if matches && !placed[k] {
+                                placed[k] = true;
+                                here.push(*comment);
+                            }
+                        }
                         let row = div().px(px(10.)).whitespace_nowrap();
                         let row = if line.starts_with("@@") {
                             row.text_color(c.muted_foreground)
@@ -1788,6 +1860,9 @@ impl HostedView {
                         } else {
                             line.to_owned()
                         }));
+                        for comment in here {
+                            lines = lines.child(line_comment_card(comment, &theme));
+                        }
                     }
                     if total > PATCH_LINES {
                         lines = lines.child(
@@ -1811,6 +1886,24 @@ impl HostedView {
                     .child("No diff here. Open in Browser to see this file.")
                     .into_any_element(),
             };
+            let unplaced: Vec<&LineComment> = comments
+                .iter()
+                .zip(&placed)
+                .filter(|(_, placed)| !**placed)
+                .map(|(c, _)| *c)
+                .collect();
+            let leftovers = (!unplaced.is_empty()).then(|| {
+                let mut rest = div()
+                    .flex()
+                    .flex_col()
+                    .py(px(4.))
+                    .border_t_1()
+                    .border_color(c.border);
+                for comment in unplaced {
+                    rest = rest.child(line_comment_card(comment, &theme));
+                }
+                rest
+            });
             list = list.child(
                 div()
                     .id(("hosted.file", i))
@@ -1821,7 +1914,8 @@ impl HostedView {
                     .border_color(c.border)
                     .overflow_hidden()
                     .child(header)
-                    .child(body),
+                    .child(body)
+                    .children(leftovers),
             );
         }
         if files.is_empty() {
@@ -1834,6 +1928,46 @@ impl HostedView {
         }
         list.into_any_element()
     }
+}
+
+/// One line comment, under its line or after the file's diff.
+fn line_comment_card(comment: &LineComment, theme: &UiTheme) -> impl IntoElement {
+    let c = &theme.colors;
+    let line = match (comment.line, comment.old_line) {
+        (Some(n), _) => format!("line {n}"),
+        (None, Some(n)) => format!("old line {n}"),
+        (None, None) => "outdated".to_owned(),
+    };
+    div().px(px(10.)).py(px(6.)).child(
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(4.))
+            .p(px(10.))
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c.border)
+            .bg(c.background)
+            .font_family(theme.fonts.body.clone())
+            .whitespace_normal()
+            .child(
+                div()
+                    .flex()
+                    .gap(px(6.))
+                    .text_xs()
+                    .child(
+                        div()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .child(comment.comment.author.name().to_owned()),
+                    )
+                    .child(
+                        div()
+                            .text_color(c.muted_foreground)
+                            .child(format!("{} · {line}", when(&comment.comment.created_at))),
+                    ),
+            )
+            .child(div().text_sm().child(comment.comment.body.clone())),
+    )
 }
 
 fn state_color(state: ItemState, cx: &App) -> gpui_kit::Hsla {
@@ -2004,6 +2138,23 @@ impl Render for HostedView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numbers_diff_lines() {
+        let patch = "@@ -10,3 +10,4 @@ fn x\n keep\n-old\n+new\n+more\n keep2\n\\ No newline at end of file";
+        assert_eq!(
+            line_numbers(patch),
+            [
+                (None, None),
+                (Some(10), Some(10)),
+                (Some(11), None),
+                (None, Some(11)),
+                (None, Some(12)),
+                (Some(12), Some(13)),
+                (None, None),
+            ]
+        );
+    }
 
     #[test]
     fn reads_rfc3339_times() {

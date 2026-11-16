@@ -208,6 +208,17 @@ pub struct Comment {
     pub created_at: String,
 }
 
+/// A review comment on one line of a pull request's diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineComment {
+    pub path: String,
+    /// The line in the new file, for an added or unchanged line.
+    pub line: Option<u32>,
+    /// The line in the old file, for a removed line.
+    pub old_line: Option<u32>,
+    pub comment: Comment,
+}
+
 /// What a review says about a pull request.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Verdict {
@@ -441,6 +452,15 @@ pub trait Provider: Send + Sync {
     fn can_request_changes(&self) -> bool {
         true
     }
+
+    /// Review comments on lines of a pull request's diff, oldest first: the
+    /// first 100.
+    fn line_comments<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+    ) -> BoxFuture<'a, Result<Vec<LineComment>>>;
 
     /// The files a pull request changes, the first 100.
     fn changed_files<'a>(
