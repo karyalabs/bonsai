@@ -703,6 +703,7 @@ version = "0.2.0"
 dependencies = [
  "bonsai-git",
  "bonsai-keychain",
+ "bonsai-providers",
  "futures",
  "gpui-icons",
  "gpui-kit",

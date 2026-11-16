@@ -39,7 +39,14 @@ pub fn run_from_env() -> Option<i32> {
         [prompt] if std::env::var_os(ASKPASS_MODE_ENV).is_some() => prompt,
         _ => return None,
     };
-    let accounts = decode_accounts(&std::env::var(ACCOUNTS_ENV).unwrap_or_default());
+    // Tests pass the accounts in the environment; the app's are in the
+    // accounts file, read fresh for each prompt.
+    let accounts = match std::env::var(ACCOUNTS_ENV) {
+        Ok(encoded) => decode_accounts(&encoded),
+        Err(_) => crate::accounts::askpass_accounts(&crate::accounts::accounts_path(
+            &crate::session::data_dir(),
+        )),
+    };
     let store = store();
     // Declining exits non-zero with nothing on stdout, so Git reports that
     // it could not read a credential instead of using a wrong one.

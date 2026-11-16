@@ -118,6 +118,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
     let handled = [
         "file.open",
         "file.new",
+        "app.accounts",
         "file.clone",
         "file.new-tab",
         "file.close-tab",

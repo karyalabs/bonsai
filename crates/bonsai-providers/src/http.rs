@@ -84,6 +84,12 @@ pub trait HttpClient: Send + Sync {
     fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, String>>;
 }
 
+impl<T: HttpClient + ?Sized> HttpClient for std::sync::Arc<T> {
+    fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, String>> {
+        (**self).send(request)
+    }
+}
+
 /// Percent-encodes a URL query value or path segment.
 #[must_use]
 pub fn percent_encode(text: &str) -> String {

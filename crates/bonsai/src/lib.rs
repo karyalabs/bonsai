@@ -1,11 +1,14 @@
 //! Bonsai, a native Git client for macOS.
 
+pub mod accounts;
+pub mod accounts_sheet;
 pub mod activity_panel;
 pub mod askpass;
 pub mod changes;
 pub mod commands;
 pub mod composer;
 pub mod diff_pane;
+pub mod http;
 pub mod purge_sheet;
 pub mod refs;
 pub mod repository;

@@ -16,6 +16,8 @@ use gpui_kit::{
 };
 
 use crate::{
+    accounts::Accounts,
+    accounts_sheet::{AccountsEvent, AccountsSheet},
     activity_panel::ActivityPanel,
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
@@ -74,6 +76,9 @@ pub struct Workspace {
     purge_handle: DialogHandle,
     purge: Option<Entity<PurgeSheet>>,
     purge_events: Option<Subscription>,
+    accounts_handle: DialogHandle,
+    accounts: Option<Entity<AccountsSheet>>,
+    accounts_events: Option<Subscription>,
     /// A path to open Purge from History for on the next render.
     purge_requested: Option<PathBuf>,
     /// Shows the welcome screen in place of the active tab (New Tab).
@@ -116,6 +121,9 @@ impl Workspace {
             purge_handle: DialogHandle::new(false),
             purge: None,
             purge_events: None,
+            accounts_handle: DialogHandle::new(false),
+            accounts: None,
+            accounts_events: None,
             purge_requested: None,
             welcome: false,
             message: None,
@@ -409,6 +417,88 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.show_purge(None, window, cx);
+    }
+
+    /// Where the accounts list is kept: beside the session file.
+    fn accounts_path(&self) -> PathBuf {
+        let dir = self
+            .session_path
+            .as_deref()
+            .and_then(Path::parent)
+            .map_or_else(crate::session::data_dir, Path::to_path_buf);
+        crate::accounts::accounts_path(&dir)
+    }
+
+    /// Opens the Accounts sheet with the Keychain and the system's HTTP.
+    pub fn show_accounts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let accounts = Accounts::load(
+            self.accounts_path(),
+            std::sync::Arc::from(bonsai_keychain::default_store()),
+        );
+        let client = std::sync::Arc::new(crate::http::CurlClient::default());
+        self.show_accounts_with(accounts, client, window, cx);
+    }
+
+    pub fn show_accounts_with(
+        &mut self,
+        accounts: Accounts,
+        client: std::sync::Arc<dyn bonsai_providers::HttpClient>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sheet = cx.new(|cx| AccountsSheet::new(accounts, client, window, cx));
+        self.accounts_events = Some(cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &AccountsEvent, window, cx| match event {
+                AccountsEvent::Dismissed => {
+                    this.accounts_handle.close(window, cx);
+                    this.accounts = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.accounts = Some(sheet);
+        self.accounts_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn accounts_sheet(&self) -> Option<&Entity<AccountsSheet>> {
+        self.accounts.as_ref()
+    }
+
+    fn on_accounts(
+        &mut self,
+        _: &commands::ManageAccounts,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_accounts(window, cx);
+    }
+
+    fn render_accounts(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.accounts.popup", "Accounts", cx)
+            .when_some(self.accounts.clone(), gpui_kit::ParentElement::child);
+        let this = cx.entity().downgrade();
+        dialog(
+            "workspace.accounts",
+            &self.accounts_handle,
+            popup,
+            window,
+            cx,
+        )
+        .on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.accounts = None;
+                cx.notify();
+            });
+            true
+        })
     }
 
     fn render_purge(
@@ -1234,6 +1324,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_purge))
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
+            .on_action(cx.listener(Self::on_accounts))
             .size_full()
             .flex()
             .flex_col()
@@ -1286,6 +1377,7 @@ impl Render for Workspace {
             .child(self.render_palette(window, cx))
             .child(self.render_clone(window, cx))
             .child(self.render_purge(window, cx))
+            .child(self.render_accounts(window, cx))
     }
 }
 
