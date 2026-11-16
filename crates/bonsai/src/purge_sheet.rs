@@ -5,6 +5,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -13,9 +14,9 @@ use bonsai_git::{
     PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange, Repository, RewrittenBranch,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _,
+    PathPromptOptions, Render, SharedString, Styled, Subscription, Task, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -27,14 +28,72 @@ use crate::{
         dialog::{dialog_description, dialog_footer, dialog_title},
         input::{Input, InputEvent, InputState},
         theme::UiTheme,
+        tree::{Tree, TreeEvent, TreeNode, TreeRow, TreeRowKind, TreeState},
     },
 };
 
 /// A finished force push: the remote and Git's error, if any.
 type PushOutcome = (String, Result<(), String>);
 
-/// How many matching paths the picker lists at once.
-const LIST_LIMIT: usize = 200;
+/// Up to this many matching paths, the picker opens every folder.
+const EXPAND_LIMIT: usize = 300;
+
+/// Paths in history, keyed by their tree leaf id.
+type Matches = BTreeMap<String, PathBuf>;
+
+/// The picker's tree of `paths`. A leaf's id is its path; a folder's is its
+/// path with a trailing `/`, so a folder id is a prefix of everything in it.
+#[must_use]
+pub fn path_nodes<'a>(paths: impl IntoIterator<Item = &'a str>) -> Vec<TreeNode> {
+    #[derive(Default)]
+    struct Dir<'a> {
+        dirs: BTreeMap<&'a str, Dir<'a>>,
+        files: Vec<(&'a str, &'a str)>,
+    }
+    fn nodes(prefix: &str, dir: Dir<'_>) -> Vec<TreeNode> {
+        let mut out: Vec<TreeNode> = dir
+            .dirs
+            .into_iter()
+            .map(|(name, child)| {
+                let id = format!("{prefix}{name}/");
+                let children = nodes(&id, child);
+                TreeNode::folder(id, name.to_owned(), children)
+            })
+            .collect();
+        out.extend(
+            dir.files
+                .into_iter()
+                .map(|(name, path)| TreeNode::leaf(path.to_owned(), name.to_owned())),
+        );
+        out
+    }
+    let mut root = Dir::default();
+    for path in paths {
+        let mut parts: Vec<&str> = path.split('/').collect();
+        let name = parts.pop().unwrap_or_default();
+        let mut dir = &mut root;
+        for part in parts {
+            dir = dir.dirs.entry(part).or_default();
+        }
+        dir.files.push((name, path));
+    }
+    nodes("", root)
+}
+
+/// The matching paths a tree row stands for: itself, or all under a folder.
+fn under<'a>(matches: &'a Matches, id: &'a str) -> impl Iterator<Item = &'a PathBuf> + 'a {
+    let folder = id.ends_with('/');
+    matches
+        .range::<str, _>((std::ops::Bound::Included(id), std::ops::Bound::Unbounded))
+        .take_while(move |(path, _)| {
+            if folder {
+                path.starts_with(id)
+            } else {
+                path.as_str() == id
+            }
+        })
+        .map(|(_, path)| path)
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PurgeEvent {
@@ -99,6 +158,9 @@ pub struct PurgeSheet {
     history: Option<Vec<PathBuf>>,
     query: Entity<InputState>,
     confirm: Entity<InputState>,
+    /// The history paths matching the query, shown in `tree`.
+    matches: Rc<Matches>,
+    tree: TreeState,
     selected: BTreeSet<PathBuf>,
     patterns: Vec<String>,
     /// Filled by the purge operation for the sheet to pick up.
@@ -128,7 +190,7 @@ impl PurgeSheet {
         let confirm = cx.new(|cx| InputState::new(window, cx).placeholder("Repository name"));
         let subscriptions = vec![
             cx.subscribe_in(&query, window, |this, _, event, _, cx| match event {
-                InputEvent::Change => cx.notify(),
+                InputEvent::Change => this.refresh_tree(cx),
                 InputEvent::PressEnter { .. } => this.add_pattern(cx),
                 _ => {}
             }),
@@ -151,6 +213,8 @@ impl PurgeSheet {
             history: None,
             query,
             confirm,
+            matches: Rc::default(),
+            tree: TreeState::new(Vec::new(), []).expect("an empty tree has no duplicates"),
             selected: initial.into_iter().collect(),
             patterns: Vec::new(),
             outcome: Arc::new(Mutex::new(None)),
@@ -197,9 +261,57 @@ impl PurgeSheet {
             let paths = read.await.unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 this.history = Some(paths);
-                cx.notify();
+                this.refresh_tree(cx);
             });
         }));
+    }
+
+    /// Rebuilds the tree from the history paths matching the query.
+    fn refresh_tree(&mut self, cx: &mut Context<Self>) {
+        let query = self.query.read(cx).value().trim().to_lowercase();
+        let matches: Matches = self
+            .history
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .map(|path| (path.to_string_lossy().into_owned(), path))
+            .filter(|(text, _)| query.is_empty() || text.to_lowercase().contains(&query))
+            .map(|(text, path)| (text, path.clone()))
+            .collect();
+        let nodes = path_nodes(matches.keys().map(String::as_str));
+        let mut expanded = Vec::new();
+        if matches.len() <= EXPAND_LIMIT {
+            for path in matches.keys() {
+                let mut at = 0;
+                while let Some(slash) = path[at..].find('/') {
+                    at += slash + 1;
+                    expanded.push(SharedString::from(path[..at].to_owned()));
+                }
+            }
+        }
+        self.tree = TreeState::new(nodes, expanded).expect("paths are unique");
+        self.matches = Rc::new(matches);
+        cx.notify();
+    }
+
+    /// The tree as the picker shows it.
+    #[must_use]
+    pub fn tree(&self) -> &TreeState {
+        &self.tree
+    }
+
+    /// Checks or clears everything a tree row stands for: all of it is
+    /// checked afterwards unless all of it was before.
+    pub fn toggle_row(&mut self, id: &str, cx: &mut Context<Self>) {
+        let paths: Vec<PathBuf> = under(&self.matches, id).cloned().collect();
+        if paths.iter().all(|path| self.selected.contains(path)) {
+            for path in &paths {
+                self.selected.remove(path);
+            }
+        } else {
+            self.selected.extend(paths);
+        }
+        cx.notify();
     }
 
     #[must_use]
@@ -420,63 +532,26 @@ impl PurgeSheet {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let query = self.query.read(cx).value().trim().to_lowercase();
-        let matches: Vec<PathBuf> = self
-            .history
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|p| query.is_empty() || p.to_string_lossy().to_lowercase().contains(&query))
-            .take(LIST_LIMIT)
-            .cloned()
-            .collect();
         let is_pattern = query.contains(['*', '?', '[']);
         let chosen = self.selected.len() + self.patterns.len();
-        let mut list = div()
-            .id("purge.paths")
-            .h(px(220.))
-            .overflow_y_scroll()
+        let list = div()
+            .h(px(260.))
             .flex()
             .flex_col()
             .border_1()
             .border_color(c.border)
-            .rounded(px(6.));
-        if self.history.is_none() {
-            list = list.child(
+            .rounded(px(6.))
+            .overflow_hidden()
+            .child(if self.history.is_none() {
                 div()
                     .p(px(8.))
                     .text_sm()
                     .text_color(c.muted_foreground)
-                    .child("Reading history…"),
-            );
-        }
-        for (i, path) in matches.into_iter().enumerate() {
-            let checked = self.selected.contains(&path);
-            let label = path.to_string_lossy().into_owned();
-            let toggle = path.clone();
-            list = list.child(
-                div()
-                    .id(("purge.path", i))
-                    .flex()
-                    .items_center()
-                    .gap(px(8.))
-                    .px(px(8.))
-                    .py(px(4.))
-                    .text_sm()
-                    .cursor_pointer()
-                    .hover(|s| s.bg(c.muted))
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(toggle.clone(), cx)))
-                    .child(
-                        Checkbox::new(("purge.check", i))
-                            .checked(checked)
-                            .aria_label(label.clone())
-                            .on_change(cx.listener({
-                                let path = path.clone();
-                                move |this, _: &bool, _, cx| this.toggle(path.clone(), cx)
-                            })),
-                    )
-                    .child(div().min_w_0().truncate().child(label)),
-            );
-        }
+                    .child("Reading history…")
+                    .into_any_element()
+            } else {
+                self.render_tree(&theme, cx).into_any_element()
+            });
         div()
             .flex()
             .flex_col()
@@ -529,6 +604,70 @@ impl PurgeSheet {
                     ),
             )
             .into_any_element()
+    }
+
+    fn render_tree(&self, theme: &UiTheme, cx: &mut Context<Self>) -> Tree {
+        let matches = self.matches.clone();
+        let selected = Rc::new(self.selected.clone());
+        let row_theme = theme.clone();
+        let view = cx.entity().downgrade();
+        let toggle_view = view.clone();
+        Tree::new(
+            "purge.paths",
+            "Paths in history",
+            self.tree.clone(),
+            move |row: &TreeRow, _, _| {
+                let c = &row_theme.colors;
+                let (mut any, mut all) = (false, true);
+                for path in under(&matches, &row.id) {
+                    if selected.contains(path) {
+                        any = true;
+                    } else {
+                        all = false;
+                    }
+                }
+                let folder = matches!(row.kind, TreeRowKind::Folder { .. });
+                let id = row.id.clone();
+                let view = toggle_view.clone();
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .min_w_0()
+                    .text_sm()
+                    .child(
+                        Checkbox::new(SharedString::from(format!("purge.check.{}", row.id)))
+                            .checked(any && all)
+                            .indeterminate(any && !all)
+                            .aria_label(row.id.clone())
+                            .on_change(move |_, _, cx| {
+                                let _ = view.update(cx, |view, cx| view.toggle_row(&id, cx));
+                            }),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .when(folder, |this| this.text_color(c.muted_foreground))
+                            .child(row.label.clone()),
+                    )
+                    .into_any_element()
+            },
+        )
+        .empty(
+            div()
+                .p(px(8.))
+                .text_sm()
+                .text_color(theme.colors.muted_foreground)
+                .child("No path in history matches."),
+        )
+        .on_event(move |event, _, cx| {
+            if let TreeEvent::Activate(id) = event
+                && !id.ends_with('/')
+            {
+                let _ = view.update(cx, |view, cx| view.toggle_row(id, cx));
+            }
+        })
     }
 
     fn render_preview(&self, scan: &PurgeScan, cx: &mut Context<Self>) -> gpui_kit::AnyElement {
@@ -867,6 +1006,30 @@ mod tests {
         assert_eq!(grouped["team/x"][0].name, "feature");
     }
 
+    #[test]
+    fn the_picker_nests_paths_under_folders() {
+        let nodes = path_nodes(["a/b/c.txt", "a/d.txt", "e.txt"]);
+        let ids: Vec<&str> = nodes.iter().map(|n| n.id.as_ref()).collect();
+        assert_eq!(ids, ["a/", "e.txt"]);
+        let crate::ui::tree::TreeChildren::Loaded(a) = &nodes[0].children else {
+            panic!("a/ is a folder");
+        };
+        let ids: Vec<&str> = a.iter().map(|n| n.id.as_ref()).collect();
+        assert_eq!(ids, ["a/b/", "a/d.txt"]);
+    }
+
+    #[test]
+    fn a_folder_row_covers_only_what_is_under_it() {
+        let matches: Matches = ["a/b.txt", "a/c.txt", "ab.txt", "a"]
+            .into_iter()
+            .map(|p| (p.to_owned(), PathBuf::from(p)))
+            .collect();
+        let under_a: Vec<_> = under(&matches, "a/").collect();
+        assert_eq!(under_a, [Path::new("a/b.txt"), Path::new("a/c.txt")]);
+        let file: Vec<_> = under(&matches, "a").collect();
+        assert_eq!(file, [Path::new("a")]);
+    }
+
     #[gpui_kit::test]
     fn purges_after_typed_confirmation_and_restores(cx: &mut TestAppContext) {
         cx.update(crate::ui::theme::init);
@@ -903,6 +1066,21 @@ mod tests {
         sheet.read_with(cx, |sheet, _| {
             assert_eq!(sheet.targets(), [PurgeTarget::Path(".env".into())]);
             assert_eq!(sheet.history.as_deref().map(<[PathBuf]>::len), Some(2));
+        });
+        // Checking a folder in the tree takes every path under it, and a
+        // second check clears them again.
+        sheet.update(cx, |sheet, cx| {
+            sheet.history = Some(vec![
+                ".env".into(),
+                "keys/a.pem".into(),
+                "keys/b.pem".into(),
+            ]);
+            sheet.refresh_tree(cx);
+            assert_eq!(sheet.tree().visible_len(), 4);
+            sheet.toggle_row("keys/", cx);
+            assert_eq!(sheet.targets().len(), 3);
+            sheet.toggle_row("keys/", cx);
+            assert_eq!(sheet.targets(), [PurgeTarget::Path(".env".into())]);
         });
 
         sheet.update(cx, PurgeSheet::preview);
