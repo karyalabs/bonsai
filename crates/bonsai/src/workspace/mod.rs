@@ -26,9 +26,10 @@ use crate::{
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     diff_pane::{DiffPane, DiffPaneEvent},
-    history::{HistoryEvent, HistoryView},
+    history::{EditCommits, HistoryEvent, HistoryView},
     publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
+    rebase_sheet::{RebaseEvent, RebaseSheet},
     refs::{RefDialog, RefsEvent, RefsPanel},
     remote_browser::{RemoteBrowser, RemoteBrowserEvent},
     repository::{RepositoryEvent, RepositoryModel},
@@ -89,6 +90,11 @@ pub struct Workspace {
     purge_handle: DialogHandle,
     purge: Option<Entity<PurgeSheet>>,
     purge_events: Option<Subscription>,
+    rebase_handle: DialogHandle,
+    rebase: Option<Entity<RebaseSheet>>,
+    rebase_events: Option<Subscription>,
+    /// Edit Commits asked for from History, opened on the next render.
+    rebase_request: Option<(Entity<RepositoryModel>, EditCommits)>,
     accounts_handle: DialogHandle,
     accounts: Option<Entity<AccountsSheet>>,
     accounts_events: Option<Subscription>,
@@ -150,6 +156,10 @@ impl Workspace {
             purge_handle: DialogHandle::new(false),
             purge: None,
             purge_events: None,
+            rebase_handle: DialogHandle::new(false),
+            rebase: None,
+            rebase_events: None,
+            rebase_request: None,
             accounts_handle: DialogHandle::new(false),
             accounts: None,
             accounts_events: None,
@@ -291,9 +301,17 @@ impl Workspace {
             let activity = cx.new(|cx| ActivityPanel::new(model.clone(), cx));
             let history = cx.new(|cx| HistoryView::new(model.clone(), refs.clone(), cx));
             let diff_target = diff.downgrade();
+            let history_model = model.clone();
             let history_events =
                 cx.subscribe(&history, move |this, _, event: &HistoryEvent, cx| {
-                    let HistoryEvent::Selected(selected) = event;
+                    let selected = match event {
+                        HistoryEvent::Selected(selected) => selected,
+                        HistoryEvent::EditCommits(request) => {
+                            this.rebase_request = Some((history_model.clone(), request.clone()));
+                            cx.notify();
+                            return;
+                        }
+                    };
                     if this.section == Section::History {
                         let (target, title) = selected
                             .clone()
@@ -544,6 +562,48 @@ impl Workspace {
         self.purge = Some(sheet);
         self.purge_handle.open(window, cx);
         cx.notify();
+    }
+
+    /// Opens Edit Commits (an interactive rebase) for `model`.
+    pub fn show_rebase(
+        &mut self,
+        model: Entity<RepositoryModel>,
+        request: EditCommits,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let sheet = cx.new(|cx| RebaseSheet::new(model, request.base, request.preset, window, cx));
+        self.rebase_events = Some(cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &RebaseEvent, window, cx| match event {
+                RebaseEvent::Dismissed => {
+                    this.rebase_handle.close(window, cx);
+                    this.rebase = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.rebase = Some(sheet);
+        self.rebase_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn rebase_sheet(&self) -> Option<&Entity<RebaseSheet>> {
+        self.rebase.as_ref()
+    }
+
+    fn render_rebase(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.rebase.popup", "Edit Commits", cx)
+            .max_w(px(760.))
+            .when_some(self.rebase.clone(), gpui_kit::ParentElement::child);
+        dialog("workspace.rebase", &self.rebase_handle, popup, window, cx)
+            .on_cancel(move |_, _, _| true)
     }
 
     #[must_use]
@@ -1793,6 +1853,9 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some((model, request)) = self.rebase_request.take() {
+            self.show_rebase(model, request, window, cx);
+        }
         if self.welcome || self.tabs.is_empty() {
             self.ensure_remote_browser(window, cx);
         }
@@ -1900,6 +1963,7 @@ impl Render for Workspace {
             .child(self.render_palette(window, cx))
             .child(self.render_clone(window, cx))
             .child(self.render_purge(window, cx))
+            .child(self.render_rebase(window, cx))
             .child(self.render_accounts(window, cx))
             .child(self.render_settings(window, cx))
             .child(self.render_publish(window, cx))

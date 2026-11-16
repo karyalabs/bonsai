@@ -16,6 +16,7 @@ pub mod history;
 pub mod http;
 pub mod publish_sheet;
 pub mod purge_sheet;
+pub mod rebase_sheet;
 pub mod refs;
 pub mod remote_browser;
 pub mod repository;

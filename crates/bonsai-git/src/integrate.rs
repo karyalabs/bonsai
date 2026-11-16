@@ -86,13 +86,22 @@ impl OperationAction {
 impl Repository {
     /// Runs an integrating command; a stop with conflicts is not an error.
     fn integrate(&self, args: Vec<OsString>) -> Result<Integration> {
+        self.integrate_with(args, "true")
+    }
+
+    /// [`Self::integrate`] with a command that writes a rebase's todo list.
+    pub(crate) fn integrate_with(
+        &self,
+        args: Vec<OsString>,
+        sequence_editor: &str,
+    ) -> Result<Integration> {
         let command = self
             .git()
             .command(args)
             .cwd(self.root())
             // Accept Git's prepared messages instead of opening an editor.
             .env("GIT_EDITOR", "true")
-            .env("GIT_SEQUENCE_EDITOR", "true");
+            .env("GIT_SEQUENCE_EDITOR", sequence_editor);
         match self.git().run(&command) {
             Ok(_) => Ok(Integration::Completed),
             Err(error @ Error::Failed { .. }) => {
