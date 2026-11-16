@@ -9,10 +9,11 @@ use std::{
 
 use bonsai_git::Oid;
 use gpui_icons::{LucideIcon, lucide};
+use gpui_kit::component::{ActiveTheme as _, Rope, highlighter::SyntaxHighlighter};
 use gpui_kit::{
     AnyElement, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, Image, ImageFormat,
     InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription,
+    StatefulInteractiveElement as _, Styled, StyledImage as _, StyledText, Subscription,
     UniformListScrollHandle, WeakEntity, Window, div, img, prelude::FluentBuilder as _, px,
     uniform_list,
 };
@@ -34,6 +35,8 @@ use crate::{
 
 /// Files larger than this show a note instead of their text.
 const MAX_BYTES: u64 = 4 * 1024 * 1024;
+/// Larger files show without syntax colors, so parsing stays quick.
+const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 /// A text row's height.
 const ROW: f32 = 20.;
 
@@ -88,6 +91,7 @@ pub struct FilesView {
     /// The file the viewer shows.
     selected: Option<PathBuf>,
     content: Option<Content>,
+    syntax: Option<Arc<Syntax>>,
     blame: Option<(Entity<BlameView>, Subscription)>,
     menu: Entity<MenuState>,
     scroll: UniformListScrollHandle,
@@ -218,6 +222,87 @@ pub fn byte_size(bytes: u64) -> String {
     }
 }
 
+/// A parsed file, colored line by line as rows show.
+pub struct Syntax {
+    highlighter: SyntaxHighlighter,
+    /// Where each line starts in the parsed text.
+    starts: Vec<usize>,
+}
+
+/// The grammar for `path`, by its name or extension.
+#[must_use]
+pub fn language(path: &Path) -> &'static str {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match name.as_str() {
+        "makefile" | "gnumakefile" => return "make",
+        "cmakelists.txt" => return "cmake",
+        _ => {}
+    }
+    match name.rsplit_once('.').map(|(_, extension)| extension) {
+        Some("rs") => "rust",
+        Some("js" | "jsx" | "mjs" | "cjs") => "javascript",
+        Some("ts" | "mts" | "cts") => "typescript",
+        Some("tsx") => "tsx",
+        Some("py" | "pyi") => "python",
+        Some("rb") => "ruby",
+        Some("go") => "go",
+        Some("swift") => "swift",
+        Some("c" | "h") => "c",
+        Some("cc" | "cpp" | "cxx" | "hpp" | "hxx") => "cpp",
+        Some("cs") => "csharp",
+        Some("java") => "java",
+        Some("kt" | "kts") => "kotlin",
+        Some("scala") => "scala",
+        Some("css" | "scss") => "css",
+        Some("html" | "htm") => "html",
+        Some("json" | "jsonc") => "json",
+        Some("toml") => "toml",
+        Some("yaml" | "yml") => "yaml",
+        Some("md" | "mdx") => "markdown",
+        Some("sh" | "bash" | "zsh") => "bash",
+        Some("sql") => "sql",
+        Some("lua") => "lua",
+        Some("php") => "php",
+        Some("ex" | "exs") => "elixir",
+        Some("zig") => "zig",
+        Some("proto") => "proto",
+        Some("graphql" | "gql") => "graphql",
+        Some("svelte") => "svelte",
+        Some("astro") => "astro",
+        Some("diff" | "patch") => "diff",
+        _ => "text",
+    }
+}
+
+/// Parses `lines` as `path`'s language, or `None` for plain text and large
+/// files.
+#[must_use]
+pub fn parse_syntax(path: &Path, lines: &[SharedString]) -> Option<Syntax> {
+    let language = language(path);
+    if language == "text" {
+        return None;
+    }
+    let mut text = String::new();
+    let mut starts = Vec::with_capacity(lines.len());
+    for line in lines {
+        starts.push(text.len());
+        text.push_str(line);
+        text.push('\n');
+        if text.len() > MAX_HIGHLIGHT_BYTES {
+            return None;
+        }
+    }
+    let mut highlighter = SyntaxHighlighter::new(language);
+    highlighter.update(None, &Rope::from(text.as_str()), None);
+    Some(Syntax {
+        highlighter,
+        starts,
+    })
+}
+
 impl FilesView {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
@@ -237,6 +322,7 @@ impl FilesView {
             filter_text: String::new(),
             selected: None,
             content: None,
+            syntax: None,
             blame: None,
             menu: cx.new(|cx| MenuState::new(Vec::new(), cx)),
             scroll: UniformListScrollHandle::new(),
@@ -361,6 +447,7 @@ impl FilesView {
         self.blame = None;
         self.scroll = UniformListScrollHandle::new();
         self.content = None;
+        self.syntax = None;
         self.reload_content(cx);
         self.rebuild_menu(cx);
     }
@@ -385,12 +472,20 @@ impl FilesView {
             self.content = Some(Content::Loading);
         }
         let absolute = self.model.read(cx).repository().root().join(path);
-        let task = cx.background_spawn(async move { read_content(&absolute) });
+        let task = cx.background_spawn(async move {
+            let content = read_content(&absolute);
+            let syntax = match &content {
+                Content::Text { lines, .. } => parse_syntax(&absolute, lines).map(Arc::new),
+                _ => None,
+            };
+            (content, syntax)
+        });
         cx.spawn(async move |this, cx| {
-            let content = task.await;
+            let (content, syntax) = task.await;
             let _ = this.update(cx, |this, cx| {
                 if this.generation == generation {
                     this.content = Some(content);
+                    this.syntax = syntax;
                     cx.notify();
                 }
             });
@@ -767,9 +862,27 @@ impl FilesView {
         let mono = theme.fonts.mono.clone();
         let muted = theme.colors.muted_foreground;
         let count = lines.len();
-        uniform_list("files.text", count, move |range, _, _| {
+        let syntax = self.syntax.clone();
+        uniform_list("files.text", count, move |range, _, cx| {
+            let colors = cx.theme().highlight_theme.clone();
             range
                 .map(|index| {
+                    let line = lines[index].clone();
+                    let text = match &syntax {
+                        Some(syntax) => {
+                            let start = syntax.starts[index];
+                            let highlights = syntax
+                                .highlighter
+                                .styles(&(start..start + line.len()), colors.as_ref())
+                                .into_iter()
+                                .map(|(range, style)| {
+                                    (range.start - start..range.end - start, style)
+                                })
+                                .collect::<Vec<_>>();
+                            StyledText::new(line).with_highlights(highlights)
+                        }
+                        None => StyledText::new(line),
+                    };
                     div()
                         .h(px(ROW))
                         .flex()
@@ -794,7 +907,7 @@ impl FilesView {
                                 .whitespace_nowrap()
                                 .text_xs()
                                 .font_family(mono.clone())
-                                .child(lines[index].clone()),
+                                .child(text),
                         )
                 })
                 .collect()
@@ -946,6 +1059,18 @@ mod tests {
             folders,
             ["src/", "src/ui/"].map(SharedString::from).to_vec()
         );
+    }
+
+    #[test]
+    fn picks_a_grammar_and_parses_code_but_not_plain_text() {
+        assert_eq!(language(Path::new("src/main.rs")), "rust");
+        assert_eq!(language(Path::new("web/App.TSX")), "tsx");
+        assert_eq!(language(Path::new("Makefile")), "make");
+        assert_eq!(language(Path::new("LICENSE")), "text");
+        let lines: Vec<SharedString> = ["fn main() {", "}"].map(SharedString::from).to_vec();
+        let syntax = parse_syntax(Path::new("main.rs"), &lines).unwrap();
+        assert_eq!(syntax.starts, [0, 12]);
+        assert!(parse_syntax(Path::new("notes.txt"), &lines).is_none());
     }
 
     #[test]
