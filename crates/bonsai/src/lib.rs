@@ -13,6 +13,7 @@ pub mod confirm;
 pub mod create_pull_sheet;
 pub mod diff_pane;
 pub mod file_icon;
+pub mod files;
 pub mod history;
 pub mod hosted;
 pub mod http;
