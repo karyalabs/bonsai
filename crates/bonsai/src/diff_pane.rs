@@ -5,12 +5,12 @@ use std::{path::PathBuf, sync::Arc};
 
 use bonsai_git::{
     ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, FileVersion, LinePosition,
-    LineSide, SignatureStatus, Whitespace, hunk_changes, partial_patch,
+    LineSide, Oid, SignatureStatus, Whitespace, hunk_changes, partial_patch,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
+    AppContext as _, ClipboardItem, Context, Entity, EventEmitter, Image, ImageFormat,
+    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
     StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription, Window,
     component::diff::{DiffFile, DiffLineRange, DiffMode, DiffSide, DiffState},
     div, img,
@@ -19,6 +19,7 @@ use gpui_kit::{
 };
 
 use crate::{
+    blame_view::{BlameEvent, BlameView},
     confirm::{self, Confirm},
     file_icon::file_icon,
     repository::{RepositoryEvent, RepositoryModel},
@@ -177,6 +178,8 @@ pub struct DiffPane {
     /// Shows every line of the file, not just the changes and their context.
     full_file: bool,
     more: Entity<MenuState>,
+    /// Blame for one file, shown instead of the diff.
+    blame: Option<(Entity<BlameView>, Subscription)>,
     /// Ignores results for a target that has since changed.
     generation: u64,
     _events: Subscription,
@@ -215,6 +218,7 @@ impl DiffPane {
             wrap: false,
             full_file: false,
             more: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(240.))),
+            blame: None,
             generation: 0,
             _events: events,
         }
@@ -245,6 +249,7 @@ impl DiffPane {
         if self.target == target {
             return;
         }
+        self.blame = None;
         self.target = target;
         self.title = title;
         self.rebuild_more(cx);
@@ -393,6 +398,29 @@ impl DiffPane {
             }
         });
         cx.notify();
+    }
+
+    /// Shows who last changed each line of `path`, as `rev` has it or as
+    /// the work tree has it, in place of the diff.
+    pub fn open_blame(&mut self, path: PathBuf, rev: Option<Oid>, cx: &mut Context<Self>) {
+        let model = self.model.clone();
+        let view = cx.new(|cx| BlameView::new(&model, path, rev, cx));
+        let events = cx.subscribe(&view, |this, _, event: &BlameEvent, cx| match event {
+            BlameEvent::Close => this.close_blame(cx),
+            BlameEvent::ShowCommit(oid) => cx.emit(DiffPaneEvent::ShowInHistory(oid.clone())),
+        });
+        self.blame = Some((view, events));
+        cx.notify();
+    }
+
+    pub fn close_blame(&mut self, cx: &mut Context<Self>) {
+        self.blame = None;
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn blame_view(&self) -> Option<&Entity<BlameView>> {
+        self.blame.as_ref().map(|(view, _)| view)
     }
 
     /// The More menu: copy, reveal and open the shown file.
@@ -619,8 +647,18 @@ impl DiffPane {
                 _ => ('M', c.warning),
             };
             let target = path.clone();
+            let blame_path = PathBuf::from(path.as_ref());
+            let blame_rev = match &self.target {
+                Some(DiffTarget::Commit(oid)) => Some(oid.clone()),
+                _ => None,
+            };
+            let deleted = matches!(
+                file.status(),
+                gpui_kit::component::diff::DiffFileStatus::Deleted
+            );
             div()
                 .id(("diff.commit.file", ix))
+                .group("commit-file")
                 .flex()
                 .items_center()
                 .gap(px(8.))
@@ -670,6 +708,31 @@ impl DiffPane {
                             )
                         }),
                 )
+                .when(!deleted, |this| {
+                    this.child(
+                        div()
+                            .id(("diff.commit.file.blame", ix))
+                            .flex_shrink_0()
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(4.))
+                            .invisible()
+                            .group_hover("commit-file", gpui_kit::Styled::visible)
+                            .hover(|this| this.bg(c.accent))
+                            .tooltip(|_, cx| text_tooltip("Blame at This Commit".into(), cx))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.open_blame(blame_path.clone(), blame_rev.clone(), cx);
+                            }))
+                            .child(
+                                lucide(LucideIcon::ScrollText)
+                                    .size(px(12.))
+                                    .text_color(c.muted_foreground),
+                            ),
+                    )
+                })
                 .child(
                     div()
                         .flex_shrink_0()
@@ -1064,6 +1127,18 @@ impl DiffPane {
                         })),
                     )
             })
+            .when_some(
+                path.clone()
+                    .filter(|_| !matches!(self.target, Some(DiffTarget::Untracked(_)))),
+                |this, path| {
+                    this.child(separator()).child(
+                        tool_button("diff.blame", LucideIcon::ScrollText, "Blame", false, theme)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.open_blame(path.clone(), None, cx);
+                            })),
+                    )
+                },
+            )
             .when(path.is_some(), |this| {
                 this.child(
                     Menu::new(&self.more, "More")
@@ -1206,6 +1281,13 @@ impl DiffPane {
     }
 }
 
+pub enum DiffPaneEvent {
+    /// Blame asked to show this commit in History.
+    ShowInHistory(Oid),
+}
+
+impl EventEmitter<DiffPaneEvent> for DiffPane {}
+
 impl Render for DiffPane {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = UiTheme::read(cx).clone();
@@ -1277,6 +1359,12 @@ impl Render for DiffPane {
                     .into_any_element()
             }
         };
+        if let Some((blame, _)) = &self.blame {
+            return div()
+                .size_full()
+                .child(blame.clone())
+                .child(self.render_discard(window, cx));
+        }
         let toolbar = self.render_toolbar(&theme, cx);
         div()
             .size_full()
@@ -1419,6 +1507,73 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(run(&["show", ":f.txt"]), "a\nb\nc\n");
+    }
+
+    #[gpui_kit::test]
+    fn blames_a_file_and_asks_history_for_its_commit(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::locate(None).unwrap();
+        let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+        let run = |args: &[&str]| {
+            git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+                .unwrap()
+                .stdout_lossy()
+        };
+        run(&["config", "user.name", "Ada"]);
+        run(&["config", "user.email", "ada@example.com"]);
+        std::fs::write(dir.path().join("f.txt"), "one\ntwo\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "base"]);
+        std::fs::write(dir.path().join("f.txt"), "one\ntwo\nthree\n").unwrap();
+        let head = run(&["rev-parse", "HEAD"]).trim().to_owned();
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (pane, cx) = cx.add_window_view(|_, cx| DiffPane::new(model.clone(), cx));
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| {
+            pane.show(
+                Some(DiffTarget::Unstaged(vec!["f.txt".into()])),
+                "f.txt".into(),
+                cx,
+            );
+            pane.open_blame("f.txt".into(), None, cx);
+        });
+        cx.run_until_parked();
+        let view = pane.read_with(cx, |pane, _| pane.blame_view().cloned().unwrap());
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.status(), &crate::blame_view::BlameStatus::Ready);
+            assert_eq!(view.blame().lines.len(), 3);
+            assert_eq!(view.blame().commit_of(0).unwrap().oid.as_str(), head);
+            assert!(view.blame().commit_of(2).unwrap().is_uncommitted());
+        });
+
+        let shown = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let _events = cx.update({
+            let shown = shown.clone();
+            |_, cx| {
+                cx.subscribe(&pane, move |_, event: &DiffPaneEvent, _| {
+                    let DiffPaneEvent::ShowInHistory(oid) = event;
+                    *shown.borrow_mut() = Some(oid.clone());
+                })
+            }
+        });
+        view.update(cx, |_, cx| {
+            cx.emit(BlameEvent::ShowCommit(Oid::new(head.clone())));
+        });
+        assert_eq!(
+            shown.borrow().as_ref().map(Oid::as_str),
+            Some(head.as_str())
+        );
+
+        // Close returns to the diff; a new target also leaves blame.
+        view.update(cx, |_, cx| cx.emit(BlameEvent::Close));
+        pane.read_with(cx, |pane, _| assert!(pane.blame_view().is_none()));
+        pane.update(cx, |pane, cx| {
+            pane.open_blame("f.txt".into(), Some(Oid::new(head)), cx);
+        });
+        pane.update(cx, |pane, cx| pane.show(None, SharedString::default(), cx));
+        pane.read_with(cx, |pane, _| assert!(pane.blame_view().is_none()));
     }
 
     #[gpui_kit::test]
