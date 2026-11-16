@@ -141,6 +141,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.push",
         "repository.purge",
         "repository.publish",
+        "repository.create-pull-request",
         "repository.stash",
         "repository.switch-branch",
         "repository.new-branch",
@@ -348,6 +349,7 @@ mod hosted {
     use crate::{
         accounts::{Accounts, Connected, SignInMethod, accounts_path},
         commands,
+        create_pull_sheet::Phase as CreatePhase,
         hosted::{HostedEnv, HostedView},
         session::Session,
     };
@@ -517,6 +519,119 @@ mod hosted {
             assert_eq!(view.items().len(), 1);
             assert_eq!(view.items()[0].comments, Some(3));
             assert!(view.items()[0].pull.is_none());
+        });
+    }
+
+    /// GitHub that lists no pull requests and records the one created.
+    struct Creates(std::sync::Mutex<Vec<serde_json::Value>>);
+
+    impl HttpClient for Creates {
+        fn send(&self, request: Request) -> BoxFuture<'_, Result<Response, String>> {
+            let body = if request.method == bonsai_providers::Method::Post {
+                let sent: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+                self.0.lock().unwrap().push(sent.clone());
+                format!(
+                    r#"{{"number":8,"title":{},"body":"","user":{{"login":"ada"}},"state":"open","draft":{},"merged_at":null,"head":{{"ref":{},"repo":{{"full_name":"ada/engine"}}}},"base":{{"ref":{},"repo":{{"full_name":"ada/engine"}}}},"created_at":"2026-11-16T09:00:00Z","updated_at":"2026-11-16T09:00:00Z","html_url":"https://github.com/ada/engine/pull/8"}}"#,
+                    sent["title"], sent["draft"], sent["head"], sent["base"]
+                )
+            } else {
+                "[]".to_owned()
+            };
+            Box::pin(async move {
+                Ok(Response {
+                    status: if request.method == bonsai_providers::Method::Post {
+                        201
+                    } else {
+                        200
+                    },
+                    headers: Vec::new(),
+                    body: body.into_bytes(),
+                })
+            })
+        }
+    }
+
+    #[gpui_kit::test]
+    fn pushes_the_branch_and_opens_a_pull_request(cx: &mut TestAppContext) {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let upstream = root.join("upstream.git");
+        std::fs::create_dir(&upstream).unwrap();
+        git(&upstream, &["init", "-q", "--bare", "-b", "main"]);
+        let local = root.join("engine");
+        Repository::init(&Git::locate(None).unwrap(), &local, Some("main")).unwrap();
+        git(&local, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+        let hosted = "https://github.com/ada/engine.git";
+        git(&local, &["remote", "add", "origin", hosted]);
+        git(
+            &local,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", upstream.display()),
+                hosted,
+            ],
+        );
+        git(&local, &["push", "-q", "-u", "origin", "main"]);
+        git(&local, &["switch", "-q", "-c", "feature/empty-repo-fix"]);
+        git(&local, &["commit", "-q", "--allow-empty", "-m", "Fix it"]);
+
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+        let mut accounts = Accounts::load(accounts_path(&root), store.clone());
+        accounts
+            .add(
+                Connected {
+                    account: Account {
+                        kind: ProviderKind::GitHub,
+                        host: "github.com".into(),
+                        api_url: "https://api.github.com".into(),
+                        username: "ada".into(),
+                        display_name: None,
+                        avatar_url: None,
+                    },
+                    method: SignInMethod::Token,
+                },
+                &Secret::new("t"),
+            )
+            .unwrap();
+        let client = Arc::new(Creates(std::sync::Mutex::new(Vec::new())));
+        let (workspace, cx) = setup(cx, Session::default(), None);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_hosted_env(HostedEnv {
+                accounts_path: accounts_path(&root),
+                store,
+                client: client.clone(),
+            });
+            workspace.open_path(&local, true, cx).unwrap();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(commands::CreatePullRequest);
+        cx.run_until_parked();
+        let sheet = workspace
+            .read_with(cx, |w, _| w.create_pull_sheet().cloned())
+            .expect("the sheet opens");
+        sheet.update(cx, |sheet, cx| {
+            assert!(sheet.can_submit(cx));
+            sheet.set_draft(true, cx);
+            sheet.submit(cx);
+        });
+        cx.run_until_parked();
+        sheet.read_with(cx, |sheet, _| {
+            assert_eq!(sheet.error(), None);
+            assert!(matches!(sheet.phase(), CreatePhase::Done(pull) if pull.number == 8));
+        });
+        let sent = client.0.lock().unwrap()[0].clone();
+        assert_eq!(sent["head"], "feature/empty-repo-fix");
+        assert_eq!(sent["base"], "main");
+        assert_eq!(sent["title"], "Empty repo fix");
+        assert_eq!(sent["draft"], true);
+        // Pushed first, with its upstream set.
+        assert_eq!(
+            git(&local, &["rev-parse", "--abbrev-ref", "@{upstream}"]),
+            "origin/feature/empty-repo-fix"
+        );
+        let list = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
+        list.read_with(cx, |list, _| {
+            assert_eq!(list.target().unwrap().remote, "origin");
         });
     }
 }

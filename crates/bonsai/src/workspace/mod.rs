@@ -25,6 +25,7 @@ use crate::{
     activity_panel::ActivityPanel,
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
+    create_pull_sheet::{CreatePullEvent, CreatePullSheet},
     diff_pane::{DiffPane, DiffPaneEvent},
     history::{EditCommits, HistoryEvent, HistoryView},
     hosted::{HostedEnv, HostedEvent, HostedKind, HostedView},
@@ -59,6 +60,13 @@ pub enum Section {
     Activity,
     PullRequests,
     Issues,
+}
+
+/// A sheet a view asked the workspace to open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SheetRequest {
+    Accounts,
+    CreatePull,
 }
 
 impl Section {
@@ -120,6 +128,8 @@ pub struct Workspace {
     auto_fetch: Option<Task<()>>,
     publish_handle: DialogHandle,
     publish: Option<(Entity<PublishSheet>, Subscription)>,
+    create_pull_handle: DialogHandle,
+    create_pull: Option<(Entity<CreatePullSheet>, Subscription)>,
     /// The Welcome screen's remote repositories, built on first show and
     /// again after the accounts change.
     remote_browser: Option<(Entity<RemoteBrowser>, Subscription)>,
@@ -128,8 +138,8 @@ pub struct Workspace {
     /// Accounts and HTTP for pull requests and issues; built when first
     /// needed unless a test set them.
     hosted_env: Option<HostedEnv>,
-    /// Open the Accounts sheet on the next render.
-    accounts_requested: bool,
+    /// A sheet a view asked for, opened on the next render.
+    sheet_request: Option<SheetRequest>,
     /// Shows the welcome screen in place of the active tab (New Tab).
     welcome: bool,
     message: Option<SharedString>,
@@ -189,10 +199,12 @@ impl Workspace {
             auto_fetch: None,
             publish_handle: DialogHandle::new(false),
             publish: None,
+            create_pull_handle: DialogHandle::new(false),
+            create_pull: None,
             remote_browser: None,
             purge_requested: None,
             hosted_env: None,
-            accounts_requested: false,
+            sheet_request: None,
             welcome: false,
             message: None,
             message_details: None,
@@ -902,6 +914,92 @@ impl Workspace {
         self.show_publish(window, cx);
     }
 
+    fn on_create_pull_request(
+        &mut self,
+        _: &commands::CreatePullRequest,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_create_pull(window, cx);
+    }
+
+    /// Opens New Pull Request for the active repository's hosted remote,
+    /// showing Pull Requests behind it.
+    pub fn show_create_pull(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.welcome || self.tabs.is_empty() {
+            return;
+        }
+        self.set_section(Section::PullRequests, cx);
+        let Some(view) = self.ensure_hosted(cx) else {
+            return;
+        };
+        let Some(target) = view.read(cx).target().cloned() else {
+            // The section explains what is missing: a remote or an account.
+            return;
+        };
+        let env = self.hosted_env();
+        let accounts = Accounts::load(env.accounts_path.clone(), env.store.clone());
+        let model = self.tabs[self.active].model.clone();
+        let sheet = cx.new(|cx| {
+            CreatePullSheet::new(model, target, &accounts, env.client.clone(), window, cx)
+        });
+        let list = view.downgrade();
+        let events = cx.subscribe_in(
+            &sheet,
+            window,
+            move |this, _, event: &CreatePullEvent, window, cx| match event {
+                CreatePullEvent::Dismissed => {
+                    this.create_pull_handle.close(window, cx);
+                    this.create_pull = None;
+                    cx.notify();
+                }
+                CreatePullEvent::Created(number) => {
+                    let number = *number;
+                    let _ = list.update(cx, |list, cx| {
+                        list.select(number, cx);
+                        list.reload(cx);
+                    });
+                }
+            },
+        );
+        self.create_pull = Some((sheet, events));
+        self.create_pull_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn create_pull_sheet(&self) -> Option<&Entity<CreatePullSheet>> {
+        self.create_pull.as_ref().map(|(sheet, _)| sheet)
+    }
+
+    fn render_create_pull(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.create-pull.popup", "New Pull Request", cx)
+            .max_w(px(560.))
+            .when_some(
+                self.create_pull_sheet().cloned(),
+                gpui_kit::ParentElement::child,
+            );
+        let this = cx.entity().downgrade();
+        dialog(
+            "workspace.create-pull",
+            &self.create_pull_handle,
+            popup,
+            window,
+            cx,
+        )
+        .on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.create_pull = None;
+                cx.notify();
+            });
+            true
+        })
+    }
+
     fn render_publish(
         &self,
         window: &mut Window,
@@ -1132,7 +1230,11 @@ impl Workspace {
         let view = cx.new(|cx| HostedView::new(kind, model, env, cx));
         let events = cx.subscribe(&view, |this, _, event: &HostedEvent, cx| match event {
             HostedEvent::ManageAccounts => {
-                this.accounts_requested = true;
+                this.sheet_request = Some(SheetRequest::Accounts);
+                cx.notify();
+            }
+            HostedEvent::CreatePullRequest => {
+                this.sheet_request = Some(SheetRequest::CreatePull);
                 cx.notify();
             }
         });
@@ -2008,8 +2110,10 @@ impl Render for Workspace {
         if let Some((model, request)) = self.rebase_request.take() {
             self.show_rebase(model, request, window, cx);
         }
-        if std::mem::take(&mut self.accounts_requested) {
-            self.show_accounts(window, cx);
+        match self.sheet_request.take() {
+            Some(SheetRequest::Accounts) => self.show_accounts(window, cx),
+            Some(SheetRequest::CreatePull) => self.show_create_pull(window, cx),
+            None => {}
         }
         if !self.welcome {
             self.ensure_hosted(cx);
@@ -2109,6 +2213,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_settings))
             .on_action(cx.listener(Self::on_terminal))
             .on_action(cx.listener(Self::on_publish))
+            .on_action(cx.listener(Self::on_create_pull_request))
             .on_action(cx.listener(Self::on_switch_branch))
             .on_action(cx.listener(Self::on_new_branch))
             .size_full()
@@ -2127,6 +2232,7 @@ impl Render for Workspace {
             .child(self.render_accounts(window, cx))
             .child(self.render_settings(window, cx))
             .child(self.render_publish(window, cx))
+            .child(self.render_create_pull(window, cx))
             .child(self.render_branch_picker(window, cx))
             .child(self.toasts.clone())
     }
