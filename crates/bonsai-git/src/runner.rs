@@ -284,7 +284,12 @@ impl Git {
             {
                 cancelled = true;
                 kill_tree(&mut child);
-                break child.wait().map_err(Error::Spawn)?;
+                let status = child.wait().map_err(Error::Spawn)?;
+                // A child Git was forking as the group was killed can miss
+                // the signal and hold the output pipes open; the group
+                // outlives its leader, so kill it again.
+                kill_group(child.id());
+                break status;
             }
             thread::sleep(POLL_INTERVAL);
         };
@@ -451,6 +456,9 @@ impl OutputStream {
             kill_tree(&mut self.child);
         }
         let status = self.child.wait().map_err(Error::Spawn)?;
+        if kill {
+            kill_group(self.child.id());
+        }
         let stderr = self
             .stderr
             .take()
@@ -487,14 +495,21 @@ impl Drop for OutputStream {
 }
 
 fn kill_tree(child: &mut std::process::Child) {
+    kill_group(child.id());
+    let _ = child.kill();
+}
+
+/// Kills the process group `id` leads, when there is one.
+fn kill_group(id: u32) {
     #[cfg(unix)]
-    if let Some(group) = i32::try_from(child.id())
+    if let Some(group) = i32::try_from(id)
         .ok()
         .and_then(rustix::process::Pid::from_raw)
     {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
-    let _ = child.kill();
+    #[cfg(not(unix))]
+    let _ = id;
 }
 
 /// Reads a pipe to its end. With a sink, each line is also passed on as it
