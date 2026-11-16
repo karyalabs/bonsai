@@ -324,6 +324,11 @@ impl Workspace {
                                 this.set_section(Section::History, cx);
                             }
                         }
+                        RefsEvent::OpenRepository(path) => {
+                            if let Err(error) = this.open_path(path, true, cx) {
+                                this.message = Some(error);
+                            }
+                        }
                     }
                     cx.notify();
                 });

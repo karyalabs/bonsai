@@ -52,6 +52,8 @@ pub struct Snapshot {
     pub tags: Vec<Tag>,
     pub remotes: Vec<Remote>,
     pub stashes: Vec<Stash>,
+    /// Every worktree, the main one first.
+    pub worktrees: Vec<crate::Worktree>,
     pub operation: Option<InProgress>,
 }
 
@@ -196,7 +198,7 @@ impl Repository {
     pub fn snapshot(&self) -> Result<Snapshot> {
         let git = self.git();
         let root = self.root();
-        let (status, refs, remotes, stashes) = thread::scope(|scope| {
+        let (status, refs, remotes, stashes, worktrees) = thread::scope(|scope| {
             let status = (!self.is_bare()).then(|| {
                 scope.spawn(|| {
                     git.run(
@@ -230,11 +232,15 @@ impl Repository {
                         .cwd(root),
                 )
             });
+            let worktrees = scope.spawn(|| {
+                git.run_unchecked(&git.command(["worktree", "list", "--porcelain"]).cwd(root))
+            });
             (
                 status.map(|h| h.join().expect("status thread")),
                 refs.join().expect("refs thread"),
                 remotes.join().expect("remotes thread"),
                 stashes.join().expect("stash thread"),
+                worktrees.join().expect("worktree thread"),
             )
         });
 
@@ -261,6 +267,7 @@ impl Repository {
             // `git config` exits 1 when nothing matches.
             remotes: parse_remotes(&remotes?.stdout),
             stashes: parse_stashes(&stashes?.stdout_lossy()),
+            worktrees: crate::parse_worktrees(&worktrees?.stdout_lossy()),
             operation: self.in_progress(),
         })
     }
