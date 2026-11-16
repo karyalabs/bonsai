@@ -3,9 +3,12 @@
 
 use std::path::{Path, PathBuf};
 
+mod branch_picker;
 mod clone;
+pub(crate) mod title_bar;
 
-use bonsai_git::{DiffTarget, Git, Head, Repository, Snapshot};
+use bonsai_git::{DiffTarget, Git, Repository, Snapshot};
+pub use branch_picker::{BranchChoice, branch_items, parse_choice};
 pub use clone::{CloneDialog, CloneEvent};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -14,6 +17,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div,
     prelude::FluentBuilder as _, px,
 };
+pub use title_bar::BranchSummary;
 
 use crate::{
     accounts::Accounts,
@@ -36,10 +40,12 @@ use crate::{
         command::{CommandEvent, CommandItem, CommandState, command_dialog_popup},
         dialog::{DialogHandle, dialog, dialog_popup, dialog_with},
         empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
+        menu::MenuState,
         resizable::{PaneLimits, Resizable},
         sidebar::{Sidebar, SidebarItem, sidebar_badge},
         tabs::{Tab, Tabs},
         theme::UiTheme,
+        toast::{Notice, ToastPlacement, ToastState},
     },
 };
 
@@ -102,6 +108,13 @@ pub struct Workspace {
     /// A message that came from a failed operation, whose command the
     /// activity log has; the banner offers Show Details while it shows.
     message_details: Option<SharedString>,
+    /// The message last shown as a toast, so each one is shown once.
+    toasted: Option<SharedString>,
+    toasts: Entity<ToastState>,
+    repo_menu: Entity<MenuState>,
+    repo_menu_key: title_bar::RepoMenuKey,
+    branch_handle: DialogHandle,
+    branch_picker: Option<(Entity<CommandState>, Subscription)>,
     watch: bool,
     focus: FocusHandle,
 }
@@ -149,6 +162,16 @@ impl Workspace {
             welcome: false,
             message: None,
             message_details: None,
+            toasted: None,
+            toasts: cx.new(|cx| {
+                let mut toasts = ToastState::new(cx);
+                toasts.set_placement(ToastPlacement::BottomRight, cx);
+                toasts
+            }),
+            repo_menu: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(300.))),
+            repo_menu_key: title_bar::RepoMenuKey::default(),
+            branch_handle: DialogHandle::new(false),
+            branch_picker: None,
             watch,
             focus,
         };
@@ -213,14 +236,33 @@ impl Workspace {
             let watch = self.watch;
             let model = cx.new(|cx| RepositoryModel::new(repository, watch, cx));
             let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
-                if let RepositoryEvent::OperationFinished {
-                    error: Some(error),
-                    quiet: false,
-                    ..
-                } = event
-                {
-                    this.message = Some(error.clone());
-                    this.message_details = Some(error.clone());
+                match event {
+                    RepositoryEvent::OperationFinished {
+                        error: Some(error),
+                        quiet: false,
+                        ..
+                    } => {
+                        this.message = Some(error.clone());
+                        this.message_details = Some(error.clone());
+                    }
+                    RepositoryEvent::OperationFinished {
+                        name,
+                        error: None,
+                        quiet: false,
+                    } => {
+                        if let Some(title) = success_title(name) {
+                            this.toasts.update(cx, |toasts, cx| {
+                                toasts.push(
+                                    "workspace.done",
+                                    Notice::new(title)
+                                        .description("Done.")
+                                        .timeout(std::time::Duration::from_secs(3)),
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                    _ => {}
                 }
                 cx.notify();
             });
@@ -1026,6 +1068,56 @@ impl Workspace {
         }
     }
 
+    /// Shows the current message, once, as a toast that stays until it is
+    /// dismissed; dismissing it clears the message.
+    fn show_message_toast(&mut self, cx: &mut Context<Self>) {
+        if self.message == self.toasted {
+            return;
+        }
+        self.toasted = self.message.clone();
+        let Some(message) = self.message.clone() else {
+            self.toasts.update(cx, |toasts, cx| {
+                toasts.dismiss(&SharedString::from("workspace.message"), cx);
+            });
+            return;
+        };
+        let (title, description) = split_message(&message);
+        // The full output is one click away, in Show Details.
+        let mut lines: Vec<&str> = description
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .collect();
+        if lines.len() > 3 {
+            lines.truncate(3);
+            lines.push("…");
+        }
+        let description = lines.join("\n");
+        let mut notice = Notice::new(title)
+            .description(description)
+            .persistent()
+            .cancel("Dismiss");
+        let this = cx.entity().downgrade();
+        if self.message_details.as_ref() == Some(&message) {
+            let this = this.clone();
+            notice = notice.action("Show Details", move |_, cx| {
+                let _ = this.update(cx, Self::show_message_details);
+            });
+        }
+        let notice = notice.on_dismiss(move |_, cx| {
+            let _ = this.update(cx, |this, cx| {
+                if this.toasted == this.message {
+                    this.message = None;
+                    this.toasted = None;
+                    cx.notify();
+                }
+            });
+        });
+        self.toasts.update(cx, |toasts, cx| {
+            toasts.dismiss(&SharedString::from("workspace.message"), cx);
+            toasts.push("workspace.message", notice, cx);
+        });
+    }
+
     // Rendering.
 
     fn render_tabs(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
@@ -1076,11 +1168,8 @@ impl Workspace {
             .py(px(4.))
             .border_b_1()
             .border_color(theme.colors.border)
+            .bg(theme.colors.sidebar)
             .child(div().flex_1().min_w_0().child(tabs))
-            .when_some(
-                self.tabs.get(self.active).filter(|_| !self.welcome),
-                |this, tab| this.child(tab.sync.clone()),
-            )
     }
 
     fn render_sidebar(
@@ -1091,36 +1180,8 @@ impl Workspace {
         let theme = UiTheme::read(cx);
         let c = &theme.colors;
         let changes = snapshot.map_or(0, |s| s.changes.len());
-        let head = snapshot.map(|s| match &s.head {
-            Head::Branch { name, oid: None } => format!("{name} (no commits yet)"),
-            Head::Branch { name, .. } => name.clone(),
-            Head::Detached { oid } => format!("Detached at {}", oid.short()),
-        });
         let mut sidebar = Sidebar::new("workspace.sidebar", "Repository")
             .content_padding(px(8.))
-            .header(
-                div()
-                    .px(px(8.))
-                    .pt(px(8.))
-                    .pb(px(12.))
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(c.sidebar_accent_foreground)
-                            .child(
-                                self.tabs
-                                    .get(self.active)
-                                    .map(|t| t.title.clone())
-                                    .unwrap_or_default(),
-                            ),
-                    )
-                    .when_some(head, |this, head| {
-                        this.child(div().text_xs().text_color(c.sidebar_foreground).child(head))
-                    }),
-            )
             .child(
                 SidebarItem::new("workspace.section.changes", "Changes")
                     .icon(
@@ -1521,6 +1582,50 @@ fn message_panel(
         )
 }
 
+/// The toast for a finished operation worth confirming, such as a push; the
+/// small, frequent ones (staging) show nothing.
+#[must_use]
+pub fn success_title(operation: &str) -> Option<String> {
+    const CONFIRMED: [&str; 12] = [
+        "Fetch",
+        "Pull",
+        "Push",
+        "Commit",
+        "Amend",
+        "Switch",
+        "Merge",
+        "Rebase",
+        "Cherry-pick",
+        "Revert",
+        "Stash",
+        "Create",
+    ];
+    CONFIRMED
+        .iter()
+        .any(|prefix| operation.starts_with(prefix))
+        .then(|| operation.to_owned())
+}
+
+/// Splits an error into a short title (its first line, or first sentence)
+/// and the rest.
+#[must_use]
+pub fn split_message(message: &str) -> (String, String) {
+    let message = message.trim();
+    let (first, rest) = message.split_once('\n').unwrap_or((message, ""));
+    if first.chars().count() <= 90 {
+        return (first.to_owned(), rest.trim().to_owned());
+    }
+    match first.find(". ") {
+        Some(end) if end < 90 => (
+            first[..=end].to_owned(),
+            format!("{}\n{rest}", first[end + 2..].trim())
+                .trim()
+                .to_owned(),
+        ),
+        _ => (first.to_owned(), rest.trim().to_owned()),
+    }
+}
+
 fn tab_title(root: &Path) -> SharedString {
     root.file_name()
         .map_or_else(|| root.to_string_lossy(), |name| name.to_string_lossy())
@@ -1550,6 +1655,8 @@ impl Render for Workspace {
         if let Some(path) = self.purge_requested.take() {
             self.show_purge(Some(path), window, cx);
         }
+        self.show_message_toast(cx);
+        let title_bar = self.render_title_bar(window, cx);
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let model = self.active_model().cloned().filter(|_| !self.welcome);
@@ -1634,54 +1741,16 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_settings))
             .on_action(cx.listener(Self::on_terminal))
             .on_action(cx.listener(Self::on_publish))
+            .on_action(cx.listener(Self::on_switch_branch))
+            .on_action(cx.listener(Self::on_new_branch))
             .size_full()
             .flex()
             .flex_col()
             .bg(c.background)
             .text_color(c.foreground)
             .font_family(theme.fonts.body.clone())
-            .when(!self.tabs.is_empty(), |this| {
-                this.child(self.render_tabs(cx))
-            })
-            .when_some(self.message.clone(), |this, message| {
-                this.child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .gap(px(8.))
-                        .px(px(12.))
-                        .py(px(6.))
-                        .bg(c.muted)
-                        .text_sm()
-                        .child(div().flex_1().min_w_0().child(message.clone()))
-                        .child(
-                            div()
-                                .flex()
-                                .flex_shrink_0()
-                                .gap(px(4.))
-                                .when(self.message_details.as_ref() == Some(&message), |this| {
-                                    this.child(
-                                        Button::new("workspace.message.details")
-                                            .variant(ButtonVariant::Ghost)
-                                            .label("Show Details")
-                                            .on_click(cx.listener(|this, _, _, cx| {
-                                                this.show_message_details(cx);
-                                            })),
-                                    )
-                                })
-                                .child(
-                                    Button::new("workspace.message.dismiss")
-                                        .variant(ButtonVariant::Ghost)
-                                        .label("Dismiss")
-                                        .on_click(cx.listener(|this, _, _, cx| {
-                                            this.message = None;
-                                            cx.notify();
-                                        })),
-                                ),
-                        ),
-                )
-            })
+            .child(title_bar)
+            .when(self.tabs.len() > 1, |this| this.child(self.render_tabs(cx)))
             .child(div().flex_1().min_h_0().child(body))
             .child(self.render_palette(window, cx))
             .child(self.render_clone(window, cx))
@@ -1689,6 +1758,8 @@ impl Render for Workspace {
             .child(self.render_accounts(window, cx))
             .child(self.render_settings(window, cx))
             .child(self.render_publish(window, cx))
+            .child(self.render_branch_picker(window, cx))
+            .child(self.toasts.clone())
     }
 }
 

@@ -25,7 +25,9 @@ pub mod sync_bar;
 pub mod ui;
 pub mod workspace;
 
-use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{
+    AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, point, px, size,
+};
 use ui::{app::AppConfig, app_theme};
 
 /// Opens Bonsai's window and runs until the app quits.
@@ -36,6 +38,17 @@ pub fn run() {
         let options = AppConfig::new("Bonsai")
             .themes(app_theme::light(), app_theme::dark())
             .appearance(app_theme::APPEARANCE)
+            .window_options(WindowOptions {
+                // Bonsai draws its own title bar (workspace/title_bar.rs), with
+                // the traffic lights centered in it.
+                titlebar: Some(TitlebarOptions {
+                    title: None,
+                    appears_transparent: true,
+                    traffic_light_position: Some(point(px(16.), px(15.))),
+                }),
+                app_owns_titlebar_drag: true,
+                ..WindowOptions::default()
+            })
             .install(cx);
         commands::install(cx);
         let data_dir = session::data_dir();
