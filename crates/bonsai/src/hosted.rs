@@ -18,9 +18,9 @@ use bonsai_providers::{
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AnyElement, App, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled, Task,
-    Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled,
+    Task, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 
 use crate::{
@@ -33,6 +33,7 @@ use crate::{
         markdown::markdown,
         spinner::Spinner,
         tag::Tag,
+        textarea::{Textarea, TextareaState},
         theme::UiTheme,
         toggle_group::{ToggleGroup, ToggleGroupItem},
     },
@@ -277,7 +278,14 @@ pub struct HostedView {
     merge_method: MergeMethod,
     /// The pull request being merged.
     merging: Option<u64>,
-    merge_error: Option<(u64, SharedString)>,
+    /// Why the last merge, comment or close failed, by item.
+    action_error: Option<(u64, SharedString)>,
+    /// The new comment, created on first render.
+    composer: Option<Entity<TextareaState>>,
+    /// The item whose comment is being sent.
+    posting: Option<u64>,
+    /// The item being closed or reopened.
+    changing_state: Option<u64>,
     tasks: Vec<Task<()>>,
 }
 
@@ -320,7 +328,10 @@ impl HostedView {
             conversations: std::collections::HashMap::new(),
             merge_method: MergeMethod::Merge,
             merging: None,
-            merge_error: None,
+            action_error: None,
+            composer: None,
+            posting: None,
+            changing_state: None,
             tasks: Vec::new(),
         }
     }
@@ -448,10 +459,7 @@ impl HostedView {
             }
         };
         self.conversations.insert(number, Conversation::Loading);
-        let kind = match self.kind {
-            HostedKind::PullRequests => ItemKind::PullRequest,
-            HostedKind::Issues => ItemKind::Issue,
-        };
+        let kind = self.item_kind();
         self.tasks.push(cx.spawn(async move |this, cx| {
             let result = provider
                 .comments(&api, &target.full_name, kind, number)
@@ -469,6 +477,137 @@ impl HostedView {
         }));
     }
 
+    fn item_kind(&self) -> ItemKind {
+        match self.kind {
+            HostedKind::PullRequests => ItemKind::PullRequest,
+            HostedKind::Issues => ItemKind::Issue,
+        }
+    }
+
+    /// The new comment's editor.
+    #[must_use]
+    pub fn composer(&self) -> Option<&Entity<TextareaState>> {
+        self.composer.as_ref()
+    }
+
+    fn ensure_composer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.composer.is_none() {
+            let composer = cx.new(|cx| {
+                TextareaState::new(window, cx)
+                    .rows(3)
+                    .placeholder("Leave a comment (Markdown)")
+            });
+            cx.observe(&composer, |_, _, cx| cx.notify()).detach();
+            self.composer = Some(composer);
+        }
+    }
+
+    /// Sends the composer's text as a comment on the selected item, and adds
+    /// it to the conversation.
+    pub fn comment(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some(number), Some(composer)) = (self.selected, self.composer.clone()) else {
+            return;
+        };
+        let body = composer.read(cx).value().trim().to_owned();
+        if body.is_empty() || self.posting.is_some() {
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((number, error));
+                cx.notify();
+                return;
+            }
+        };
+        let kind = self.item_kind();
+        self.posting = Some(number);
+        self.action_error = None;
+        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = provider
+                .add_comment(&api, &target.full_name, kind, number, &body)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.posting = None;
+                match result {
+                    Ok(comment) => {
+                        if let Some(Conversation::Loaded(comments)) =
+                            this.conversations.get_mut(&number)
+                        {
+                            comments.push(comment);
+                        }
+                        if let Some(item) = this.items.iter_mut().find(|i| i.number == number) {
+                            item.comments = item.comments.map(|n| n + 1);
+                        }
+                        composer.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Whether the selected item can be closed, or reopened, from Bonsai.
+    fn can_change_state(&self, item: &Item) -> bool {
+        match item.state {
+            ItemState::Open | ItemState::Draft => true,
+            ItemState::Merged => false,
+            // Bitbucket can't reopen a declined pull request.
+            ItemState::Closed => {
+                !(item.pull.is_some()
+                    && matches!(&self.availability, Availability::Ready(t)
+                    if t.connected.account.kind == ProviderKind::Bitbucket))
+            }
+        }
+    }
+
+    /// Closes the selected item when it is open, and reopens it when closed.
+    pub fn toggle_open(&mut self, cx: &mut Context<Self>) {
+        let Some(item) = self.selected().cloned() else {
+            return;
+        };
+        if !self.can_change_state(&item) || self.changing_state.is_some() {
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((item.number, error));
+                cx.notify();
+                return;
+            }
+        };
+        let number = item.number;
+        let open = !item.state.is_open();
+        let kind = self.item_kind();
+        self.changing_state = Some(number);
+        self.action_error = None;
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider
+                .set_open(&api, &target.full_name, kind, number, open)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.changing_state = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(item) = this.items.iter_mut().find(|i| i.number == number) {
+                            item.state = if open {
+                                ItemState::Open
+                            } else {
+                                ItemState::Closed
+                            };
+                        }
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     /// Merges the selected pull request on the provider, with the chosen
     /// method, then reloads the list.
     pub fn merge(&mut self, cx: &mut Context<Self>) {
@@ -481,7 +620,7 @@ impl HostedView {
         let (target, api, provider) = match self.session() {
             Ok(session) => session,
             Err(error) => {
-                self.merge_error = Some((item.number, error));
+                self.action_error = Some((item.number, error));
                 cx.notify();
                 return;
             }
@@ -489,7 +628,7 @@ impl HostedView {
         let number = item.number;
         let method = self.merge_method;
         self.merging = Some(number);
-        self.merge_error = None;
+        self.action_error = None;
         self.tasks.push(cx.spawn(async move |this, cx| {
             let result = provider
                 .merge_pull_request(&api, &target.full_name, number, method)
@@ -518,7 +657,7 @@ impl HostedView {
                             );
                         });
                     }
-                    Err(error) => this.merge_error = Some((number, error.to_string().into())),
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
                 }
                 cx.notify();
             });
@@ -864,11 +1003,45 @@ impl HostedView {
             markdown(("hosted.body", item.number), item.body.clone(), cx).into_any_element()
         };
         let check_out = view.clone();
+        let toggle = view.clone();
+        let can_change_state = this.can_change_state(&item);
+        let changing_state = this.changing_state == Some(item.number);
+        let noun = match kind {
+            HostedKind::PullRequests => "Pull Request",
+            HostedKind::Issues => "Issue",
+        };
+        let toggle_label = match (item.state.is_open(), changing_state) {
+            (true, false) => format!("Close {noun}"),
+            (true, true) => "Closing…".to_owned(),
+            (false, false) => format!("Reopen {noun}"),
+            (false, true) => "Reopening…".to_owned(),
+        };
+        let posting = this.posting == Some(item.number);
+        let reply = this.composer.clone().map(|composer| {
+            let empty = composer.read(cx).value().trim().is_empty();
+            let send = view.clone();
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(8.))
+                .child(Textarea::new(&composer).aria_label("New comment"))
+                .child(
+                    div().flex().justify_end().child(
+                        Button::new("hosted.comment")
+                            .size(ButtonSize::Sm)
+                            .label(if posting { "Commenting…" } else { "Comment" })
+                            .disabled(empty || posting)
+                            .on_click(move |_, window, cx| {
+                                send.update(cx, |this, cx| this.comment(window, cx));
+                            }),
+                    ),
+                )
+        });
         let mergeable = item.pull.is_some() && item.state == ItemState::Open;
         let merging = this.merging == Some(item.number);
         let merge_method = this.merge_method;
-        let merge_error = this
-            .merge_error
+        let action_error = this
+            .action_error
             .as_ref()
             .filter(|(n, _)| *n == item.number)
             .map(|(_, e)| e.clone());
@@ -1083,10 +1256,20 @@ impl HostedView {
                             )
                             .label("Open in Browser")
                             .on_click(move |_, _, cx| cx.open_url(&web)),
-                    ),
+                    )
+                    .when(can_change_state, |this| {
+                        this.child(
+                            Button::new("hosted.toggle-open")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .label(toggle_label)
+                                .disabled(changing_state)
+                                .on_click(move |_, _, cx| toggle.update(cx, Self::toggle_open)),
+                        )
+                    }),
             )
             .children(merge_row)
-            .when_some(merge_error, |this, error| {
+            .when_some(action_error, |this, error| {
                 this.child(div().text_xs().text_color(c.destructive).child(error))
             })
             .child(div().h(px(1.)).bg(c.border))
@@ -1099,6 +1282,7 @@ impl HostedView {
                     .child("Conversation"),
             )
             .child(conversation)
+            .children(reply)
             .into_any_element()
     }
 }
@@ -1126,8 +1310,9 @@ fn branch_chip(name: String, cx: &App) -> impl IntoElement {
 }
 
 impl Render for HostedView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.load_conversation(cx);
+        self.ensure_composer(window, cx);
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let selected = FILTERS

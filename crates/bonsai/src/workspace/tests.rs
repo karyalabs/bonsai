@@ -774,4 +774,86 @@ mod hosted {
         });
         assert_eq!(client.sent.lock().unwrap()[1].1["title"], "Crash");
     }
+
+    #[gpui_kit::test]
+    fn comments_on_closes_and_reopens_pull_requests(cx: &mut TestAppContext) {
+        use bonsai_providers::Method;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let local = root.join("engine");
+        Repository::init(&Git::locate(None).unwrap(), &local, Some("main")).unwrap();
+        git(
+            &local,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/ada/engine.git",
+            ],
+        );
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+        ada(&root, &store);
+        let client = Arc::new(Routes {
+            routes: vec![
+                (Method::Get, "/pulls?", format!("[{}]", pull(7, "feature/sync", "ada/engine", false))),
+                (Method::Get, "/issues/7/comments", "[]".into()),
+                (
+                    Method::Post,
+                    "/issues/7/comments",
+                    r#"{"user":{"login":"ada","type":"User"},"body":"Looks good","created_at":"2026-11-16T09:00:00Z"}"#.into(),
+                ),
+                (Method::Patch, "/issues/7", r#"{"number":7}"#.into()),
+            ],
+            sent: std::sync::Mutex::new(Vec::new()),
+        });
+        let (workspace, cx) = setup(cx, Session::default(), None);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_hosted_env(HostedEnv {
+                accounts_path: accounts_path(&root),
+                store,
+                client: client.clone(),
+            });
+            workspace.open_path(&local, true, cx).unwrap();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(commands::ShowPullRequests);
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
+        view.update(cx, HostedView::load_conversation);
+        cx.run_until_parked();
+        let composer = view
+            .read_with(cx, |view, _| view.composer().cloned())
+            .expect("the comment box is shown");
+        composer.update_in(cx, |input, window, cx| {
+            input.set_value("Looks good", window, cx);
+        });
+        view.update_in(cx, HostedView::comment);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            let Some(crate::hosted::Conversation::Loaded(comments)) = view.conversation(7) else {
+                panic!("comments load");
+            };
+            assert_eq!(comments.len(), 1);
+            assert_eq!(comments[0].body, "Looks good");
+        });
+        assert_eq!(
+            composer.read_with(cx, |input, _| input.value().to_string()),
+            ""
+        );
+        assert_eq!(client.sent.lock().unwrap()[0].1["body"], "Looks good");
+
+        view.update(cx, HostedView::toggle_open);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected().unwrap().state, ItemState::Closed);
+        });
+        view.update(cx, HostedView::toggle_open);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.selected().unwrap().state, ItemState::Open);
+        });
+        let sent = client.sent.lock().unwrap();
+        assert_eq!(sent[1].1["state"], "closed");
+        assert_eq!(sent[2].1["state"], "open");
+    }
 }
