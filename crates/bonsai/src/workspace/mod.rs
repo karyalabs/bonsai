@@ -1304,36 +1304,114 @@ impl Workspace {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let available = self.git.is_ok();
-        let action =
-            |id: &'static str, icon: LucideIcon, label: &'static str, hint: &'static str| {
-                Button::new(id)
-                    .variant(ButtonVariant::Outline)
-                    .disabled(!available)
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .child(lucide(icon).size(px(16.)).text_color(c.foreground))
-                            .child(label)
-                            .child(div().text_xs().text_color(c.muted_foreground).child(hint)),
-                    )
-            };
+        let tile = |id: &'static str,
+                    icon: LucideIcon,
+                    title: &'static str,
+                    description: &'static str,
+                    keys: &'static str| {
+            div()
+                .id(id)
+                .flex_1()
+                .min_w(px(160.))
+                .flex()
+                .flex_col()
+                .gap(px(10.))
+                .p(px(14.))
+                .rounded(px(10.))
+                .border_1()
+                .border_color(c.border)
+                .bg(c.background)
+                .when(available, |this| {
+                    this.cursor_pointer()
+                        .hover(|this| this.bg(c.accent).border_color(c.ring))
+                })
+                .when(!available, |this| this.opacity(0.5))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .size(px(32.))
+                                .rounded(px(8.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .bg(c.primary.opacity(0.1))
+                                .child(lucide(icon).size(px(17.)).text_color(c.primary)),
+                        )
+                        .child(
+                            div()
+                                .px(px(5.))
+                                .rounded(px(4.))
+                                .border_1()
+                                .border_color(c.border)
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(keys),
+                        ),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .child(title),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(description),
+                        ),
+                )
+        };
         let actions = div()
             .flex()
             .flex_wrap()
-            .gap(px(8.))
+            .gap(px(12.))
             .child(
-                action("welcome.open", LucideIcon::FolderOpen, "Open…", "⌘O")
-                    .on_click(cx.listener(|this, _, _, cx| this.prompt_open(cx))),
+                tile(
+                    "welcome.open",
+                    LucideIcon::FolderOpen,
+                    "Open Repository",
+                    "A Git folder on this Mac",
+                    "⌘O",
+                )
+                .when(available, |this| {
+                    this.on_click(cx.listener(|this, _, _, cx| this.prompt_open(cx)))
+                }),
             )
             .child(
-                action("welcome.new", LucideIcon::FolderPlus, "New…", "⌘N")
-                    .on_click(cx.listener(|this, _, _, cx| this.prompt_new(cx))),
+                tile(
+                    "welcome.clone",
+                    LucideIcon::Download,
+                    "Clone",
+                    "From GitHub, GitLab or any URL",
+                    "⇧⌘O",
+                )
+                .when(available, |this| {
+                    this.on_click(
+                        cx.listener(|this, _, window, cx| this.show_clone(None, window, cx)),
+                    )
+                }),
             )
             .child(
-                action("welcome.clone", LucideIcon::Download, "Clone…", "⇧⌘O")
-                    .on_click(cx.listener(|this, _, window, cx| this.show_clone(None, window, cx))),
+                tile(
+                    "welcome.new",
+                    LucideIcon::FolderPlus,
+                    "New Repository",
+                    "Start one in a new folder",
+                    "⌘N",
+                )
+                .when(available, |this| {
+                    this.on_click(cx.listener(|this, _, _, cx| this.prompt_new(cx)))
+                }),
             );
         let recents = self.session.recents.clone();
         let mut list = div().flex().flex_col().gap(px(2.));
@@ -1406,20 +1484,36 @@ impl Workspace {
         }
         let header = div()
             .flex()
-            .flex_col()
-            .gap(px(4.))
+            .items_center()
+            .gap(px(14.))
             .child(
                 div()
-                    .text_xl()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child("Bonsai"),
+                    .size(px(48.))
+                    .rounded(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(c.success.opacity(0.14))
+                    .child(lucide(LucideIcon::Sprout).size(px(26.)).text_color(c.success)),
             )
-            .child(div().text_sm().text_color(c.muted_foreground).child(match &self.git {
-                Ok(_) => SharedString::from(
-                    "Open a repository on this Mac, start a new one, or clone one from any Git server.",
-                ),
-                Err(error) => error.clone(),
-            }));
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .text_2xl()
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .child("Welcome to Bonsai"),
+                    )
+                    .child(div().text_sm().text_color(c.muted_foreground).child(match &self.git {
+                        Ok(_) => SharedString::from(
+                            "Open a repository on this Mac, clone one from any Git server, or start a new one.",
+                        ),
+                        Err(error) => error.clone(),
+                    })),
+            );
         div()
             .id("welcome")
             .size_full()
@@ -1429,12 +1523,12 @@ impl Workspace {
             .child(
                 div()
                     .w_full()
-                    .max_w(px(560.))
+                    .max_w(px(640.))
                     .px(px(24.))
                     .py(px(64.))
                     .flex()
                     .flex_col()
-                    .gap(px(24.))
+                    .gap(px(28.))
                     .child(header)
                     .child(actions)
                     .when_some(
@@ -1470,13 +1564,28 @@ impl Workspace {
                                                 })),
                                         ),
                                 )
-                                .child(list),
+                                .child(
+                                    div()
+                                        .p(px(4.))
+                                        .rounded(px(10.))
+                                        .border_1()
+                                        .border_color(c.border)
+                                        .child(list),
+                                ),
                         )
                     })
                     .child(
                         div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
                             .text_xs()
                             .text_color(c.muted_foreground)
+                            .child(
+                                lucide(LucideIcon::ArrowDownToLine)
+                                    .size(px(13.))
+                                    .text_color(c.muted_foreground),
+                            )
                             .child("You can also drop a repository folder onto this window."),
                     ),
             )
