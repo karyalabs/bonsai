@@ -133,6 +133,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.pull",
         "repository.push",
         "repository.purge",
+        "repository.stash",
     ];
     for command in commands::COMMANDS {
         assert!(

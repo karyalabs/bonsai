@@ -20,7 +20,7 @@ use crate::{
     commands::{self, COMMANDS},
     diff_pane::DiffPane,
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
-    refs::RefsPanel,
+    refs::{RefDialog, RefsEvent, RefsPanel},
     repository::{RepositoryEvent, RepositoryModel},
     session::Session,
     sync_bar::SyncBar,
@@ -30,7 +30,7 @@ use crate::{
         dialog::{DialogHandle, dialog, dialog_popup, dialog_with},
         empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
         resizable::{PaneLimits, Resizable},
-        sidebar::{Sidebar, SidebarItem, sidebar_badge, sidebar_group_label},
+        sidebar::{Sidebar, SidebarItem, sidebar_badge},
         tabs::{Tab, Tabs},
         theme::UiTheme,
     },
@@ -53,6 +53,7 @@ struct RepositoryTab {
     sync: Entity<SyncBar>,
     _events: Subscription,
     _changes_events: Subscription,
+    _refs_events: Subscription,
 }
 
 pub struct Workspace {
@@ -171,6 +172,15 @@ impl Workspace {
                     }
                 },
             );
+            let diff_target = diff.downgrade();
+            let refs_events = cx.subscribe(&refs, move |this, _, event: &RefsEvent, cx| {
+                let RefsEvent::ShowDiff(target, title) = event;
+                this.section = Section::Changes;
+                let _ = diff_target.update(cx, |diff, cx| {
+                    diff.show(Some(target.clone()), title.clone(), cx);
+                });
+                cx.notify();
+            });
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -180,6 +190,7 @@ impl Workspace {
                 refs,
                 sync,
                 _changes_events: changes_events,
+                _refs_events: refs_events,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -567,6 +578,13 @@ impl Workspace {
         }
     }
 
+    fn on_stash(&mut self, _: &commands::StashChanges, _: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab) = self.tabs.get(self.active).filter(|_| !self.welcome) {
+            tab.refs
+                .update(cx, |refs, cx| refs.show(RefDialog::StashChanges, cx));
+        }
+    }
+
     fn on_pull(&mut self, _: &commands::Pull, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(sync) = self.active_sync() {
             sync.update(cx, SyncBar::pull);
@@ -715,26 +733,6 @@ impl Workspace {
             );
         if let Some(tab) = self.tabs.get(self.active) {
             sidebar = sidebar.child(tab.refs.clone());
-        }
-        if let Some(snapshot) = snapshot
-            && !snapshot.stashes.is_empty()
-        {
-            sidebar = sidebar
-                .child(div().h(px(12.)))
-                .child(sidebar_group_label("STASHES", cx));
-            for (index, stash) in snapshot.stashes.iter().enumerate() {
-                sidebar = sidebar.child(
-                    SidebarItem::new(
-                        SharedString::from(format!("stash:{index}")),
-                        stash.message.clone(),
-                    )
-                    .icon(
-                        lucide(LucideIcon::Archive)
-                            .size(px(16.))
-                            .text_color(c.sidebar_foreground),
-                    ),
-                );
-            }
         }
         div().size_full().bg(c.sidebar).child(sidebar)
     }
@@ -1183,6 +1181,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_pull))
             .on_action(cx.listener(Self::on_push))
             .on_action(cx.listener(Self::on_purge))
+            .on_action(cx.listener(Self::on_stash))
             .size_full()
             .flex()
             .flex_col()

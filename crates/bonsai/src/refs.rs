@@ -1,5 +1,5 @@
-//! Branches, remote branches and tags in the sidebar, with their actions
-//! (CONTEXT.md: Branch, Tag).
+//! Branches, remote branches, tags and stashes in the sidebar, with their
+//! actions (CONTEXT.md: Branch, Tag, Stash).
 
 use std::{
     collections::BTreeSet,
@@ -7,13 +7,14 @@ use std::{
 };
 
 use bonsai_git::{
-    Branch, CheckoutBlocker, Head, MergeMode, ResetMode, Snapshot, is_valid_ref_name,
+    Branch, CheckoutBlocker, DiffTarget, Head, Integration, MergeMode, Oid, ResetMode, Snapshot,
+    Stash, is_valid_ref_name, stash_diff,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, ClipboardItem, Context, Entity, InteractiveElement as _, IntoElement,
-    MouseButton, ParentElement as _, Render, SharedString, Styled, Subscription, WeakEntity,
-    Window, div, prelude::FluentBuilder as _, px,
+    AppContext as _, ClipboardItem, Context, Entity, EventEmitter, InteractiveElement as _,
+    IntoElement, MouseButton, ParentElement as _, Render, SharedString, Styled, Subscription,
+    WeakEntity, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use crate::{
@@ -78,6 +79,20 @@ pub enum RefDialog {
         target: Checkout,
         blocker: CheckoutBlocker,
     },
+    /// Stash the uncommitted changes with an optional message.
+    StashChanges,
+    DropStash {
+        index: usize,
+        oid: Oid,
+        message: String,
+    },
+}
+
+/// What the panel asks its owner to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefsEvent {
+    /// Show this diff, with this title, in the diff pane.
+    ShowDiff(DiffTarget, SharedString),
 }
 
 /// Something to switch to.
@@ -119,6 +134,7 @@ struct Inputs {
     name: Entity<InputState>,
     url: Entity<InputState>,
     message: Entity<TextareaState>,
+    stash_message: Entity<InputState>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -134,9 +150,12 @@ pub struct RefsPanel {
     follow_up: Arc<Mutex<Option<RefDialog>>>,
     inputs: Option<Inputs>,
     checkout_new: bool,
+    stash_untracked: bool,
     collapsed_remotes: BTreeSet<String>,
     _events: Subscription,
 }
+
+impl EventEmitter<RefsEvent> for RefsPanel {}
 
 impl RefsPanel {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
@@ -158,6 +177,7 @@ impl RefsPanel {
             follow_up: Arc::new(Mutex::new(None)),
             inputs: None,
             checkout_new: true,
+            stash_untracked: true,
             collapsed_remotes: BTreeSet::new(),
             _events: events,
         }
@@ -238,6 +258,75 @@ impl RefsPanel {
                 cx,
             );
         });
+    }
+
+    /// Applies a stash; `pop` drops it too when it applied without
+    /// conflicts. Conflicts show up in Changes, and the stash stays.
+    pub fn apply_stash(&mut self, stash: &Stash, pop: bool, cx: &mut Context<Self>) {
+        let (index, oid) = (stash.index, stash.oid.clone());
+        let name = format!(
+            "{} stash {}",
+            if pop { "Pop" } else { "Apply" },
+            stash.message
+        );
+        self.run(
+            name,
+            move |repository| match repository.stash_apply(index, &oid, pop)? {
+                Integration::Completed => Ok(()),
+                Integration::Conflicts if pop => Err(bonsai_git::Error::Refused(
+                    "The stash conflicts with your changes. Resolve the conflicts in Changes; the stash was kept."
+                        .to_owned(),
+                )),
+                Integration::Conflicts => Err(bonsai_git::Error::Refused(
+                    "The stash conflicts with your changes. Resolve the conflicts in Changes."
+                        .to_owned(),
+                )),
+            },
+            cx,
+        );
+    }
+
+    /// Shows a stash's tracked changes in the diff pane.
+    pub fn view_stash(&mut self, stash: &Stash, cx: &mut Context<Self>) {
+        cx.emit(RefsEvent::ShowDiff(
+            stash_diff(&stash.oid),
+            SharedString::from(stash.message.clone()),
+        ));
+    }
+
+    fn stash_menu(&self, stash: &Stash, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let this = cx.entity().downgrade();
+        let item = |id: &'static str, label: &'static str, icon: LucideIcon| {
+            MenuItem::new(id, label).icon(icon)
+        };
+        let (apply, pop, view) = (stash.clone(), stash.clone(), stash.clone());
+        vec![
+            item("refs.stash.apply", "Apply", LucideIcon::ArchiveRestore).on_click(with(
+                &this,
+                move |view, _, cx| {
+                    view.apply_stash(&apply, false, cx);
+                },
+            )),
+            item(
+                "refs.stash.pop",
+                "Pop (Apply and Drop)",
+                LucideIcon::PackageOpen,
+            )
+            .on_click(with(&this, move |view, _, cx| {
+                view.apply_stash(&pop, true, cx);
+            })),
+            item("refs.stash.view", "View Changes", LucideIcon::FileDiff)
+                .on_click(with(&this, move |panel, _, cx| panel.view_stash(&view, cx))),
+            MenuItem::separator(),
+            item("refs.stash.drop", "Drop…", LucideIcon::Trash2).on_click(show(
+                &this,
+                RefDialog::DropStash {
+                    index: stash.index,
+                    oid: stash.oid.clone(),
+                    message: stash.message.clone(),
+                },
+            )),
+        ]
     }
 
     /// The current branch's name, or `None` when detached or unborn.
@@ -410,6 +499,28 @@ impl RefsPanel {
                 cx,
             ),
             RefDialog::CheckoutBlocked { target, .. } => self.stash_and_checkout(target, cx),
+            RefDialog::StashChanges => {
+                let message = self
+                    .inputs
+                    .as_ref()
+                    .map(|i| i.stash_message.read(cx).value().trim().to_owned())
+                    .unwrap_or_default();
+                let untracked = self.stash_untracked;
+                self.run(
+                    "Stash changes".to_owned(),
+                    move |repository| repository.stash_save(&message, untracked),
+                    cx,
+                );
+            }
+            RefDialog::DropStash {
+                index,
+                oid,
+                message,
+            } => self.run(
+                format!("Drop stash {message}"),
+                move |repository| repository.stash_drop(index, &oid),
+                cx,
+            ),
             RefDialog::ResetHard { target } => self.reset(target, ResetMode::Hard, cx),
             RefDialog::AddRemote => {
                 let url = self.url_value(cx);
@@ -480,6 +591,13 @@ impl RefsPanel {
             }
         });
         message.update(cx, |input, cx| input.set_value(String::new(), window, cx));
+        if matches!(self.dialog, Some(RefDialog::StashChanges)) {
+            let stash = inputs.stash_message.clone();
+            stash.update(cx, |input, cx| {
+                input.set_value(String::new(), window, cx);
+                input.focus(window, cx);
+            });
+        }
     }
 
     fn ensure_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -495,7 +613,9 @@ impl RefsPanel {
         let url = cx.new(|cx| {
             InputState::new(window, cx).placeholder("https://github.com/owner/repository.git")
         });
-        let subscriptions = [&name, &url]
+        let stash_message =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Message (optional)"));
+        let subscriptions = [&name, &url, &stash_message]
             .into_iter()
             .map(|input| {
                 cx.subscribe_in(input, window, |this, _, event, window, cx| match event {
@@ -509,6 +629,7 @@ impl RefsPanel {
             name,
             url,
             message,
+            stash_message,
             _subscriptions: subscriptions,
         });
     }
@@ -932,6 +1053,19 @@ impl RefsPanel {
                     false,
                 )
             }
+            RefDialog::StashChanges => (
+                "Stash Changes".to_owned(),
+                "Puts your uncommitted changes aside and cleans the working tree. Apply the stash to bring them back."
+                    .to_owned(),
+                "Stash",
+                false,
+            ),
+            RefDialog::DropStash { message, .. } => (
+                "Drop this stash?".to_owned(),
+                format!("\u{201c}{message}\u{201d} is deleted. Its changes can't be applied afterwards."),
+                "Drop",
+                true,
+            ),
         };
         let with_name = matches!(
             open,
@@ -954,6 +1088,11 @@ impl RefsPanel {
             .as_ref()
             .map(|i| i.url.clone())
             .filter(|_| with_url);
+        let stash_input = self
+            .inputs
+            .as_ref()
+            .map(|i| i.stash_message.clone())
+            .filter(|_| matches!(open, RefDialog::StashChanges));
         let paths: Vec<String> = match &open {
             RefDialog::CheckoutBlocked { blocker, .. } => blocker
                 .paths()
@@ -1005,6 +1144,32 @@ impl RefsPanel {
                                     .child("Switch to it"),
                             )
                         }),
+                )
+            })
+            .when_some(stash_input, |this, stash| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .child(Input::new(&stash).aria_label("Stash message"))
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .text_sm()
+                                .child(
+                                    Checkbox::new("refs.dialog.untracked")
+                                        .checked(self.stash_untracked)
+                                        .aria_label("Include untracked files")
+                                        .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                            this.stash_untracked = *checked;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child("Include untracked files"),
+                        ),
                 )
             })
             .when_some(url_input, |this, url| {
@@ -1291,6 +1456,54 @@ impl Render for RefsPanel {
                         ),
                 );
             }
+
+            list = list.child(
+                div()
+                    .mt(px(12.))
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .child(sidebar_group_label("STASHES", cx))
+                    .child(
+                        Button::new("refs.add-stash")
+                            .variant(ButtonVariant::Ghost)
+                            .aria_label("Stash Changes")
+                            .child(
+                                lucide(LucideIcon::Plus)
+                                    .size(px(12.))
+                                    .text_color(c.sidebar_foreground),
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.show(RefDialog::StashChanges, cx);
+                            })),
+                    ),
+            );
+            for stash in &snapshot.stashes {
+                let (menu_stash, view_stash) = (stash.clone(), stash.clone());
+                list = list.child(
+                    div()
+                        .child(
+                            SidebarItem::new(
+                                SharedString::from(format!("stash:{}", stash.oid)),
+                                stash.message.clone(),
+                            )
+                            .icon(icon(LucideIcon::Archive))
+                            .on_activate(with(
+                                &this,
+                                move |panel, _, cx| {
+                                    panel.view_stash(&view_stash, cx);
+                                },
+                            )),
+                        )
+                        .on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, _, _, cx| {
+                                let items = this.stash_menu(&menu_stash, cx);
+                                this.set_menu(items, cx);
+                            }),
+                        ),
+                );
+            }
         }
         div()
             .child(context_menu(&self.menu, "Branch actions", list))
@@ -1412,5 +1625,89 @@ mod tests {
         panel.update_in(cx, RefsPanel::confirm);
         cx.run_until_parked();
         assert_eq!(head(&model, cx), "fresh");
+    }
+
+    #[gpui_kit::test]
+    fn stashes_save_view_pop_and_drop(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repository = Repository::init(&Git::locate(None).unwrap(), root, Some("main")).unwrap();
+        for (key, value) in [
+            ("user.name", "Bonsai"),
+            ("user.email", "bonsai@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(root, &["config", key, value]);
+        }
+        std::fs::write(root.join("a.txt"), "1").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        std::fs::write(root.join("a.txt"), "2").unwrap();
+        std::fs::write(root.join("new.txt"), "new").unwrap();
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| RefsPanel::new(model.clone(), cx));
+        cx.run_until_parked();
+        let stashes = |cx: &mut gpui_kit::VisualTestContext| {
+            model.read_with(cx, |model, _| model.snapshot().unwrap().stashes.clone())
+        };
+
+        panel.update(cx, |panel, cx| panel.show(RefDialog::StashChanges, cx));
+        cx.run_until_parked();
+        let input = panel.read_with(cx, |panel, _| {
+            panel.inputs.as_ref().unwrap().stash_message.clone()
+        });
+        input.update_in(cx, |input, window, cx| {
+            input.set_value("halfway", window, cx);
+        });
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        let saved = stashes(cx);
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].message.contains("halfway"));
+        // Untracked files go with it by default.
+        assert!(!root.join("new.txt").exists());
+
+        let shown = Arc::new(Mutex::new(None));
+        let _events = cx.update(|_, cx| {
+            let shown = shown.clone();
+            cx.subscribe(&panel, move |_, event: &RefsEvent, _| {
+                *shown.lock().unwrap() = Some(event.clone());
+            })
+        });
+        panel.update(cx, |panel, cx| panel.view_stash(&saved[0], cx));
+        assert!(matches!(
+            shown.lock().unwrap().as_ref(),
+            Some(RefsEvent::ShowDiff(DiffTarget::Range { .. }, _))
+        ));
+
+        panel.update(cx, |panel, cx| panel.apply_stash(&saved[0], true, cx));
+        cx.run_until_parked();
+        assert_eq!(stashes(cx), [] as [bonsai_git::Stash; 0]);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "2");
+        assert!(root.join("new.txt").exists());
+
+        // Dropping asks first and then deletes the stash.
+        git(root, &["stash", "push", "-qm", "again"]);
+        model.update(cx, RepositoryModel::refresh);
+        cx.run_until_parked();
+        let again = stashes(cx)[0].clone();
+        panel.update(cx, |panel, cx| {
+            let items = panel.stash_menu(&again, cx);
+            assert_eq!(items.len(), 5);
+            panel.show(
+                RefDialog::DropStash {
+                    index: again.index,
+                    oid: again.oid.clone(),
+                    message: again.message.clone(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert_eq!(stashes(cx), [] as [bonsai_git::Stash; 0]);
     }
 }

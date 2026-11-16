@@ -19,6 +19,11 @@ use std::{
 pub use pattern::PurgeTarget;
 use pattern::bytes_to_os;
 
+/// A path from Git's raw bytes.
+pub(crate) fn bytes_to_path(bytes: &[u8]) -> PathBuf {
+    PathBuf::from(bytes_to_os(bytes.to_vec()))
+}
+
 use crate::{Error, InProgress, Oid, Repository, Result};
 
 /// Why a purge cannot start now.

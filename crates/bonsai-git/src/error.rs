@@ -37,6 +37,10 @@ pub enum Error {
     },
     #[error("Unexpected output from Git: {0}")]
     Parse(String),
+    /// Bonsai stopped before running Git, or explains an outcome; the
+    /// message is written for people.
+    #[error("{0}")]
+    Refused(String),
 }
 
 impl Error {
