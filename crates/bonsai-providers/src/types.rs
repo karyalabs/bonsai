@@ -217,6 +217,11 @@ pub struct LineComment {
     /// The line in the old file, for a removed line.
     pub old_line: Option<u32>,
     pub comment: Comment,
+    /// The thread it is in: its first comment's id (a discussion's on
+    /// GitLab). Replies share it.
+    pub thread: String,
+    /// Whether the thread is resolved, when the provider says.
+    pub resolved: bool,
 }
 
 /// The line of a pull request's diff a new comment is on.
@@ -485,6 +490,16 @@ pub trait Provider: Send + Sync {
         target: &'a LineTarget,
         body: &'a str,
     ) -> BoxFuture<'a, Result<LineComment>>;
+
+    /// Replies in a line comment's thread.
+    fn reply_to_thread<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>>;
 
     /// The files a pull request changes, the first 100.
     fn changed_files<'a>(

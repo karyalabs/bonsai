@@ -287,6 +287,8 @@ pub struct HostedView {
     /// The editor for a new line comment, and the line it is for.
     line_composer: Option<Entity<TextareaState>>,
     line_target: Option<(u64, LineTarget)>,
+    /// The line comment thread being replied to.
+    reply_thread: Option<(u64, String)>,
     /// The pull request a line comment is being sent on.
     posting_line: Option<u64>,
     /// Whether a pull request's detail shows its conversation or its files.
@@ -462,6 +464,7 @@ impl HostedView {
             line_comments: std::collections::HashMap::new(),
             line_composer: None,
             line_target: None,
+            reply_thread: None,
             posting_line: None,
             showing_files: false,
             merge_method: MergeMethod::Merge,
@@ -766,7 +769,70 @@ impl HostedView {
     /// or closes it with `None`.
     pub fn set_line_target(&mut self, target: Option<LineTarget>, cx: &mut Context<Self>) {
         self.line_target = self.selected.zip(target);
+        self.reply_thread = None;
         self.action_error = None;
+        cx.notify();
+    }
+
+    /// Opens a reply box under a line comment thread, or closes it.
+    pub fn set_reply_thread(&mut self, thread: Option<String>, cx: &mut Context<Self>) {
+        self.reply_thread = self.selected.zip(thread);
+        self.line_target = None;
+        self.action_error = None;
+        cx.notify();
+    }
+
+    /// Sends the line composer's text as a reply in the chosen thread.
+    pub fn send_reply(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (Some((number, thread)), Some(composer)) =
+            (self.reply_thread.clone(), self.line_composer.clone())
+        else {
+            return;
+        };
+        let body = composer.read(cx).value().trim().to_owned();
+        if body.is_empty() || self.posting_line.is_some() {
+            return;
+        }
+        let Some(root) = self
+            .line_comments(number)
+            .iter()
+            .find(|c| c.thread == thread)
+            .cloned()
+        else {
+            return;
+        };
+        let (repo, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((number, error));
+                cx.notify();
+                return;
+            }
+        };
+        self.posting_line = Some(number);
+        self.tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = provider
+                .reply_to_thread(&api, &repo.full_name, number, &thread, &body)
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.posting_line = None;
+                match result {
+                    Ok(comment) => {
+                        let comments = this.line_comments.entry(number).or_default();
+                        // After the thread's last comment.
+                        let at = comments
+                            .iter()
+                            .rposition(|c| c.thread == thread)
+                            .map_or(comments.len(), |i| i + 1);
+                        comments.insert(at, LineComment { comment, ..root });
+                        this.reply_thread = None;
+                        composer.update(cx, |input, cx| input.set_value("", window, cx));
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
         cx.notify();
     }
 
@@ -1972,9 +2038,7 @@ impl HostedView {
                         } else {
                             line.to_owned()
                         }));
-                        for comment in here {
-                            lines = lines.child(line_comment_card(comment, &theme));
-                        }
+                        lines = lines.children(Self::render_threads(view, &here, &theme, cx));
                         if open_here {
                             lines = lines.children(Self::render_line_composer(view, &theme, cx));
                         }
@@ -2014,9 +2078,7 @@ impl HostedView {
                     .py(px(4.))
                     .border_t_1()
                     .border_color(c.border);
-                for comment in unplaced {
-                    rest = rest.child(line_comment_card(comment, &theme));
-                }
+                rest = rest.children(Self::render_threads(view, &unplaced, &theme, cx));
                 rest
             });
             list = list.child(
@@ -2046,6 +2108,59 @@ impl HostedView {
 }
 
 impl HostedView {
+    /// Line comments grouped by thread, each with Reply, or the reply box
+    /// when it is open.
+    fn render_threads(
+        view: &Entity<Self>,
+        comments: &[&LineComment],
+        theme: &UiTheme,
+        cx: &App,
+    ) -> Vec<AnyElement> {
+        let this = view.read(cx);
+        let mut threads: Vec<&str> = Vec::new();
+        for comment in comments {
+            if !threads.contains(&comment.thread.as_str()) {
+                threads.push(&comment.thread);
+            }
+        }
+        let mut out = Vec::new();
+        for thread in threads {
+            for comment in comments.iter().filter(|c| c.thread == thread) {
+                out.push(line_comment_card(comment, theme).into_any_element());
+            }
+            let open = this.reply_thread.as_ref().is_some_and(|(_, t)| t == thread);
+            if open {
+                if let Some(composer) = Self::render_line_composer(view, theme, cx) {
+                    out.push(composer.into_any_element());
+                }
+            } else {
+                let reply = view.clone();
+                let id = thread.to_owned();
+                out.push(
+                    div()
+                        .flex()
+                        .px(px(10.))
+                        .pb(px(6.))
+                        .font_family(theme.fonts.body.clone())
+                        .child(
+                            Button::new(SharedString::from(format!("hosted.reply.{thread}")))
+                                .variant(ButtonVariant::Ghost)
+                                .size(ButtonSize::Sm)
+                                .label("Reply")
+                                .on_click(move |_, _, cx| {
+                                    let id = id.clone();
+                                    reply.update(cx, |this, cx| {
+                                        this.set_reply_thread(Some(id), cx);
+                                    });
+                                }),
+                        )
+                        .into_any_element(),
+                );
+            }
+        }
+        out
+    }
+
     fn render_line_composer(
         view: &Entity<Self>,
         theme: &UiTheme,
@@ -2055,10 +2170,13 @@ impl HostedView {
         let composer = this.line_composer.clone()?;
         let empty = composer.read(cx).value().trim().is_empty();
         let posting = this.posting_line.is_some();
+        let replying = this.reply_thread.is_some();
         let error = this
             .line_target
             .as_ref()
-            .and_then(|(n, _)| this.action_error.as_ref().filter(|(e, _)| e == n))
+            .map(|(n, _)| *n)
+            .or(this.reply_thread.as_ref().map(|(n, _)| *n))
+            .and_then(|n| this.action_error.as_ref().filter(|(e, _)| *e == n))
             .map(|(_, e)| e.clone());
         let c = &theme.colors;
         let cancel = view.clone();
@@ -2102,11 +2220,19 @@ impl HostedView {
                                 .child(
                                     Button::new("hosted.line-comment.send")
                                         .size(ButtonSize::Sm)
-                                        .label(if posting { "Commenting…" } else { "Comment" })
+                                        .label(match (posting, replying) {
+                                            (true, _) => "Sending…",
+                                            (false, true) => "Reply",
+                                            (false, false) => "Comment",
+                                        })
                                         .disabled(empty || posting)
                                         .on_click(move |_, window, cx| {
                                             send.update(cx, |this, cx| {
-                                                this.send_line_comment(window, cx);
+                                                if replying {
+                                                    this.send_reply(window, cx);
+                                                } else {
+                                                    this.send_line_comment(window, cx);
+                                                }
                                             });
                                         }),
                                 ),

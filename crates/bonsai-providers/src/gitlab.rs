@@ -532,9 +532,12 @@ impl<C: HttpClient> Provider for GitLab<C> {
             let discussions: Vec<Discussion> = self.parse(&response.body)?;
             Ok(discussions
                 .into_iter()
-                .flat_map(|d| d.notes)
-                .filter(|note| !note.system)
-                .filter_map(|note| {
+                .flat_map(|d| {
+                    let id = d.id;
+                    d.notes.into_iter().map(move |note| (id.clone(), note))
+                })
+                .filter(|(_, note)| !note.system)
+                .filter_map(|(thread, note)| {
                     let position = note.position?;
                     Some(LineComment {
                         path: position.new_path.or(position.old_path)?,
@@ -544,6 +547,8 @@ impl<C: HttpClient> Provider for GitLab<C> {
                             .is_none()
                             .then_some(position.old_line)
                             .flatten(),
+                        thread,
+                        resolved: note.resolved,
                         comment: Comment {
                             author: note.author.map(User::into_person).unwrap_or_default(),
                             body: note.body,
@@ -594,6 +599,7 @@ impl<C: HttpClient> Provider for GitLab<C> {
                 )
                 .await?;
             let discussion: Discussion = self.parse(&response.body)?;
+            let thread = discussion.id;
             let note = discussion
                 .notes
                 .into_iter()
@@ -610,12 +616,41 @@ impl<C: HttpClient> Provider for GitLab<C> {
                     .is_none()
                     .then_some(target.old_line)
                     .flatten(),
+                thread,
+                resolved: false,
                 comment: Comment {
                     author: note.author.map(User::into_person).unwrap_or_default(),
                     body: note.body,
                     created_at: note.created_at,
                 },
             })
+        })
+    }
+
+    fn reply_to_thread<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        number: u64,
+        thread: &'a str,
+        body: &'a str,
+    ) -> BoxFuture<'a, Result<Comment>> {
+        Box::pin(async move {
+            let response = self
+                .send(
+                    Request::post(
+                        format!(
+                            "{}/merge_requests/{number}/discussions/{}/notes",
+                            self.project_url(full_name),
+                            percent_encode(thread)
+                        ),
+                        json!({ "body": body }).to_string(),
+                    )
+                    .header("Content-Type", "application/json"),
+                    Some(token),
+                )
+                .await?;
+            Ok(self.parse::<Note>(&response.body)?.into_comment())
         })
     }
 
@@ -810,6 +845,7 @@ struct DiffRefs {
 
 #[derive(Deserialize)]
 struct Discussion {
+    id: String,
     notes: Vec<PositionedNote>,
 }
 
@@ -821,6 +857,8 @@ struct PositionedNote {
     system: bool,
     created_at: String,
     position: Option<NotePosition>,
+    #[serde(default)]
+    resolved: bool,
 }
 
 #[derive(Deserialize)]
