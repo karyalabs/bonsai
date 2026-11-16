@@ -14,10 +14,12 @@ env:
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
 
+# Jobs run on Karya's self-hosted runners when the organization variables
+# KARYA_MACOS_RUNNER and KARYA_LINUX_RUNNER hold a runs-on value as JSON, as
+# in gpuicn. Pull requests from forks, and an unset variable, use GitHub's.
 jobs:
   macos:
-    # Karya's self-hosted macOS runner when KARYA_MACOS_RUNNER is set, else GitHub's.
-    runs-on: ${{ fromJSON(vars.KARYA_MACOS_RUNNER || '"macos-15"') }}
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KARYA_MACOS_RUNNER || '"macos-15"') }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -39,7 +41,7 @@ jobs:
 
   core:
     # The GPUI-free crates also build and test on Linux, which is quicker.
-    runs-on: ${{ fromJSON(vars.KARYA_LINUX_RUNNER || '"ubuntu-latest"') }}
+    runs-on: ${{ fromJSON((github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && vars.KARYA_LINUX_RUNNER || '"ubuntu-latest"') }}
     steps:
       - uses: actions/checkout@v4
         with:
