@@ -1018,6 +1018,21 @@ impl Workspace {
         }
     }
 
+    fn on_commit_and_push(
+        &mut self,
+        _: &commands::CommitAndPush,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.welcome {
+            return;
+        }
+        if let Some(changes) = self.tabs.get(self.active).map(|tab| tab.changes.clone()) {
+            self.set_section(Section::Changes, cx);
+            changes.update(cx, ChangesView::commit_and_push);
+        }
+    }
+
     fn active_sync(&self) -> Option<Entity<SyncBar>> {
         self.tabs
             .get(self.active)
@@ -1731,6 +1746,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_history))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_commit))
+            .on_action(cx.listener(Self::on_commit_and_push))
             .on_action(cx.listener(Self::on_fetch))
             .on_action(cx.listener(Self::on_pull))
             .on_action(cx.listener(Self::on_push))

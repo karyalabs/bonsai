@@ -133,6 +133,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.activity",
         "repository.refresh",
         "repository.commit",
+        "repository.commit-push",
         "repository.fetch",
         "repository.pull",
         "repository.push",

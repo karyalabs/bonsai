@@ -31,6 +31,7 @@ actions!(
         PublishRepository,
         StashChanges,
         SwitchBranch,
+        CommitAndPush,
         NewBranch,
     ]
 );
@@ -115,6 +116,7 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(ShowHistory, "view.history", "Show History", "View", keys: ["secondary-2"], menu: Some(MenuPlacement::View), palette: true, keywords: ["log", "commits", "graph"]),
     command!(ShowActivity, "view.activity", "Show Activity", "View", keys: ["secondary-3"], menu: Some(MenuPlacement::View), palette: true, keywords: ["log", "commands", "output", "errors"]),
     command!(Commit, "repository.commit", "Commit", "Repository", keys: ["secondary-enter"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["save", "amend"]),
+    command!(CommitAndPush, "repository.commit-push", "Commit and Push", "Repository", keys: ["secondary-shift-enter"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["save", "upload"]),
     command!(Fetch, "repository.fetch", "Fetch", "Repository", keys: ["secondary-alt-f"], menu: Some(MenuPlacement::Repository), palette: true, separator: true, keywords: ["download", "update", "remote"]),
     command!(Pull, "repository.pull", "Pull", "Repository", keys: ["secondary-alt-l"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["download", "merge", "rebase", "update"]),
     command!(Push, "repository.push", "Push", "Repository", keys: ["secondary-alt-p"], menu: Some(MenuPlacement::Repository), palette: true, keywords: ["upload", "publish", "remote"]),

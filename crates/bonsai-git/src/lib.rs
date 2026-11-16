@@ -28,7 +28,9 @@ mod worktree;
 pub use branch::{CheckoutBlocker, is_valid_ref_name};
 pub use clone::{CloneProgress, clone_name};
 pub use commit::Signing;
-pub use diff::{DiffOptions, DiffOutput, DiffTarget, Whitespace};
+pub use diff::{
+    DiffOptions, DiffOutput, DiffTarget, LineCount, LineCounts, Whitespace, parse_numstat,
+};
 pub use error::{Error, Result};
 pub use integrate::{Integration, MergeMode, OperationAction, ResetMode, Side};
 pub use log::{CommitDetails, CommitInfo, LogFilter, LogReader, LogScope, SignatureStatus};
