@@ -176,12 +176,37 @@ fn purges_directories_globs_and_non_utf8_paths() {
     write(root, "same-as-pem.txt", "pem\n");
     #[cfg(unix)]
     {
+        // APFS refuses non-UTF-8 file names, so the path goes straight into
+        // the index.
         use std::os::unix::ffi::OsStrExt as _;
-        let name = std::ffi::OsStr::from_bytes(b"latin-\xe9.txt");
-        std::fs::write(root.join(name), "bytes\n").unwrap();
+        let blob = git()
+            .run(
+                &git()
+                    .command(["hash-object", "-w", "--stdin"])
+                    .cwd(root)
+                    .stdin(b"bytes\n".to_vec()),
+            )
+            .unwrap()
+            .stdout_lossy();
+        let mut info = format!("100644,{},", blob.trim()).into_bytes();
+        info.extend_from_slice(b"latin-\xe9.txt");
+        git()
+            .run(
+                &git()
+                    .command([
+                        std::ffi::OsStr::new("update-index"),
+                        std::ffi::OsStr::new("--add"),
+                        std::ffi::OsStr::new("--cacheinfo"),
+                        std::ffi::OsStr::from_bytes(&info),
+                    ])
+                    .cwd(root),
+            )
+            .unwrap();
     }
     write(root, "sp ace \"quoted\".txt", "q\n");
-    commit(root, "everything");
+    // `--ignore-removal` keeps the index-only path staged.
+    run(root, &["add", "--ignore-removal", "--", "."]);
+    run(root, &["commit", "-qm", "everything"]);
     write(root, "keep.txt", "keep 2\n");
     commit(root, "more");
 
