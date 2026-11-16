@@ -63,16 +63,17 @@ pub struct HostedEnv {
 
 pub enum HostedEvent {
     ManageAccounts,
+    CreatePullRequest,
 }
 
 /// The remote whose pull requests and issues are shown, and the account
 /// that reads them.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Target {
-    remote: String,
-    host: String,
-    full_name: String,
-    connected: Connected,
+pub struct Target {
+    pub remote: String,
+    pub host: String,
+    pub full_name: String,
+    pub connected: Connected,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -313,6 +314,20 @@ impl HostedView {
     #[must_use]
     pub fn error(&self) -> Option<&SharedString> {
         self.error.as_ref()
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> HostedKind {
+        self.kind
+    }
+
+    /// The remote and account the list reads, when there is one.
+    #[must_use]
+    pub fn target(&self) -> Option<&Target> {
+        match &self.availability {
+            Availability::Ready(target) => Some(target),
+            _ => None,
+        }
     }
 
     #[must_use]
@@ -891,6 +906,23 @@ impl Render for HostedView {
                     )
                     .when(self.loading, |this| {
                         this.child(Spinner::new("hosted.loading"))
+                    })
+                    .when(self.kind == HostedKind::PullRequests, |this| {
+                        this.child(
+                            Button::new("hosted.create")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .child(
+                                    lucide(LucideIcon::GitPullRequestCreate)
+                                        .size(px(14.))
+                                        .text_color(c.foreground),
+                                )
+                                .label("New")
+                                .aria_label("New Pull Request")
+                                .on_click(cx.listener(|_, _, _, cx| {
+                                    cx.emit(HostedEvent::CreatePullRequest);
+                                })),
+                        )
                     })
                     .child(
                         Button::new("hosted.reload")

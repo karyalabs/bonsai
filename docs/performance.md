@@ -78,6 +78,12 @@ diff of the 50,000-line file 48 ms, and a message search across all history
 - **A reload reads one page, then pages on to the selected commit.** When
   refs move (a fetch, a commit), History used to read the whole loaded
   history in one `git log`, and laid it all out on the main thread.
+- **Long lists append without stalling.** gpuicn 0.13.3's Virtual List and
+  Commit graph store rows in chunks of 4,096. A few appends used to copy every
+  loaded row (a growing `Vec`) or rehash every ID, and on an idle machine the
+  slowest page's main-thread work reached 8.8 ms against its 8 ms budget. It
+  is now 3.5 to 5.2 ms, the slowest `append_rows` went from 15.9 ms to 2.6 ms,
+  and the 100,000-commit run reports no misses.
 - **The Changes tree opens its folders at once.** gpuicn 0.12.1's
   `TreeState::expand_folders` rebuilds the visible rows once, not once per
   folder.

@@ -10,6 +10,7 @@ pub mod changes;
 pub mod commands;
 pub mod composer;
 pub mod confirm;
+pub mod create_pull_sheet;
 pub mod diff_pane;
 pub mod file_icon;
 pub mod history;
