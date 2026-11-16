@@ -4,7 +4,9 @@
 
 use std::{collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
-use bonsai_git::{CommitInfo, Head, LogFilter, LogReader, LogScope, Oid, ResetMode, Snapshot};
+use bonsai_git::{
+    CommitInfo, Head, LogFilter, LogReader, LogScope, Oid, RebaseAction, ResetMode, Snapshot,
+};
 use bonsai_graph::{Commit, Layout, Row};
 use gpui_icons::LucideIcon;
 use gpui_kit::{
@@ -48,6 +50,16 @@ const PREFETCH: usize = 100;
 pub enum HistoryEvent {
     /// Show this commit's diff, or nothing.
     Selected(Option<(Oid, SharedString)>),
+    /// Open Edit Commits.
+    EditCommits(EditCommits),
+}
+
+/// An interactive rebase to plan: the commits after `base` (`None`: every
+/// commit), with `preset` applied to one of them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditCommits {
+    pub base: Option<Oid>,
+    pub preset: Option<(Oid, RebaseAction)>,
 }
 
 /// What the search field asks for.
@@ -180,6 +192,8 @@ pub struct HistoryView {
     reader: Option<LogReader>,
     /// A commit to page to after a reload, so the selection survives.
     keep: Option<String>,
+    /// How far a reload pages looking for `keep` before giving up on it.
+    keep_depth: usize,
     labels: HashMap<Oid, Vec<GraphLabel>>,
     search: Search,
     paging: Paging,
@@ -244,6 +258,7 @@ impl HistoryView {
             layout: Layout::new(),
             reader: None,
             keep: None,
+            keep_depth: 0,
             labels: HashMap::new(),
             search: Search::default(),
             paging: Paging::More,
@@ -300,6 +315,9 @@ impl HistoryView {
         // Read the first page again, then page on to the selected commit:
         // each page is small, so the window never waits on a whole history.
         self.keep = self.selected().map(|c| c.oid.as_str().to_owned());
+        // A commit a rewrite replaced is gone for good; don't page through
+        // the whole history looking for it.
+        self.keep_depth = self.commits.len() + PAGE;
         self.paging = Paging::More;
         self.load(0, PAGE, cx);
     }
@@ -403,7 +421,14 @@ impl HistoryView {
         if let Some(hash) = target {
             if self.reveal_hash(&hash, cx) {
                 self.keep = None;
-            } else if self.paging != Paging::End && self.commits.len() < MAX_SEARCH_DEPTH {
+            } else if self.paging != Paging::End
+                && self.commits.len()
+                    < if self.search.hash.is_some() {
+                        MAX_SEARCH_DEPTH
+                    } else {
+                        self.keep_depth
+                    }
+            {
                 // Not loaded yet: keep paging until it turns up.
                 self.load(self.commits.len(), PAGE, cx);
                 return;
@@ -411,7 +436,8 @@ impl HistoryView {
                 && let Some(first) = self.graph.row(0)
             {
                 // The kept commit is gone: start on the newest again.
-                self.graph.set_selected([first.id]);
+                self.graph.set_selected([first.id.clone()]);
+                self.graph.reveal(&first.id);
             }
         }
         self.rebuild_menu(cx);
@@ -528,6 +554,64 @@ impl HistoryView {
                 cx,
             );
         });
+    }
+
+    /// Edit Commits and its shortcuts, for a commit that isn't a merge.
+    fn edit_items(&self, commit: &CommitInfo, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        if commit.parents.len() > 1 {
+            return Vec::new();
+        }
+        let this = cx.entity().downgrade();
+        let base = commit.parents.first().cloned();
+        let edit = |request: EditCommits| {
+            let this = this.clone();
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(HistoryEvent::EditCommits(request.clone()));
+                });
+            }
+        };
+        let preset = |action| EditCommits {
+            base: base.clone(),
+            preset: Some((commit.oid.clone(), action)),
+        };
+        // Squashing into the parent edits from the grandparent, if the
+        // parent is loaded and isn't a merge.
+        let grandparent = base.as_ref().and_then(|parent| {
+            self.commits
+                .iter()
+                .find(|c| c.oid == *parent)
+                .filter(|c| c.parents.len() < 2)
+                .map(|c| c.parents.first().cloned())
+        });
+        let mut items = vec![
+            MenuItem::separator(),
+            MenuItem::new("history.edit", "Edit Commits from Here…")
+                .icon(LucideIcon::ListChecks)
+                .on_click(edit(EditCommits {
+                    base: base.clone(),
+                    preset: None,
+                })),
+            MenuItem::new("history.reword", "Reword…")
+                .icon(LucideIcon::PencilLine)
+                .on_click(edit(preset(RebaseAction::Reword))),
+        ];
+        if let Some(grandparent) = grandparent {
+            items.push(
+                MenuItem::new("history.squash", "Squash into Parent…")
+                    .icon(LucideIcon::Combine)
+                    .on_click(edit(EditCommits {
+                        base: grandparent,
+                        preset: Some((commit.oid.clone(), RebaseAction::Squash)),
+                    })),
+            );
+        }
+        items.push(
+            MenuItem::new("history.drop", "Drop…")
+                .icon(LucideIcon::Trash2)
+                .on_click(edit(preset(RebaseAction::Drop))),
+        );
+        items
     }
 
     fn rebuild_menu(&mut self, cx: &mut Context<Self>) {
@@ -647,6 +731,7 @@ impl HistoryView {
                 )
                 .icon(LucideIcon::RotateCcw),
             ]);
+            items.extend(self.edit_items(&commit, cx));
         }
         self.menu.update(cx, |menu, cx| menu.set_items(items, cx));
     }

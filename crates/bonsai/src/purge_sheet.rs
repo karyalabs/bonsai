@@ -979,7 +979,7 @@ fn stepper(current: usize, theme: &UiTheme) -> gpui_kit::Div {
 }
 
 /// A tinted note with an icon: a warning before a rewrite, advice after.
-fn callout(
+pub(crate) fn callout(
     icon: LucideIcon,
     tint: gpui_kit::Rgba,
     lines: &[&str],
