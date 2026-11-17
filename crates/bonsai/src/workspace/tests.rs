@@ -157,6 +157,13 @@ fn files_lists_tracked_files_shows_one_and_offers_its_actions(cx: &mut TestAppCo
     files.update(cx, |_, cx| cx.emit(FilesEvent::Purge(".env".into())));
     cx.run_until_parked();
     workspace.read_with(cx, |w, _| assert!(w.purge.is_some(), "opens Purge"));
+
+    files.update(cx, |files, cx| files.stop_tracking(".env".into(), cx));
+    cx.run_until_parked();
+    files.read_with(cx, |files, _| {
+        assert_eq!(files.paths(), [std::path::PathBuf::from("src/main.rs")]);
+    });
+    assert!(path.join(".env").exists(), "keeps the file");
 }
 
 #[gpui_kit::test]

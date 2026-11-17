@@ -107,6 +107,16 @@ impl Repository {
         }
     }
 
+    /// Stops tracking these paths and ignores each one, keeping the files
+    /// on disk. The removal is staged, ready to commit.
+    pub fn stop_tracking(&self, paths: &[PathBuf]) -> Result<()> {
+        self.run_with_paths(&["rm", "--cached", "-r", "-q", "--ignore-unmatch"], paths)?;
+        for path in paths {
+            self.ignore(&IgnoreRule::Path(path.clone()))?;
+        }
+        Ok(())
+    }
+
     /// Unstages everything.
     pub fn unstage_all(&self) -> Result<()> {
         let root = self.work_tree()?;
