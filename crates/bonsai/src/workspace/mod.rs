@@ -2,6 +2,7 @@
 //! and the command palette.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock};
 
 mod branch_picker;
 mod clone;
@@ -12,10 +13,10 @@ pub use branch_picker::{BranchChoice, branch_items, parse_choice};
 pub use clone::{CloneDialog, CloneEvent};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
-    AppContext as _, Context, Entity, ExternalPaths, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    SharedString, StatefulInteractiveElement as _, Styled, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, ExternalPaths, FocusHandle, Focusable, Image, ImageFormat,
+    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, PathPromptOptions, Render,
+    SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription, Task,
+    Window, div, img, prelude::FluentBuilder as _, px,
 };
 pub use title_bar::BranchSummary;
 
@@ -49,7 +50,7 @@ use crate::{
         resizable::{PaneLimits, Resizable},
         sidebar::{Sidebar, SidebarItem, sidebar_badge},
         tabs::{Tab, Tabs},
-        theme::UiTheme,
+        theme::{ThemeMode, UiTheme},
         toast::{Notice, ToastPlacement, ToastState},
     },
 };
@@ -1993,14 +1994,10 @@ impl Workspace {
             .items_center()
             .gap(px(14.))
             .child(
-                div()
-                    .size(px(48.))
-                    .rounded(px(12.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .bg(c.success.opacity(0.14))
-                    .child(lucide(LucideIcon::Sprout).size(px(26.)).text_color(c.success)),
+                img(bonsai_mark(theme.mode))
+                    .size(px(52.))
+                    .flex_none()
+                    .object_fit(ObjectFit::Contain),
             )
             .child(
                 div()
@@ -2417,3 +2414,19 @@ impl Render for Workspace {
 
 #[cfg(test)]
 mod tests;
+
+/// The Bonsai logo for the Welcome screen, drawn for the theme's mode.
+fn bonsai_mark(mode: ThemeMode) -> Arc<Image> {
+    static LIGHT: LazyLock<Arc<Image>> = LazyLock::new(|| {
+        let svg = include_bytes!("../../../../Assets/Brand/bonsai-mark.svg");
+        Arc::new(Image::from_bytes(ImageFormat::Svg, svg.to_vec()))
+    });
+    static DARK: LazyLock<Arc<Image>> = LazyLock::new(|| {
+        let svg = include_bytes!("../../../../Assets/Brand/bonsai-mark-dark.svg");
+        Arc::new(Image::from_bytes(ImageFormat::Svg, svg.to_vec()))
+    });
+    match mode {
+        ThemeMode::Dark => DARK.clone(),
+        ThemeMode::Light => LIGHT.clone(),
+    }
+}
