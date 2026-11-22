@@ -1361,3 +1361,87 @@ fn compare_lists_both_sides_and_shows_all_changes_or_one_commit(cx: &mut TestApp
         "merged feature into main"
     );
 }
+
+#[gpui_kit::test]
+fn resolves_a_conflicted_file_one_conflict_at_a_time(cx: &mut TestAppContext) {
+    use bonsai_git::Resolution;
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run_unchecked(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_owned()
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    let commit = |text: &str, message: &str| {
+        std::fs::write(path.join("app.rs"), text).unwrap();
+        git(&["add", "app.rs"]);
+        git(&["commit", "-q", "-m", message]);
+    };
+    commit("a\nsame\nsame\nsame\nsame\nb\n", "Start");
+    git(&["checkout", "-q", "-b", "feature"]);
+    commit("a-feature\nsame\nsame\nsame\nsame\nb-feature\n", "Feature");
+    git(&["checkout", "-q", "main"]);
+    commit("a-main\nsame\nsame\nsame\nsame\nb-main\n", "Main");
+    git(&["merge", "-q", "feature"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    cx.run_until_parked();
+
+    let conflict = workspace.read_with(cx, |w, cx| {
+        let conflict = w.tabs[w.active].conflict.clone();
+        assert!(
+            conflict.read(cx).is_shown(),
+            "the resolver replaces the diff"
+        );
+        conflict
+    });
+    conflict.read_with(cx, |conflict, _| {
+        assert_eq!(conflict.path(), Some(&std::path::PathBuf::from("app.rs")));
+        assert_eq!(conflict.conflicts(), 2);
+    });
+
+    conflict.update(cx, |conflict, cx| {
+        conflict.resolve(0, Some(Resolution::Theirs), cx);
+        conflict.save(cx);
+    });
+    cx.run_until_parked();
+    conflict.read_with(cx, |conflict, _| {
+        assert_eq!(conflict.conflicts(), 1, "the saved one is plain text now");
+        assert_eq!(conflict.resolved(), 0);
+    });
+    assert!(git(&["status", "--porcelain"]).starts_with("UU"));
+
+    conflict.update(cx, |conflict, cx| {
+        conflict.resolve(0, Some(Resolution::Both), cx);
+        conflict.save(cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(path.join("app.rs")).unwrap(),
+        "a-feature\nsame\nsame\nsame\nsame\nb-main\nb-feature\n"
+    );
+    assert_eq!(
+        git(&["status", "--porcelain"]),
+        "M  app.rs",
+        "marked resolved"
+    );
+    workspace.read_with(cx, |w, cx| {
+        assert!(
+            !w.tabs[w.active].conflict.read(cx).is_shown(),
+            "back to the diff once resolved"
+        );
+    });
+}
