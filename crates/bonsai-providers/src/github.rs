@@ -7,10 +7,10 @@ use serde_json::json;
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, Label, LineComment, LineTarget, MergeMethod,
-    NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
-    form_encode, percent_encode,
+    HttpClient, Issue, ItemEdit, ItemKind, ItemQuery, ItemState, Label, LineComment, LineTarget,
+    MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind,
+    PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter,
+    Verdict, form_encode, percent_encode,
 };
 
 const PER_PAGE: u32 = 50;
@@ -523,6 +523,7 @@ impl<C: HttpClient> Provider for GitHub<C> {
             search: true,
             create: true,
             create_in_organization: true,
+            labels: true,
         }
     }
 
@@ -931,6 +932,56 @@ impl<C: HttpClient> Provider for GitHub<C> {
         open: bool,
     ) -> BoxFuture<'a, Result<()>> {
         Box::pin(self.update_state(token, full_name, number, open))
+    }
+
+    fn edit_item<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        _: ItemKind,
+        number: u64,
+        edit: &'a ItemEdit,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            let mut body = serde_json::Map::new();
+            if let Some(title) = &edit.title {
+                body.insert("title".to_owned(), json!(title));
+            }
+            if let Some(labels) = &edit.labels {
+                body.insert("labels".to_owned(), json!(labels));
+            }
+            if body.is_empty() {
+                return Ok(());
+            }
+            // The issues endpoint edits pull requests too.
+            self.send(
+                Request::patch(
+                    format!("{}/issues/{number}", self.repo_url(full_name)?),
+                    serde_json::Value::Object(body).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn repo_labels<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Label>>> {
+        Box::pin(async move {
+            let response = self
+                .send(
+                    Request::get(format!("{}/labels?per_page=100", self.repo_url(full_name)?)),
+                    Some(token),
+                )
+                .await?;
+            let labels: Vec<LabelBody> = self.parse(&response.body)?;
+            Ok(labels.into_iter().map(LabelBody::into_label).collect())
+        })
     }
 
     fn pull_request_ref(&self, number: u64) -> Option<String> {

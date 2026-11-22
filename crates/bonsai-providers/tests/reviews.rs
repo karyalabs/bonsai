@@ -922,3 +922,94 @@ fn resolves_threads_on_each_provider() {
     block_on(bitbucket.set_thread_resolved("t", "analytical/engine", 12, "1", false)).unwrap();
     assert!(bitbucket_client.finished());
 }
+
+#[test]
+fn edits_titles_and_labels_on_each_provider() {
+    use bonsai_providers::{Error, ItemEdit, ItemKind};
+    let github_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://api.github.com/repos/ada/engine/labels?per_page=100",
+            json(
+                200,
+                r#"[{"name":"bug","color":"d73a4a"},{"name":"ui","color":"a2eeef"}]"#,
+            ),
+        ),
+        (
+            Method::Patch,
+            "https://api.github.com/repos/ada/engine/issues/7",
+            json(200, r#"{"number":7}"#),
+        ),
+    ]);
+    let github = GitHub::new(&github_client);
+    assert!(github.capabilities().labels);
+    let labels = block_on(github.repo_labels("t", "ada/engine")).unwrap();
+    assert_eq!(labels.len(), 2);
+    assert_eq!(labels[0].name, "bug");
+    assert_eq!(labels[0].color.as_deref(), Some("d73a4a"));
+    let edit = ItemEdit {
+        title: Some("Add the sync bar to the toolbar".to_owned()),
+        labels: Some(vec!["bug".to_owned(), "ui".to_owned()]),
+    };
+    block_on(github.edit_item("t", "ada/engine", ItemKind::PullRequest, 7, &edit)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&github_client.requests()[1].body).unwrap();
+    assert_eq!(sent["title"], "Add the sync bar to the toolbar");
+    assert_eq!(sent["labels"], serde_json::json!(["bug", "ui"]));
+    // Nothing to change sends nothing.
+    block_on(github.edit_item("t", "ada/engine", ItemKind::Issue, 7, &ItemEdit::default()))
+        .unwrap();
+    assert!(github_client.finished());
+
+    let gitlab_client = Recorded::new(vec![
+        (
+            Method::Get,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/labels?per_page=100",
+            json(200, r##"[{"name":"backend","color":"#428BCA"}]"##),
+        ),
+        (
+            Method::Put,
+            "https://gitlab.com/api/v4/projects/team%2Fengine/merge_requests/4",
+            json(200, r#"{"iid":4}"#),
+        ),
+    ]);
+    let gitlab = GitLab::new(&gitlab_client);
+    let labels = block_on(gitlab.repo_labels("t", "team/engine")).unwrap();
+    assert_eq!(labels[0].color.as_deref(), Some("428BCA"));
+    let edit = ItemEdit {
+        title: None,
+        labels: Some(vec!["backend".to_owned(), "ui".to_owned()]),
+    };
+    block_on(gitlab.edit_item("t", "team/engine", ItemKind::PullRequest, 4, &edit)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&gitlab_client.requests()[1].body).unwrap();
+    assert_eq!(sent["labels"], "backend,ui");
+    assert!(sent.get("title").is_none());
+    assert!(gitlab_client.finished());
+
+    let bitbucket_client = Recorded::new(vec![(
+        Method::Put,
+        "https://api.bitbucket.org/2.0/repositories/analytical/engine/issues/2",
+        json(200, r#"{"id":2}"#),
+    )]);
+    let bitbucket = Bitbucket::new(&bitbucket_client);
+    assert!(!bitbucket.capabilities().labels);
+    let none = block_on(bitbucket.repo_labels("t", "analytical/engine")).unwrap();
+    assert_eq!(none, []);
+    let edit = ItemEdit {
+        title: Some("Crash on start".to_owned()),
+        labels: None,
+    };
+    block_on(bitbucket.edit_item("t", "analytical/engine", ItemKind::Issue, 2, &edit)).unwrap();
+    let sent: serde_json::Value =
+        serde_json::from_slice(&bitbucket_client.requests()[0].body).unwrap();
+    assert_eq!(sent["title"], "Crash on start");
+    let labelled = ItemEdit {
+        title: None,
+        labels: Some(vec!["bug".to_owned()]),
+    };
+    let refused =
+        block_on(bitbucket.edit_item("t", "analytical/engine", ItemKind::Issue, 2, &labelled));
+    assert!(matches!(refused, Err(Error::Rejected(_))));
+    assert!(bitbucket_client.finished());
+}

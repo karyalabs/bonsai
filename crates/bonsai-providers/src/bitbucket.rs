@@ -6,10 +6,10 @@ use serde_json::{Value, json};
 
 use crate::{
     Account, BoxFuture, Capabilities, ChangedFile, Check, CheckState, Comment, Error, FileChange,
-    HttpClient, Issue, ItemKind, ItemQuery, ItemState, LineComment, LineTarget, MergeMethod,
-    NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
-    RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter, Verdict,
-    form_encode, oauth::Tokens, percent_encode,
+    HttpClient, Issue, ItemEdit, ItemKind, ItemQuery, ItemState, Label, LineComment, LineTarget,
+    MergeMethod, NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind,
+    PullRequest, RemoteRepository, RepositoryQuery, Request, Response, Result, StateFilter,
+    Verdict, form_encode, oauth::Tokens, percent_encode,
 };
 
 const HOST: &str = "bitbucket.org";
@@ -280,6 +280,7 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
             search: true,
             create: true,
             create_in_organization: true,
+            labels: false,
         }
     }
 
@@ -861,6 +862,43 @@ impl<C: HttpClient> Provider for Bitbucket<C> {
             .await?;
             Ok(())
         })
+    }
+
+    fn edit_item<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        edit: &'a ItemEdit,
+    ) -> BoxFuture<'a, Result<()>> {
+        Box::pin(async move {
+            if edit.labels.is_some() {
+                return Err(Error::Rejected("Bitbucket has no labels.".to_owned()));
+            }
+            let Some(title) = &edit.title else {
+                return Ok(());
+            };
+            let repo = repo_url(full_name)?;
+            let path = match kind {
+                ItemKind::PullRequest => "pullrequests",
+                ItemKind::Issue => "issues",
+            };
+            self.send(
+                Request::put(
+                    format!("{repo}/{path}/{number}"),
+                    json!({ "title": title }).to_string(),
+                )
+                .header("Content-Type", "application/json"),
+                Some(token),
+            )
+            .await?;
+            Ok(())
+        })
+    }
+
+    fn repo_labels<'a>(&'a self, _: &'a str, _: &'a str) -> BoxFuture<'a, Result<Vec<Label>>> {
+        Box::pin(async { Ok(Vec::new()) })
     }
 
     fn pull_request_ref(&self, _: u64) -> Option<String> {

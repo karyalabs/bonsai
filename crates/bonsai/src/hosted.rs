@@ -13,9 +13,9 @@ use std::{
 use bonsai_git::Snapshot;
 use bonsai_keychain::{Secret, TokenStore};
 use bonsai_providers::{
-    ChangedFile, Check, CheckState, Comment, FileChange, HttpClient, Issue, ItemKind, ItemQuery,
-    ItemState, Label, LineComment, LineTarget, MergeMethod, Person, Provider, ProviderKind,
-    PullRequest, StateFilter, Verdict, hosted_repository,
+    ChangedFile, Check, CheckState, Comment, FileChange, HttpClient, Issue, ItemEdit, ItemKind,
+    ItemQuery, ItemState, Label, LineComment, LineTarget, MergeMethod, Person, Provider,
+    ProviderKind, PullRequest, StateFilter, Verdict, hosted_repository,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -31,6 +31,7 @@ use crate::{
     ui::{
         button::{Button, ButtonSize, ButtonVariant},
         empty::{Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyMediaVariant, EmptyTitle},
+        input::{Input, InputEvent, InputState},
         markdown::markdown,
         spinner::Spinner,
         tag::Tag,
@@ -312,7 +313,29 @@ pub struct HostedView {
     reviewing: Option<u64>,
     /// Reviews sent from here, by pull request.
     reviewed: std::collections::HashMap<u64, Verdict>,
+    /// The title and labels being edited.
+    editing: Option<Editing>,
+    /// The repository's labels, loaded when an edit first starts.
+    repo_labels: Option<RepoLabels>,
+    /// The item whose edit is being saved.
+    saving_edit: Option<u64>,
     tasks: Vec<Task<()>>,
+}
+
+/// An item's title and labels while they are edited.
+pub struct Editing {
+    pub number: u64,
+    pub title: Entity<InputState>,
+    /// The chosen label names, in the order they were chosen.
+    pub labels: Vec<String>,
+    _enter: gpui_kit::Subscription,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RepoLabels {
+    Loading,
+    Loaded(Vec<Label>),
+    Failed(SharedString),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -481,6 +504,9 @@ impl HostedView {
             changing_state: None,
             reviewing: None,
             reviewed: std::collections::HashMap::new(),
+            editing: None,
+            repo_labels: None,
+            saving_edit: None,
             tasks: Vec::new(),
         }
     }
@@ -1117,6 +1143,206 @@ impl HostedView {
         cx.notify();
     }
 
+    /// Whether this repository's provider has labels.
+    #[must_use]
+    pub fn supports_labels(&self) -> bool {
+        match &self.availability {
+            Availability::Ready(target) => {
+                provider(
+                    target.connected.account.kind,
+                    &target.connected.account.host,
+                    self.env.client.clone(),
+                )
+                .capabilities()
+                .labels
+            }
+            _ => false,
+        }
+    }
+
+    /// The title and labels being edited, if any.
+    #[must_use]
+    pub fn editing(&self) -> Option<&Editing> {
+        self.editing.as_ref()
+    }
+
+    /// The repository's labels, once an edit has asked for them.
+    #[must_use]
+    pub fn repo_labels(&self) -> Option<&RepoLabels> {
+        self.repo_labels.as_ref()
+    }
+
+    /// Starts editing the selected item's title and labels.
+    pub fn start_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(item) = self.selected().cloned() else {
+            return;
+        };
+        let title = cx.new(|cx| {
+            let mut input = InputState::new(window, cx).placeholder("Title");
+            input.set_value(item.title.clone(), window, cx);
+            input
+        });
+        cx.observe(&title, |_, _, cx| cx.notify()).detach();
+        title.update(cx, |input, cx| input.focus(window, cx));
+        // Enter in the title saves.
+        let enter = cx.subscribe(&title, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::PressEnter { .. }) {
+                this.save_edit(cx);
+            }
+        });
+        self.editing = Some(Editing {
+            number: item.number,
+            title,
+            labels: item.labels.iter().map(|l| l.name.clone()).collect(),
+            _enter: enter,
+        });
+        self.action_error = None;
+        if self.supports_labels() && !matches!(self.repo_labels, Some(RepoLabels::Loaded(_))) {
+            self.load_repo_labels(cx);
+        }
+        cx.notify();
+    }
+
+    fn load_repo_labels(&mut self, cx: &mut Context<Self>) {
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.repo_labels = Some(RepoLabels::Failed(error));
+                return;
+            }
+        };
+        self.repo_labels = Some(RepoLabels::Loading);
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider.repo_labels(&api, &target.full_name).await;
+            let _ = this.update(cx, |this, cx| {
+                this.repo_labels = Some(match result {
+                    Ok(labels) => RepoLabels::Loaded(labels),
+                    Err(error) => RepoLabels::Failed(error.to_string().into()),
+                });
+                cx.notify();
+            });
+        }));
+    }
+
+    /// Stops editing without saving.
+    pub fn cancel_edit(&mut self, cx: &mut Context<Self>) {
+        self.editing = None;
+        cx.notify();
+    }
+
+    /// Adds a label to the edit, or takes it off.
+    pub fn toggle_edit_label(&mut self, name: &str, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_mut() else {
+            return;
+        };
+        if let Some(i) = editing.labels.iter().position(|l| l == name) {
+            editing.labels.remove(i);
+        } else {
+            editing.labels.push(name.to_owned());
+        }
+        cx.notify();
+    }
+
+    /// The labels an edit can choose from: the repository's, then any the
+    /// item has that the repository list doesn't.
+    fn label_choices(&self, item: &Item) -> Vec<Label> {
+        let mut choices = match &self.repo_labels {
+            Some(RepoLabels::Loaded(labels)) => labels.clone(),
+            _ => Vec::new(),
+        };
+        for label in &item.labels {
+            if !choices.iter().any(|c| c.name == label.name) {
+                choices.push(label.clone());
+            }
+        }
+        choices
+    }
+
+    /// Saves the edited title and labels on the provider.
+    pub fn save_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(editing) = self.editing.as_ref() else {
+            return;
+        };
+        let number = editing.number;
+        let Some(item) = self.items.iter().find(|i| i.number == number).cloned() else {
+            return;
+        };
+        if self.saving_edit.is_some() {
+            return;
+        }
+        let title = editing.title.read(cx).value().trim().to_owned();
+        if title.is_empty() {
+            self.action_error = Some((number, "The title can't be empty.".into()));
+            cx.notify();
+            return;
+        }
+        let names: Vec<String> = editing.labels.clone();
+        let old: Vec<&str> = item.labels.iter().map(|l| l.name.as_str()).collect();
+        let edit = ItemEdit {
+            title: (title != item.title).then(|| title.clone()),
+            labels: (names.iter().map(String::as_str).collect::<Vec<_>>() != old)
+                .then(|| names.clone()),
+        };
+        if edit == ItemEdit::default() {
+            self.editing = None;
+            cx.notify();
+            return;
+        }
+        let (target, api, provider) = match self.session() {
+            Ok(session) => session,
+            Err(error) => {
+                self.action_error = Some((number, error));
+                cx.notify();
+                return;
+            }
+        };
+        let labels: Vec<Label> = {
+            let choices = self.label_choices(&item);
+            names
+                .iter()
+                .map(|name| {
+                    choices
+                        .iter()
+                        .find(|c| &c.name == name)
+                        .cloned()
+                        .unwrap_or_else(|| Label {
+                            name: name.clone(),
+                            color: None,
+                        })
+                })
+                .collect()
+        };
+        let kind = self.item_kind();
+        self.saving_edit = Some(number);
+        self.action_error = None;
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = provider
+                .edit_item(&api, &target.full_name, kind, number, &edit)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.saving_edit = None;
+                match result {
+                    Ok(()) => {
+                        if let Some(item) = this.items.iter_mut().find(|i| i.number == number) {
+                            if let Some(title) = edit.title {
+                                item.title = title;
+                            }
+                            if edit.labels.is_some() {
+                                item.labels = labels;
+                            }
+                        }
+                        if this.editing.as_ref().is_some_and(|e| e.number == number) {
+                            this.editing = None;
+                        }
+                    }
+                    Err(error) => this.action_error = Some((number, error.to_string().into())),
+                }
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
     /// Merges the selected pull request on the provider, with the chosen
     /// method, then reloads the list.
     pub fn merge(&mut self, cx: &mut Context<Self>) {
@@ -1511,6 +1737,13 @@ impl HostedView {
         } else {
             markdown(("hosted.body", item.number), item.body.clone(), cx).into_any_element()
         };
+        let editor = this
+            .editing
+            .as_ref()
+            .filter(|e| e.number == item.number)
+            .map(|editing| Self::render_editor(view, this, editing, &item, cx));
+        let editing = editor.is_some();
+        let edit = view.clone();
         let check_out = view.clone();
         let toggle = view.clone();
         let can_change_state = this.can_change_state(&item);
@@ -1883,12 +2116,15 @@ impl HostedView {
                             .child(format!("#{}", item.number)),
                     ),
             )
-            .child(
-                div()
-                    .text_xl()
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(item.title.clone()),
-            )
+            .when(!editing, |this| {
+                this.child(
+                    div()
+                        .text_xl()
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .child(item.title.clone()),
+                )
+            })
+            .children(editor)
             .child(div().text_xs().text_color(c.muted_foreground).child(meta))
             .when_some(item.pull.clone(), |this, pull| {
                 let head = match &pull.head_fork {
@@ -1911,7 +2147,9 @@ impl HostedView {
                         .child(branch_chip(pull.base, cx)),
                 )
             })
-            .when(!item.labels.is_empty(), |this| this.child(labels))
+            .when(!item.labels.is_empty() && !editing, |this| {
+                this.child(labels)
+            })
             .child(
                 div()
                     .flex()
@@ -1945,6 +2183,22 @@ impl HostedView {
                             .label("Open in Browser")
                             .on_click(move |_, _, cx| cx.open_url(&web)),
                     )
+                    .when(!editing, |this| {
+                        this.child(
+                            Button::new("hosted.edit")
+                                .variant(ButtonVariant::Outline)
+                                .size(ButtonSize::Sm)
+                                .child(
+                                    lucide(LucideIcon::Pencil)
+                                        .size(px(14.))
+                                        .text_color(c.foreground),
+                                )
+                                .label("Edit")
+                                .on_click(move |_, window, cx| {
+                                    edit.update(cx, |this, cx| this.start_edit(window, cx));
+                                }),
+                        )
+                    })
                     .when(can_change_state, |this| {
                         this.child(
                             Button::new("hosted.toggle-open")
@@ -1968,6 +2222,135 @@ impl HostedView {
             .when(!showing_files, |this| {
                 this.child(conversation).children(reply)
             })
+            .into_any_element()
+    }
+
+    /// The title input, label chips and Save and Cancel, in place of the
+    /// title while an item is edited.
+    fn render_editor(
+        view: &Entity<Self>,
+        this: &Self,
+        editing: &Editing,
+        item: &Item,
+        cx: &App,
+    ) -> AnyElement {
+        let theme = UiTheme::read(cx).clone();
+        let c = &theme.colors;
+        let saving = this.saving_edit == Some(item.number);
+        let mut column = div().flex().flex_col().gap(px(10.)).child(
+            Input::new(&editing.title)
+                .aria_label("Title")
+                .disabled(saving),
+        );
+        if this.supports_labels() {
+            let mut chips = div().flex().flex_wrap().gap(px(6.));
+            for (i, label) in this.label_choices(item).into_iter().enumerate() {
+                let chosen = editing.labels.contains(&label.name);
+                let dot = label_color(&label).unwrap_or(c.muted_foreground);
+                let toggle = view.clone();
+                let name = label.name.clone();
+                chips = chips.child(
+                    div()
+                        .id(("hosted.edit-label", i))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .px(px(8.))
+                        .py(px(2.))
+                        .rounded(px(999.))
+                        .border_1()
+                        .text_xs()
+                        .cursor_pointer()
+                        .when(chosen, |this| {
+                            this.border_color(c.primary)
+                                .bg(c.primary.opacity(0.12))
+                                .text_color(c.foreground)
+                        })
+                        .when(!chosen, |this| {
+                            this.border_color(c.border)
+                                .text_color(c.muted_foreground)
+                                .hover(|this| this.bg(c.muted))
+                        })
+                        .child(
+                            lucide(if chosen {
+                                LucideIcon::Check
+                            } else {
+                                LucideIcon::Plus
+                            })
+                            .size(px(11.))
+                            .text_color(if chosen {
+                                c.primary
+                            } else {
+                                c.muted_foreground
+                            }),
+                        )
+                        .child(div().size(px(8.)).rounded(px(999.)).bg(dot))
+                        .child(label.name)
+                        .when(!saving, |this| {
+                            this.on_click(move |_, _, cx| {
+                                toggle.update(cx, |this, cx| this.toggle_edit_label(&name, cx));
+                            })
+                        }),
+                );
+            }
+            let status = match &this.repo_labels {
+                Some(RepoLabels::Loading) => {
+                    Some(("Loading labels…".to_owned(), c.muted_foreground))
+                }
+                Some(RepoLabels::Failed(error)) => {
+                    Some((format!("Couldn't load labels: {error}"), c.destructive))
+                }
+                Some(RepoLabels::Loaded(labels)) if labels.is_empty() && item.labels.is_empty() => {
+                    Some((
+                        "This repository has no labels.".to_owned(),
+                        c.muted_foreground,
+                    ))
+                }
+                _ => None,
+            };
+            column = column.child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(6.))
+                    .child(
+                        div()
+                            .text_xs()
+                            .font_weight(gpui_kit::FontWeight::MEDIUM)
+                            .text_color(c.muted_foreground)
+                            .child("Labels"),
+                    )
+                    .child(chips)
+                    .when_some(status, |this, (text, color)| {
+                        this.child(div().text_xs().text_color(color).child(text))
+                    }),
+            );
+        }
+        let save = view.clone();
+        let cancel = view.clone();
+        let empty = editing.title.read(cx).value().trim().is_empty();
+        column
+            .child(
+                div()
+                    .flex()
+                    .gap(px(8.))
+                    .child(
+                        Button::new("hosted.edit-save")
+                            .variant(ButtonVariant::Default)
+                            .size(ButtonSize::Sm)
+                            .label(if saving { "Saving…" } else { "Save" })
+                            .disabled(saving || empty)
+                            .on_click(move |_, _, cx| save.update(cx, Self::save_edit)),
+                    )
+                    .child(
+                        Button::new("hosted.edit-cancel")
+                            .variant(ButtonVariant::Ghost)
+                            .size(ButtonSize::Sm)
+                            .label("Cancel")
+                            .disabled(saving)
+                            .on_click(move |_, _, cx| cancel.update(cx, Self::cancel_edit)),
+                    ),
+            )
             .into_any_element()
     }
 

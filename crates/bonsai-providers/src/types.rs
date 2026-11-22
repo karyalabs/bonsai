@@ -142,6 +142,15 @@ pub struct Label {
     pub color: Option<String>,
 }
 
+/// A change to a pull request's or issue's title, labels, or both. A field
+/// left `None` stays as it is.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ItemEdit {
+    pub title: Option<String>,
+    /// The whole new set of label names.
+    pub labels: Option<Vec<String>>,
+}
+
 /// A pull request (a merge request on GitLab).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PullRequest {
@@ -338,6 +347,8 @@ pub struct Capabilities {
     pub search: bool,
     pub create: bool,
     pub create_in_organization: bool,
+    /// Whether pull requests and issues carry labels.
+    pub labels: bool,
 }
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -546,6 +557,23 @@ pub trait Provider: Send + Sync {
         number: u64,
         open: bool,
     ) -> BoxFuture<'a, Result<()>>;
+
+    /// Changes a pull request's or issue's title, labels, or both.
+    fn edit_item<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+        kind: ItemKind,
+        number: u64,
+        edit: &'a ItemEdit,
+    ) -> BoxFuture<'a, Result<()>>;
+
+    /// The labels a repository offers, the first 100.
+    fn repo_labels<'a>(
+        &'a self,
+        token: &'a str,
+        full_name: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<Label>>>;
 
     /// The ref a pull request's head can be fetched from, for one from a
     /// fork, such as `pull/7/head`. `None` when the provider has none.
