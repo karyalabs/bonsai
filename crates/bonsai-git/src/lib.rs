@@ -9,6 +9,7 @@ mod blame;
 mod branch;
 mod clone;
 mod commit;
+mod compare;
 mod diff;
 mod error;
 mod files;
@@ -34,6 +35,7 @@ pub use blame::{Blame, BlameCommit, BlameLine, parse_porcelain};
 pub use branch::{CheckoutBlocker, is_valid_ref_name};
 pub use clone::{CloneProgress, clone_name};
 pub use commit::Signing;
+pub use compare::Comparison;
 pub use diff::{
     DiffOptions, DiffOutput, DiffTarget, FileVersion, LineCount, LineCounts, Whitespace,
     parse_numstat,
