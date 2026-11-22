@@ -26,6 +26,7 @@ use crate::{
     activity_panel::ActivityPanel,
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
+    compare_view::{CompareEvent, CompareView},
     create_pull_sheet::{CreatePullEvent, CreatePullSheet},
     diff_pane::{DiffPane, DiffPaneEvent},
     files::{FilesEvent, FilesView, Revision},
@@ -62,6 +63,7 @@ pub enum Section {
     Changes,
     History,
     Files,
+    Compare,
     Reflog,
     Activity,
     PullRequests,
@@ -98,6 +100,7 @@ struct RepositoryTab {
     history: Entity<HistoryView>,
     files: Entity<FilesView>,
     reflog: Entity<ReflogView>,
+    compare: Entity<CompareView>,
     /// Built the first time their section opens.
     pulls: Option<(Entity<HostedView>, Subscription)>,
     issues: Option<(Entity<HostedView>, Subscription)>,
@@ -108,6 +111,7 @@ struct RepositoryTab {
     _diff_events: Subscription,
     _files_events: Subscription,
     _reflog_events: Subscription,
+    _compare_events: Subscription,
 }
 
 pub struct Workspace {
@@ -396,6 +400,9 @@ impl Workspace {
                                 this.set_section(Section::History, cx);
                             }
                         }
+                        RefsEvent::Compare { base, head } => {
+                            this.compare(base.clone(), head.clone(), cx);
+                        }
                         RefsEvent::OpenRepository(path) => {
                             if let Err(error) = this.open_path(path, true, cx) {
                                 this.message = Some(error);
@@ -453,6 +460,29 @@ impl Workspace {
                         }
                     },
                 );
+            let compare = cx.new(|cx| CompareView::new(model.clone(), refs.clone(), cx));
+            let compare_diff = diff.downgrade();
+            let compare_history = history.downgrade();
+            let compare_events = cx.subscribe(
+                &compare,
+                move |this, _, event: &CompareEvent, cx| match event {
+                    CompareEvent::Selected(selected) => {
+                        if this.section == Section::Compare {
+                            let (target, title) = selected
+                                .clone()
+                                .map_or((None, SharedString::default()), |(target, title)| {
+                                    (Some(target), title)
+                                });
+                            let _ =
+                                compare_diff.update(cx, |diff, cx| diff.show(target, title, cx));
+                        }
+                    }
+                    CompareEvent::ShowInHistory(oid) => {
+                        let _ = compare_history.update(cx, |history, cx| history.reveal(oid, cx));
+                        this.set_section(Section::History, cx);
+                    }
+                },
+            );
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -465,6 +495,7 @@ impl Workspace {
                 history,
                 files,
                 reflog,
+                compare,
                 pulls: None,
                 issues: None,
                 _changes_events: changes_events,
@@ -473,6 +504,7 @@ impl Workspace {
                 _diff_events: diff_events,
                 _files_events: files_events,
                 _reflog_events: reflog_events,
+                _compare_events: compare_events,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -1331,6 +1363,9 @@ impl Workspace {
             if previous == Section::Reflog {
                 tab.reflog.update(cx, |reflog, _| reflog.deactivate());
             }
+            if previous == Section::Compare {
+                tab.compare.update(cx, |compare, _| compare.deactivate());
+            }
             match section {
                 Section::History => tab.history.update(cx, HistoryView::emit_selection),
                 Section::Changes | Section::Activity => {
@@ -1338,6 +1373,7 @@ impl Workspace {
                 }
                 Section::Files => tab.files.update(cx, FilesView::activate),
                 Section::Reflog => tab.reflog.update(cx, ReflogView::activate),
+                Section::Compare => tab.compare.update(cx, CompareView::activate),
                 Section::PullRequests | Section::Issues => {}
             }
         }
@@ -1456,6 +1492,26 @@ impl Workspace {
     fn on_files(&mut self, _: &commands::ShowFiles, _: &mut Window, cx: &mut Context<Self>) {
         self.set_section(Section::Files, cx);
         cx.notify();
+    }
+
+    fn on_compare(&mut self, _: &commands::ShowCompare, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(Section::Compare, cx);
+        cx.notify();
+    }
+
+    /// Opens Compare with `head` against `base`.
+    pub fn compare(&mut self, base: String, head: String, cx: &mut Context<Self>) {
+        if let Some(compare) = self.compare_view() {
+            compare.update(cx, |compare, cx| compare.set(Some(base), Some(head), cx));
+        }
+        self.set_section(Section::Compare, cx);
+        cx.notify();
+    }
+
+    /// The active tab's Compare view.
+    #[must_use]
+    pub fn compare_view(&self) -> Option<Entity<CompareView>> {
+        self.tabs.get(self.active).map(|tab| tab.compare.clone())
     }
 
     fn on_reflog(&mut self, _: &commands::ShowReflog, _: &mut Window, cx: &mut Context<Self>) {
@@ -1729,6 +1785,19 @@ impl Workspace {
                     })),
             )
             .child(
+                SidebarItem::new("workspace.section.compare", "Compare")
+                    .icon(
+                        lucide(LucideIcon::GitCompareArrows)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    )
+                    .selected(self.section == Section::Compare)
+                    .on_activate(cx.listener(|this, _, _, cx| {
+                        this.set_section(Section::Compare, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
                 SidebarItem::new("workspace.section.reflog", "Reflog")
                     .icon(
                         lucide(LucideIcon::ArchiveRestore)
@@ -1832,6 +1901,10 @@ impl Workspace {
             },
             (Section::Files, Some(_), _) => match self.tabs.get(self.active) {
                 Some(tab) => tab.files.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
+            (Section::Compare, Some(_), _) => match self.tabs.get(self.active) {
+                Some(tab) => tab.compare.clone().into_any_element(),
                 None => div().into_any_element(),
             },
             (Section::Reflog, Some(_), _) => match self.tabs.get(self.active) {
@@ -2435,6 +2508,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_history))
             .on_action(cx.listener(Self::on_files))
             .on_action(cx.listener(Self::on_reflog))
+            .on_action(cx.listener(Self::on_compare))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_commit_and_push))

@@ -8,6 +8,7 @@ pub mod avatar;
 pub mod blame_view;
 pub mod changes;
 pub mod commands;
+pub mod compare_view;
 pub mod composer;
 pub mod confirm;
 pub mod create_pull_sheet;

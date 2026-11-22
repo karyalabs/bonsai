@@ -106,6 +106,8 @@ pub enum RefsEvent {
     ShowInHistory(Oid),
     /// Open this folder (a worktree) in a tab.
     OpenRepository(PathBuf),
+    /// Compare `head` against `base`.
+    Compare { base: String, head: String },
 }
 
 /// Something to switch to.
@@ -533,6 +535,21 @@ impl RefsPanel {
         ];
         vec![
             MenuItem::separator(),
+            MenuItem::new("refs.compare", format!("Compare with {current}"))
+                .icon(LucideIcon::GitCompareArrows)
+                .on_click({
+                    let this = this.clone();
+                    let base = current.clone();
+                    let head = rev.clone();
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |_, cx| {
+                            cx.emit(RefsEvent::Compare {
+                                base: base.clone(),
+                                head: head.clone(),
+                            });
+                        });
+                    }
+                }),
             MenuItem::new("refs.merge", format!("Merge {rev} into {current}"))
                 .icon(LucideIcon::GitMerge)
                 .on_click(with(&this, {

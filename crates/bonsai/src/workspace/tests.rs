@@ -255,6 +255,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.changes",
         "view.history",
         "view.files",
+        "view.compare",
         "view.reflog",
         "view.activity",
         "view.pull-requests",
@@ -1255,4 +1256,108 @@ fn reflog_finds_a_lost_commit_shows_it_and_restores_it(cx: &mut TestAppContext) 
     reflog.read_with(cx, |reflog, _| {
         assert_eq!(reflog.entries()[0].describe(), "Cherry-picked", "reloads");
     });
+}
+
+#[gpui_kit::test]
+fn compare_lists_both_sides_and_shows_all_changes_or_one_commit(cx: &mut TestAppContext) {
+    use crate::compare_view::{CompareView, Selection};
+    use bonsai_git::{DiffTarget, Oid};
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_owned()
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    let commit = |file: &str, message: &str| {
+        std::fs::write(path.join(file), format!("{message}\n")).unwrap();
+        git(&["add", file]);
+        git(&["commit", "-q", "-m", message]);
+    };
+    commit("README.md", "Start");
+    let start = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", "-b", "feature"]);
+    commit("a.rs", "Add a");
+    commit("b.rs", "Add b");
+    let feature = git(&["rev-parse", "HEAD"]);
+    git(&["checkout", "-q", "main"]);
+    commit("main.rs", "Add main");
+    git(&["checkout", "-q", "feature"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    cx.run_until_parked();
+
+    cx.dispatch_action(commands::ShowCompare);
+    cx.run_until_parked();
+    let compare = workspace.read_with(cx, |w, _| {
+        assert_eq!(w.section(), Section::Compare);
+        w.compare_view().unwrap()
+    });
+    compare.read_with(cx, |compare, _| {
+        assert_eq!(compare.base(), Some("main"), "the main branch");
+        assert_eq!(compare.head(), Some("feature"), "the current branch");
+        let comparison = compare.comparison().expect("compares");
+        assert_eq!((comparison.ahead_count, comparison.behind_count), (2, 1));
+        assert_eq!(comparison.files_changed, 2);
+        assert_eq!(compare.selected(), Some(&Selection::AllChanges));
+    });
+    let shown = |cx: &mut VisualTestContext| {
+        workspace.read_with(cx, |w, cx| w.tabs[w.active].diff.read(cx).target().cloned())
+    };
+    assert_eq!(
+        shown(cx),
+        Some(DiffTarget::Range {
+            from: Oid::new(start),
+            to: Oid::new(feature.clone()),
+        }),
+        "everything feature changed since it left main"
+    );
+
+    let add_b = Oid::new(feature);
+    compare.update(cx, |compare, cx| {
+        compare.select(Some(Selection::Commit(add_b.clone())), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(shown(cx), Some(DiffTarget::Commit(add_b)));
+
+    compare.update(cx, CompareView::swap);
+    cx.run_until_parked();
+    compare.read_with(cx, |compare, _| {
+        assert_eq!(compare.base(), Some("feature"));
+        let comparison = compare.comparison().unwrap();
+        assert_eq!((comparison.ahead_count, comparison.behind_count), (1, 2));
+        assert_eq!(comparison.ahead[0].summary, "Add main");
+    });
+
+    git(&["checkout", "-q", "main"]);
+    workspace.update(cx, |w, cx| {
+        w.tabs[w.active]
+            .model
+            .update(cx, crate::repository::RepositoryModel::refresh);
+    });
+    cx.run_until_parked();
+    workspace.update(cx, |w, cx| {
+        w.compare("main".into(), "feature".into(), cx);
+    });
+    cx.run_until_parked();
+    compare.update(cx, CompareView::merge);
+    cx.run_until_parked();
+    assert_eq!(
+        git(&["rev-list", "--count", "main..feature"]),
+        "0",
+        "merged feature into main"
+    );
 }
