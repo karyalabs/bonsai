@@ -302,6 +302,8 @@ pub enum ChangesEvent {
     Focused(Option<DiffTarget>, SharedString),
     /// Purge from History was chosen for this path.
     Purge(PathBuf),
+    /// The active row is this conflicted file: show the resolver.
+    Conflict(PathBuf, bonsai_git::ConflictKind),
 }
 
 impl ChangeRow {
@@ -427,6 +429,18 @@ impl ChangesView {
     }
 
     fn emit_focus(&mut self, cx: &mut Context<Self>) {
+        if let Some((path, kind)) = self.focused_row().and_then(|row| {
+            let change = row.change.as_ref()?;
+            match (row.group, change.kind) {
+                (Group::Conflicted, ChangeKind::Conflicted(kind)) => {
+                    Some((change.path.clone(), kind))
+                }
+                _ => None,
+            }
+        }) {
+            cx.emit(ChangesEvent::Conflict(path, kind));
+            return;
+        }
         let (target, title) = self
             .focused_row()
             .map_or((None, SharedString::default()), |row| {

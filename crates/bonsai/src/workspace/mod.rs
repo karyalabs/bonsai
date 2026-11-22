@@ -27,6 +27,7 @@ use crate::{
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     compare_view::{CompareEvent, CompareView},
+    conflict_view::ConflictView,
     create_pull_sheet::{CreatePullEvent, CreatePullSheet},
     diff_pane::{DiffPane, DiffPaneEvent},
     files::{FilesEvent, FilesView, Revision},
@@ -101,6 +102,7 @@ struct RepositoryTab {
     files: Entity<FilesView>,
     reflog: Entity<ReflogView>,
     compare: Entity<CompareView>,
+    conflict: Entity<ConflictView>,
     /// Built the first time their section opens.
     pulls: Option<(Entity<HostedView>, Subscription)>,
     issues: Option<(Entity<HostedView>, Subscription)>,
@@ -336,15 +338,28 @@ impl Workspace {
             let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
             let sync = cx.new(|cx| SyncBar::new(model.clone(), cx));
             let diff_target = diff.downgrade();
+            let conflict = cx.new(|_| ConflictView::new(model.clone()));
+            let conflict_target = conflict.downgrade();
             let changes_events = cx.subscribe(
                 &changes,
                 move |this, _, event: &ChangesEvent, cx| match event {
                     ChangesEvent::Focused(target, title) => {
-                        if this.section != Section::History {
+                        // History, Compare and Reflog show their own commits.
+                        if !matches!(
+                            this.section,
+                            Section::History | Section::Compare | Section::Reflog
+                        ) {
+                            let _ = conflict_target.update(cx, |conflict, _| conflict.hide());
                             let _ = diff_target.update(cx, |diff, cx| {
                                 diff.show(target.clone(), title.clone(), cx);
                             });
                         }
+                    }
+                    ChangesEvent::Conflict(path, kind) => {
+                        let _ = conflict_target.update(cx, |conflict, cx| {
+                            conflict.show(path.clone(), *kind, cx);
+                        });
+                        cx.notify();
                     }
                     ChangesEvent::Purge(path) => {
                         this.purge_requested = Some(path.clone());
@@ -496,6 +511,7 @@ impl Workspace {
                 files,
                 reflog,
                 compare,
+                conflict,
                 pulls: None,
                 issues: None,
                 _changes_events: changes_events,
@@ -1938,6 +1954,11 @@ impl Workspace {
                     None => this,
                 },
                 None => match self.tabs.get(self.active) {
+                    Some(tab)
+                        if self.section == Section::Changes && tab.conflict.read(cx).is_shown() =>
+                    {
+                        this.child(tab.conflict.clone())
+                    }
                     Some(tab) => this.child(tab.diff.clone()),
                     None => this,
                 },
