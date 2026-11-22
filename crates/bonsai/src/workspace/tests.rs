@@ -255,6 +255,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "view.changes",
         "view.history",
         "view.files",
+        "view.reflog",
         "view.activity",
         "view.pull-requests",
         "view.issues",
@@ -1173,4 +1174,85 @@ mod hosted {
         assert_eq!(edit.1["title"], "Add the sync bar to the toolbar");
         assert_eq!(edit.1["labels"], serde_json::json!(["bug"]));
     }
+}
+
+#[gpui_kit::test]
+fn reflog_finds_a_lost_commit_shows_it_and_restores_it(cx: &mut TestAppContext) {
+    use crate::{reflog_view::ReflogView, refs::RefDialog};
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap()
+            .stdout_lossy()
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    git(&["commit", "-q", "--allow-empty", "-m", "First"]);
+    std::fs::write(path.join("engine.md"), "Draft\n").unwrap();
+    git(&["add", "engine.md"]);
+    git(&["commit", "-q", "-m", "Draft the engine"]);
+    let lost = git(&["rev-parse", "HEAD"]).trim().to_owned();
+    git(&["reset", "-q", "--hard", "HEAD~1"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+
+    cx.dispatch_action(commands::ShowReflog);
+    cx.run_until_parked();
+    let reflog = workspace.read_with(cx, |w, _| {
+        assert_eq!(w.section(), Section::Reflog);
+        w.reflog_view().unwrap()
+    });
+    reflog.read_with(cx, |reflog, _| {
+        let entries = reflog.entries();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].describe(), "Reset to HEAD~1");
+        assert!(!entries[0].lost);
+        assert_eq!(entries[1].oid.as_str(), lost);
+        assert!(entries[1].lost);
+    });
+
+    reflog.update(cx, |reflog, cx| reflog.select(Some(1), cx));
+    cx.run_until_parked();
+    workspace.read_with(cx, |w, cx| {
+        let diff = w.tabs[w.active].diff.read(cx);
+        assert_eq!(
+            diff.target(),
+            Some(&bonsai_git::DiffTarget::Commit(bonsai_git::Oid::new(
+                lost.clone()
+            ))),
+            "shows the lost commit"
+        );
+    });
+
+    reflog.update(cx, ReflogView::restore_as_branch);
+    workspace.read_with(cx, |w, cx| {
+        let refs = w.tabs[w.active].refs.read(cx);
+        assert_eq!(
+            refs.dialog(),
+            Some(&RefDialog::CreateBranch {
+                start: Some(lost.clone())
+            }),
+            "asks for the new branch's name"
+        );
+    });
+
+    reflog.update(cx, ReflogView::cherry_pick);
+    cx.run_until_parked();
+    assert_eq!(
+        git(&["log", "-1", "--format=%s"]).trim(),
+        "Draft the engine"
+    );
+    reflog.read_with(cx, |reflog, _| {
+        assert_eq!(reflog.entries()[0].describe(), "Cherry-picked", "reloads");
+    });
 }

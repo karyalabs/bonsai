@@ -19,6 +19,7 @@ mod path;
 mod purge;
 mod rebase;
 mod redact;
+mod reflog;
 mod remote;
 mod repository;
 mod runner;
@@ -43,6 +44,7 @@ pub use log::{CommitDetails, CommitInfo, LogFilter, LogReader, LogScope, Signatu
 pub use patch::{ApplyMode, LinePosition, LineSide, hunk_changes, partial_patch};
 pub use purge::{PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange};
 pub use rebase::{RebaseAction, RebaseStep, rebase_todo};
+pub use reflog::{ReflogAction, ReflogEntry};
 pub use remote::RemoteFailure;
 pub use repository::Repository;
 pub use runner::{
