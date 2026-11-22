@@ -21,7 +21,7 @@ MANIFEST_PATH="$DIST_DIR/$APP_NAME.release.plist"
 DMG_STAGING_DIR="$DIST_DIR/dmg"
 APP_ICON_SOURCE="$ROOT_DIR/Assets/AppIcon/Bonsai.icns"
 APP_ICON_DOCUMENT_SOURCE="$ROOT_DIR/Assets/AppIcon/Bonsai.icon"
-APP_MARK_SOURCE="$ROOT_DIR/Assets/AppIcon/bonsai-worktree-topology.svg"
+APP_MARK_SOURCE="$ROOT_DIR/Assets/Brand/bonsai-mark.svg"
 
 usage() {
   cat >&2 <<USAGE
@@ -114,7 +114,7 @@ stage_app_bundle() {
   chmod +x "$APP_BINARY"
   cp "$APP_ICON_SOURCE" "$APP_RESOURCES/Bonsai.icns"
   ditto "$APP_ICON_DOCUMENT_SOURCE" "$APP_RESOURCES/Bonsai.icon"
-  cp "$APP_MARK_SOURCE" "$APP_RESOURCES/bonsai-worktree-topology.svg"
+  cp "$APP_MARK_SOURCE" "$APP_RESOURCES/bonsai-mark.svg"
 
   cat >"$INFO_PLIST" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -170,7 +170,7 @@ validate_app_bundle() {
   require_file "$INFO_PLIST"
   require_file "$APP_RESOURCES/Bonsai.icns"
   require_file "$APP_RESOURCES/Bonsai.icon/icon.json"
-  require_file "$APP_RESOURCES/bonsai-worktree-topology.svg"
+  require_file "$APP_RESOURCES/bonsai-mark.svg"
 
   plutil -lint "$INFO_PLIST" >/dev/null
 
