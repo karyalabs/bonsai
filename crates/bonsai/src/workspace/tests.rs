@@ -1089,4 +1089,88 @@ mod hosted {
         assert_eq!(sent[7].1["state"], "closed");
         assert_eq!(sent[8].1["state"], "open");
     }
+
+    #[gpui_kit::test]
+    fn edits_a_pull_requests_title_and_labels(cx: &mut TestAppContext) {
+        use bonsai_providers::Method;
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let local = root.join("engine");
+        Repository::init(&Git::locate(None).unwrap(), &local, Some("main")).unwrap();
+        git(
+            &local,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://github.com/ada/engine.git",
+            ],
+        );
+        let store: Arc<dyn TokenStore> = Arc::new(MemoryStore::default());
+        ada(&root, &store);
+        let client = Arc::new(Routes {
+            routes: vec![
+                (
+                    Method::Get,
+                    "/pulls?",
+                    format!("[{}]", pull(7, "feature/sync", "ada/engine", false)),
+                ),
+                (
+                    Method::Get,
+                    "/labels?",
+                    r#"[{"name":"bug","color":"d73a4a"},{"name":"ui","color":"a2eeef"}]"#.into(),
+                ),
+                (Method::Patch, "/issues/7", r#"{"number":7}"#.into()),
+            ],
+            sent: std::sync::Mutex::new(Vec::new()),
+        });
+        let (workspace, cx) = setup(cx, Session::default(), None);
+        workspace.update(cx, |workspace, cx| {
+            workspace.set_hosted_env(HostedEnv {
+                accounts_path: accounts_path(&root),
+                store,
+                client: client.clone(),
+            });
+            workspace.open_path(&local, true, cx).unwrap();
+        });
+        cx.run_until_parked();
+        cx.dispatch_action(commands::ShowPullRequests);
+        cx.run_until_parked();
+        let view = workspace.read_with(cx, |w, _| w.hosted_view()).unwrap();
+        view.update_in(cx, HostedView::start_edit);
+        cx.run_until_parked();
+        let title = view.read_with(cx, |view, _| {
+            assert!(view.supports_labels());
+            let Some(crate::hosted::RepoLabels::Loaded(labels)) = view.repo_labels() else {
+                panic!("the repository's labels load");
+            };
+            assert_eq!(labels.len(), 2);
+            view.editing().unwrap().title.clone()
+        });
+        title.update_in(cx, |input, window, cx| {
+            input.set_value("Add the sync bar to the toolbar", window, cx);
+        });
+        view.update(cx, |view, cx| {
+            assert_eq!(view.editing().unwrap().labels, ["ui"]);
+            view.toggle_edit_label("bug", cx);
+            view.toggle_edit_label("ui", cx);
+        });
+        view.update(cx, HostedView::save_edit);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.editing().is_none(), "saving closes the editor");
+            let item = view.selected().unwrap();
+            assert_eq!(item.title, "Add the sync bar to the toolbar");
+            let names: Vec<_> = item.labels.iter().map(|l| l.name.as_str()).collect();
+            assert_eq!(names, ["bug"]);
+            assert_eq!(item.labels[0].color.as_deref(), Some("d73a4a"));
+        });
+        let sent = client.sent.lock().unwrap();
+        let edit = sent
+            .iter()
+            .find(|(url, _)| url.ends_with("/issues/7"))
+            .unwrap();
+        assert_eq!(edit.1["title"], "Add the sync bar to the toolbar");
+        assert_eq!(edit.1["labels"], serde_json::json!(["bug"]));
+    }
 }
