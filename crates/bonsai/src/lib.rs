@@ -21,6 +21,7 @@ pub mod new_issue_sheet;
 pub mod publish_sheet;
 pub mod purge_sheet;
 pub mod rebase_sheet;
+pub mod reflog_view;
 pub mod refs;
 pub mod remote_browser;
 pub mod repository;

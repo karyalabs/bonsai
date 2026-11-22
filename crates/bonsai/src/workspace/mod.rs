@@ -35,6 +35,7 @@ use crate::{
     publish_sheet::{PublishEvent, PublishSheet},
     purge_sheet::{PurgeEvent, PurgeSheet, backup_dir},
     rebase_sheet::{RebaseEvent, RebaseSheet},
+    reflog_view::{ReflogEvent, ReflogView},
     refs::{RefDialog, RefsEvent, RefsPanel},
     remote_browser::{RemoteBrowser, RemoteBrowserEvent},
     repository::{RepositoryEvent, RepositoryModel},
@@ -61,6 +62,7 @@ pub enum Section {
     Changes,
     History,
     Files,
+    Reflog,
     Activity,
     PullRequests,
     Issues,
@@ -95,6 +97,7 @@ struct RepositoryTab {
     activity: Entity<ActivityPanel>,
     history: Entity<HistoryView>,
     files: Entity<FilesView>,
+    reflog: Entity<ReflogView>,
     /// Built the first time their section opens.
     pulls: Option<(Entity<HostedView>, Subscription)>,
     issues: Option<(Entity<HostedView>, Subscription)>,
@@ -104,6 +107,7 @@ struct RepositoryTab {
     _refs_events: Subscription,
     _diff_events: Subscription,
     _files_events: Subscription,
+    _reflog_events: Subscription,
 }
 
 pub struct Workspace {
@@ -424,6 +428,31 @@ impl Workspace {
                 }
                 cx.notify();
             });
+            let reflog = cx.new(|cx| ReflogView::new(model.clone(), refs.clone(), cx));
+            let reflog_diff = diff.downgrade();
+            let reflog_history = history.downgrade();
+            let reflog_events =
+                cx.subscribe(
+                    &reflog,
+                    move |this, _, event: &ReflogEvent, cx| match event {
+                        ReflogEvent::Selected(selected) => {
+                            if this.section == Section::Reflog {
+                                let (target, title) = selected
+                                    .clone()
+                                    .map_or((None, SharedString::default()), |(oid, summary)| {
+                                        (Some(DiffTarget::Commit(oid)), summary)
+                                    });
+                                let _ =
+                                    reflog_diff.update(cx, |diff, cx| diff.show(target, title, cx));
+                            }
+                        }
+                        ReflogEvent::ShowInHistory(oid) => {
+                            let _ =
+                                reflog_history.update(cx, |history, cx| history.reveal(oid, cx));
+                            this.set_section(Section::History, cx);
+                        }
+                    },
+                );
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -435,6 +464,7 @@ impl Workspace {
                 activity,
                 history,
                 files,
+                reflog,
                 pulls: None,
                 issues: None,
                 _changes_events: changes_events,
@@ -442,6 +472,7 @@ impl Workspace {
                 _refs_events: refs_events,
                 _diff_events: diff_events,
                 _files_events: files_events,
+                _reflog_events: reflog_events,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -1294,14 +1325,19 @@ impl Workspace {
         if self.section == section {
             return;
         }
+        let previous = self.section;
         self.section = section;
         if let Some(tab) = self.tabs.get(self.active) {
+            if previous == Section::Reflog {
+                tab.reflog.update(cx, |reflog, _| reflog.deactivate());
+            }
             match section {
                 Section::History => tab.history.update(cx, HistoryView::emit_selection),
                 Section::Changes | Section::Activity => {
                     tab.changes.update(cx, ChangesView::refocus);
                 }
                 Section::Files => tab.files.update(cx, FilesView::activate),
+                Section::Reflog => tab.reflog.update(cx, ReflogView::activate),
                 Section::PullRequests | Section::Issues => {}
             }
         }
@@ -1420,6 +1456,17 @@ impl Workspace {
     fn on_files(&mut self, _: &commands::ShowFiles, _: &mut Window, cx: &mut Context<Self>) {
         self.set_section(Section::Files, cx);
         cx.notify();
+    }
+
+    fn on_reflog(&mut self, _: &commands::ShowReflog, _: &mut Window, cx: &mut Context<Self>) {
+        self.set_section(Section::Reflog, cx);
+        cx.notify();
+    }
+
+    /// The active tab's Reflog view.
+    #[must_use]
+    pub fn reflog_view(&self) -> Option<Entity<ReflogView>> {
+        self.tabs.get(self.active).map(|tab| tab.reflog.clone())
     }
 
     fn on_activity(&mut self, _: &commands::ShowActivity, _: &mut Window, cx: &mut Context<Self>) {
@@ -1682,6 +1729,19 @@ impl Workspace {
                     })),
             )
             .child(
+                SidebarItem::new("workspace.section.reflog", "Reflog")
+                    .icon(
+                        lucide(LucideIcon::ArchiveRestore)
+                            .size(px(16.))
+                            .text_color(c.sidebar_foreground),
+                    )
+                    .selected(self.section == Section::Reflog)
+                    .on_activate(cx.listener(|this, _, _, cx| {
+                        this.set_section(Section::Reflog, cx);
+                        cx.notify();
+                    })),
+            )
+            .child(
                 SidebarItem::new("workspace.section.activity", "Activity")
                     .icon(
                         lucide(LucideIcon::ScrollText)
@@ -1772,6 +1832,10 @@ impl Workspace {
             },
             (Section::Files, Some(_), _) => match self.tabs.get(self.active) {
                 Some(tab) => tab.files.clone().into_any_element(),
+                None => div().into_any_element(),
+            },
+            (Section::Reflog, Some(_), _) => match self.tabs.get(self.active) {
+                Some(tab) => tab.reflog.clone().into_any_element(),
                 None => div().into_any_element(),
             },
             (Section::PullRequests | Section::Issues, Some(_), _) => match self.hosted_view() {
@@ -2370,6 +2434,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_changes))
             .on_action(cx.listener(Self::on_history))
             .on_action(cx.listener(Self::on_files))
+            .on_action(cx.listener(Self::on_reflog))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_commit_and_push))
