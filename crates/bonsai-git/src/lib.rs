@@ -24,6 +24,7 @@ mod rebase;
 mod redact;
 mod reflog;
 mod remote;
+mod repo_settings;
 mod repository;
 mod runner;
 mod snapshot;
@@ -57,6 +58,7 @@ pub use purge::{
 pub use rebase::{RebaseAction, RebaseStep, rebase_todo};
 pub use reflog::{ReflogAction, ReflogEntry};
 pub use remote::RemoteFailure;
+pub use repo_settings::{ConfigValue, Hook, RepoSettings, RepoSettingsEdit, SigningChoice};
 pub use repository::Repository;
 pub use runner::{
     ASKPASS_MODE_ENV, CancelToken, CommandLog, CommandRecord, Git, GitCommand, Output, OutputStream,

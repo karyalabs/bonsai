@@ -119,8 +119,8 @@ impl SettingsSheet {
 
     /// A settings row: the label and a line on what it does on the left,
     /// the control on the right.
-    fn row(
-        label: &'static str,
+    pub(crate) fn row(
+        label: impl Into<SharedString>,
         caption: impl Into<SharedString>,
         caption_color: Option<gpui_kit::Rgba>,
         control: impl IntoElement,
@@ -139,7 +139,7 @@ impl SettingsSheet {
                     .flex()
                     .flex_col()
                     .gap(px(2.))
-                    .child(div().text_sm().child(label))
+                    .child(div().text_sm().child(label.into()))
                     .child(
                         div()
                             .text_xs()
@@ -151,7 +151,7 @@ impl SettingsSheet {
     }
 
     /// A field row: the label and caption above a full-width input.
-    fn field_row(
+    pub(crate) fn field_row(
         label: &'static str,
         caption: impl Into<SharedString>,
         caption_color: Option<gpui_kit::Rgba>,
@@ -174,7 +174,7 @@ impl SettingsSheet {
             )
     }
 
-    fn section(
+    pub(crate) fn section(
         title: &'static str,
         icon: LucideIcon,
         rows: Vec<gpui_kit::Div>,

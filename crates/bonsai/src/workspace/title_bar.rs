@@ -217,6 +217,16 @@ impl Workspace {
             "secondary-n",
             || Box::new(commands::NewRepository),
         ));
+        if !self.welcome && !self.tabs.is_empty() {
+            items.push(MenuItem::separator());
+            items.push(action(
+                "repo.action.settings",
+                "Repository Settings…",
+                LucideIcon::Settings,
+                "secondary-alt-,",
+                || Box::new(commands::RepositorySettings),
+            ));
+        }
         self.repo_menu
             .update(cx, |menu, cx| menu.set_items(items, cx));
         self.repo_menu_key = key;

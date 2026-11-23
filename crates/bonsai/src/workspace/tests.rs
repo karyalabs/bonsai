@@ -269,6 +269,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.purge",
         "repository.scan-history",
         "edit.undo",
+        "repository.settings",
         "edit.redo",
         "repository.bisect",
         "repository.add-submodule",

@@ -41,6 +41,7 @@ use crate::{
     reflog_view::{ReflogEvent, ReflogView},
     refs::{RefDialog, RefsEvent, RefsPanel},
     remote_browser::{RemoteBrowser, RemoteBrowserEvent},
+    repo_settings_sheet::{RepoSettingsEvent, RepoSettingsSheet},
     repository::{RepositoryEvent, RepositoryModel, UndoNote},
     session::Session,
     settings_sheet::{SettingsEvent, SettingsSheet},
@@ -144,6 +145,8 @@ pub struct Workspace {
     accounts_events: Option<Subscription>,
     settings_handle: DialogHandle,
     settings: Option<(Entity<SettingsSheet>, Subscription)>,
+    repo_settings_handle: DialogHandle,
+    repo_settings: Option<(Entity<RepoSettingsSheet>, Subscription)>,
     /// Fetches open repositories every few minutes, as Settings says.
     auto_fetch: Option<Task<()>>,
     publish_handle: DialogHandle,
@@ -217,6 +220,8 @@ impl Workspace {
             accounts: None,
             accounts_events: None,
             settings_handle: DialogHandle::new(false),
+            repo_settings_handle: DialogHandle::new(false),
+            repo_settings: None,
             settings: None,
             auto_fetch: None,
             publish_handle: DialogHandle::new(false),
@@ -913,6 +918,70 @@ impl Workspace {
         self.settings = Some((sheet, events));
         self.settings_handle.open(window, cx);
         cx.notify();
+    }
+
+    /// Opens Repository Settings for the active repository.
+    pub fn show_repo_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = self.active_model().filter(|_| !self.welcome).cloned() else {
+            return;
+        };
+        let sheet = cx.new(|cx| RepoSettingsSheet::new(model, window, cx));
+        let events = cx.subscribe_in(
+            &sheet,
+            window,
+            |this, _, event: &RepoSettingsEvent, window, cx| match event {
+                RepoSettingsEvent::Dismissed => {
+                    this.repo_settings_handle.close(window, cx);
+                    this.repo_settings = None;
+                    cx.notify();
+                }
+            },
+        );
+        self.repo_settings = Some((sheet, events));
+        self.repo_settings_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn repo_settings_sheet(&self) -> Option<&Entity<RepoSettingsSheet>> {
+        self.repo_settings.as_ref().map(|(sheet, _)| sheet)
+    }
+
+    fn on_repo_settings(
+        &mut self,
+        _: &commands::RepositorySettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_repo_settings(window, cx);
+    }
+
+    fn render_repo_settings(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.repo-settings.popup", "Repository Settings", cx)
+            .max_w(px(560.))
+            .when_some(
+                self.repo_settings.as_ref().map(|(sheet, _)| sheet.clone()),
+                gpui_kit::ParentElement::child,
+            );
+        let this = cx.entity().downgrade();
+        dialog(
+            "workspace.repo-settings",
+            &self.repo_settings_handle,
+            popup,
+            window,
+            cx,
+        )
+        .on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.repo_settings = None;
+                cx.notify();
+            });
+            true
+        })
     }
 
     #[must_use]
@@ -2681,6 +2750,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_compare))
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_repo_settings))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_commit_and_push))
@@ -2719,6 +2789,7 @@ impl Render for Workspace {
             .child(self.render_rebase(window, cx))
             .child(self.render_accounts(window, cx))
             .child(self.render_settings(window, cx))
+            .child(self.render_repo_settings(window, cx))
             .child(self.render_publish(window, cx))
             .child(self.render_create_pull(window, cx))
             .child(self.render_new_issue(window, cx))
