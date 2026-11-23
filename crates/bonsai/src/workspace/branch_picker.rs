@@ -258,6 +258,7 @@ mod tests {
             remotes: Vec::new(),
             stashes: Vec::new(),
             worktrees: Vec::new(),
+            submodules: Vec::new(),
             operation: None,
         };
         let items = branch_items(&snapshot);

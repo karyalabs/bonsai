@@ -28,6 +28,7 @@ mod repository;
 mod runner;
 mod snapshot;
 mod stash;
+mod submodules;
 mod sync;
 mod version;
 mod worktree;
@@ -64,6 +65,10 @@ pub use snapshot::{
     RemoteBranch, Snapshot, Stash, Tag, Tracking,
 };
 pub use stash::{StashContents, stash_diff};
+pub use submodules::{
+    Submodule, SubmoduleCommit, SubmoduleMove, SubmoduleState, parse_submodule_patch,
+    parse_submodule_status,
+};
 pub use sync::{Progress, PullMode, PushRequest, RewrittenBranch, SyncFailure};
 pub use version::GitVersion;
 pub use worktree::IgnoreRule;

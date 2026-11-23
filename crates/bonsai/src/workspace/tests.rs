@@ -269,6 +269,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.purge",
         "repository.scan-history",
         "repository.bisect",
+        "repository.add-submodule",
         "repository.publish",
         "repository.create-pull-request",
         "repository.new-issue",

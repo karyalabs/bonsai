@@ -5,7 +5,8 @@ use std::{path::PathBuf, sync::Arc};
 
 use bonsai_git::{
     ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, FileVersion, LinePosition,
-    LineSide, Oid, SignatureStatus, Whitespace, hunk_changes, partial_patch,
+    LineSide, Oid, SignatureStatus, SubmoduleCommit, SubmoduleMove, Whitespace, hunk_changes,
+    parse_submodule_patch, partial_patch,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -173,6 +174,8 @@ pub struct DiffPane {
     hunks: Vec<DiffLineRange>,
     /// The shown image's two sides, instead of a binary patch.
     preview: Option<ImagePreview>,
+    /// The commits a submodule moved across, instead of its one-line patch.
+    submodule: Option<SubmoduleMove>,
     /// Wraps long lines instead of scrolling sideways.
     wrap: bool,
     /// Shows every line of the file, not just the changes and their context.
@@ -215,6 +218,7 @@ impl DiffPane {
             error: None,
             hunks: Vec::new(),
             preview: None,
+            submodule: None,
             wrap: false,
             full_file: false,
             more: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(240.))),
@@ -303,7 +307,8 @@ impl DiffPane {
                     result.map(|(files, patch)| {
                         let preview =
                             Self::load_preview(&preview_repository, &preview_target, &files);
-                        (files, patch, preview)
+                        let submodule = Self::load_submodule(&preview_repository, &files, &patch);
+                        (files, patch, (preview, submodule))
                     })
                 })
         });
@@ -318,16 +323,18 @@ impl DiffPane {
                 this.patch = None;
                 this.hunks.clear();
                 this.preview = None;
+                this.submodule = None;
                 this.status = match result {
                     Ok(Ok((files, _, _))) if files.is_empty() => {
                         this.state
                             .update(cx, |state, cx| state.set_files(Vec::new(), cx));
                         PaneStatus::Empty
                     }
-                    Ok(Ok((files, patch, preview))) => {
+                    Ok(Ok((files, patch, (preview, submodule)))) => {
                         this.hunks = hunk_ranges(&patch, &files);
                         this.patch = Some(patch);
                         this.preview = preview;
+                        this.submodule = submodule;
                         this.state
                             .update(cx, |state, cx| state.set_files(files, cx));
                         PaneStatus::Ready
@@ -381,6 +388,29 @@ impl DiffPane {
     #[must_use]
     pub fn preview(&self) -> Option<&ImagePreview> {
         self.preview.as_ref()
+    }
+
+    /// The submodule move on screen, when the diff is one submodule.
+    #[must_use]
+    pub fn submodule(&self) -> Option<&SubmoduleMove> {
+        self.submodule.as_ref()
+    }
+
+    /// Whether something other than a patch is on screen.
+    fn has_preview(&self) -> bool {
+        self.preview.is_some() || self.submodule.is_some()
+    }
+
+    /// The commits a submodule moved across, when `files` is one submodule.
+    fn load_submodule(
+        repository: &bonsai_git::Repository,
+        files: &[DiffFile],
+        patch: &str,
+    ) -> Option<SubmoduleMove> {
+        let [file] = files else { return None };
+        let (from, to, dirty) = parse_submodule_patch(patch)?;
+        let submodule = PathBuf::from(file.path().as_ref());
+        Some(repository.submodule_move(&submodule, from, to, dirty))
     }
 
     #[must_use]
@@ -985,7 +1015,7 @@ impl DiffPane {
             }
         };
         let line_stats = (self.status == PaneStatus::Ready
-            && self.preview.is_none()
+            && !self.has_preview()
             && path.is_some())
         .then(|| {
             div()
@@ -1001,7 +1031,7 @@ impl DiffPane {
                     this.child(div().text_color(c.destructive).child(format!("−{removed}")))
                 })
         });
-        let diff_tools = self.status == PaneStatus::Ready && self.preview.is_none();
+        let diff_tools = self.status == PaneStatus::Ready && !self.has_preview();
         let separator = || div().w(px(1.)).h(px(16.)).mx(px(2.)).bg(c.border);
         let whitespace_hidden = self.whitespace != Whitespace::Show;
         let tools = div()
@@ -1162,6 +1192,155 @@ impl DiffPane {
             .children(line_stats)
             .child(div().flex_1())
             .child(tools)
+    }
+
+    /// A submodule's new commit: where it moved and the commits on the way.
+    fn render_submodule(
+        moved: &SubmoduleMove,
+        theme: &UiTheme,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        let c = &theme.colors;
+        let mono = theme.fonts.mono.clone();
+        let short = |oid: &Option<Oid>| {
+            oid.as_ref()
+                .map(|o| o.short().to_string())
+                .unwrap_or_default()
+        };
+        let headline = match (&moved.from, &moved.to) {
+            (Some(_), Some(_)) => {
+                format!("Moved from {} to {}", short(&moved.from), short(&moved.to))
+            }
+            (None, Some(_)) => format!("Added at {}", short(&moved.to)),
+            (Some(_), None) => format!("Removed, was at {}", short(&moved.from)),
+            (None, None) => "Changed".to_owned(),
+        };
+        let commit_row = |commit: &SubmoduleCommit, color| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(10.))
+                .py(px(6.))
+                .border_b_1()
+                .border_color(c.border)
+                .text_sm()
+                .child(div().w(px(3.)).h(px(16.)).rounded(px(2.)).bg(color))
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .font_family(mono.clone())
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(commit.oid.short().to_string()),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .child(commit.summary.clone()),
+                )
+                .child(
+                    div()
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(commit.author.clone()),
+                )
+        };
+        let section = |title: String, commits: &[SubmoduleCommit], color| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(
+                    div()
+                        .text_xs()
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .text_color(c.muted_foreground)
+                        .child(title),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .rounded(px(6.))
+                        .border_1()
+                        .border_color(c.border)
+                        .overflow_hidden()
+                        .children(commits.iter().map(|commit| commit_row(commit, color))),
+                )
+        };
+        let count = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+        div()
+            .id("diff.submodule")
+            .size_full()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        lucide(LucideIcon::Package)
+                            .size(px(20.))
+                            .text_color(c.foreground),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .child(format!("Submodule {}", moved.path.display())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(c.muted_foreground)
+                                    .child(headline),
+                            ),
+                    ),
+            )
+            .when(moved.dirty, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(c.warning)
+                        .child("The submodule also has uncommitted changes of its own."),
+                )
+            })
+            .when(!moved.readable, |this| {
+                this.child(
+                    div()
+                        .text_sm()
+                        .text_color(c.muted_foreground)
+                        .child("Clone the submodule to see the commits in between."),
+                )
+            })
+            .when(!moved.added.is_empty(), |this| {
+                this.child(section(
+                    count(moved.added.len(), "new commit"),
+                    &moved.added,
+                    c.success,
+                ))
+            })
+            .when(!moved.removed.is_empty(), |this| {
+                this.child(section(
+                    format!(
+                        "{} no longer included",
+                        count(moved.removed.len(), "commit")
+                    ),
+                    &moved.removed,
+                    c.destructive,
+                ))
+            })
     }
 
     /// A changed image: the old and new versions side by side.
@@ -1337,6 +1516,10 @@ impl Render for DiffPane {
                 &theme,
             )
             .into_any_element(),
+            PaneStatus::Ready if self.submodule.is_some() => {
+                Self::render_submodule(self.submodule.as_ref().expect("checked above"), &theme)
+                    .into_any_element()
+            }
             PaneStatus::Ready if self.preview.is_some() => {
                 Self::render_preview(self.preview.as_ref().expect("checked above"), &theme)
                     .into_any_element()
