@@ -41,7 +41,7 @@ use crate::{
     reflog_view::{ReflogEvent, ReflogView},
     refs::{RefDialog, RefsEvent, RefsPanel},
     remote_browser::{RemoteBrowser, RemoteBrowserEvent},
-    repository::{RepositoryEvent, RepositoryModel},
+    repository::{RepositoryEvent, RepositoryModel, UndoNote},
     session::Session,
     settings_sheet::{SettingsEvent, SettingsSheet},
     sync_bar::SyncBar,
@@ -305,7 +305,7 @@ impl Workspace {
             let title = tab_title(repository.root());
             let watch = self.watch;
             let model = cx.new(|cx| RepositoryModel::new(repository, watch, cx));
-            let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
+            let events = cx.subscribe(&model, |this, model, event: &RepositoryEvent, cx| {
                 match event {
                     RepositoryEvent::OperationFinished {
                         error: Some(error),
@@ -319,16 +319,12 @@ impl Workspace {
                         name,
                         error: None,
                         quiet: false,
+                        undo,
                     } => {
-                        if let Some(title) = success_title(name) {
+                        if let Some(notice) = finished_notice(name, undo, &model) {
                             this.toasts.update(cx, |toasts, cx| {
-                                toasts.push(
-                                    "workspace.done",
-                                    Notice::new(title)
-                                        .description("Done.")
-                                        .timeout(std::time::Duration::from_secs(3)),
-                                    cx,
-                                );
+                                toasts.dismiss(&SharedString::from("workspace.done"), cx);
+                                toasts.push("workspace.done", notice, cx);
                             });
                         }
                     }
@@ -1715,6 +1711,45 @@ impl Workspace {
         }
     }
 
+    fn on_undo(&mut self, _: &commands::Undo, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_history(false, cx);
+    }
+
+    fn on_redo(&mut self, _: &commands::Redo, _: &mut Window, cx: &mut Context<Self>) {
+        self.step_history(true, cx);
+    }
+
+    /// Undoes or redoes the active repository's newest operation, or says
+    /// there's nothing to.
+    fn step_history(&mut self, redo: bool, cx: &mut Context<Self>) {
+        let Some(model) = self.active_model().cloned() else {
+            return;
+        };
+        let stepped = model.update(
+            cx,
+            |model, cx| {
+                if redo { model.redo(cx) } else { model.undo(cx) }
+            },
+        );
+        if !stepped {
+            let title = if redo {
+                "Nothing to redo"
+            } else {
+                "Nothing to undo"
+            };
+            self.toasts.update(cx, |toasts, cx| {
+                toasts.dismiss(&SharedString::from("workspace.done"), cx);
+                toasts.push(
+                    "workspace.done",
+                    Notice::new(title)
+                        .description("Bonsai can undo commits, switches, discards, branch, tag and stash changes, merges, pulls and resets it made.")
+                        .timeout(std::time::Duration::from_secs(4)),
+                    cx,
+                );
+            });
+        }
+    }
+
     fn on_refresh(&mut self, _: &commands::Refresh, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(model) = self.active_model() {
             model.update(cx, RepositoryModel::refresh);
@@ -2445,6 +2480,37 @@ fn message_panel(
         )
 }
 
+/// The toast for a finished operation: one that can be undone or redone
+/// offers it, and others worth confirming, such as a push, say they're done.
+fn finished_notice(name: &str, undo: &UndoNote, model: &Entity<RepositoryModel>) -> Option<Notice> {
+    let model = model.downgrade();
+    let (label, description): (&str, &str) = match undo {
+        UndoNote::Undoable => ("Undo", "Done. Undo with ⌘Z."),
+        UndoNote::Redoable => ("Redo", "Done. Redo with ⇧⌘Z."),
+        UndoNote::None => {
+            return success_title(name).map(|title| {
+                Notice::new(title)
+                    .description("Done.")
+                    .timeout(std::time::Duration::from_secs(3))
+            });
+        }
+    };
+    let redo = *undo == UndoNote::Redoable;
+    Some(
+        Notice::new(name.to_owned())
+            .description(description)
+            .timeout(std::time::Duration::from_secs(6))
+            .action(label, move |_, cx| {
+                let _ = model.update(
+                    cx,
+                    |model, cx| {
+                        if redo { model.redo(cx) } else { model.undo(cx) }
+                    },
+                );
+            }),
+    )
+}
+
 /// The toast for a finished operation worth confirming, such as a push; the
 /// small, frequent ones (staging) show nothing.
 #[must_use]
@@ -2614,6 +2680,8 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_reflog))
             .on_action(cx.listener(Self::on_compare))
             .on_action(cx.listener(Self::on_refresh))
+            .on_action(cx.listener(Self::on_undo))
+            .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_commit_and_push))
             .on_action(cx.listener(Self::on_fetch))

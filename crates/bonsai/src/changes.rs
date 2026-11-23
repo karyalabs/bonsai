@@ -23,7 +23,7 @@ use crate::{
     composer::CommitComposer,
     confirm::{self, Confirm},
     file_icon::file_icon,
-    repository::{RepositoryEvent, RepositoryModel},
+    repository::{RepositoryEvent, RepositoryModel, UndoHints},
     ui::{
         button::{Button, ButtonSize, ButtonVariant},
         context_menu::context_menu,
@@ -707,10 +707,15 @@ impl ChangesView {
             untracked,
             ..
         } = targets;
-        let name = describe("Discard", &[unstaged.clone(), untracked.clone()].concat());
+        let paths = [unstaged.clone(), untracked.clone()].concat();
+        let name = describe("Discard", &paths);
         self.model.update(cx, |model, cx| {
-            model.run(
+            model.run_with(
                 name,
+                UndoHints {
+                    backup: paths,
+                    reset: None,
+                },
                 move |repository| {
                     repository.discard(&unstaged)?;
                     repository.delete_untracked(&untracked)
@@ -1386,7 +1391,7 @@ impl ChangesView {
         let popup = confirm::popup(
             "changes.discard",
             "Discard changes?",
-            format!("{description} This can't be undone."),
+            format!("{description} You can undo this with ⌘Z."),
             cx,
         )
         .child(

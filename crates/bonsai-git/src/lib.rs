@@ -30,6 +30,7 @@ mod snapshot;
 mod stash;
 mod submodules;
 mod sync;
+mod undo;
 mod version;
 mod worktree;
 mod worktrees;
@@ -70,6 +71,7 @@ pub use submodules::{
     parse_submodule_status,
 };
 pub use sync::{Progress, PullMode, PushRequest, RewrittenBranch, SyncFailure};
+pub use undo::{FileBackup, HeadRef, RefState, Undo, UndoReset, UndoStep, plan_undo};
 pub use version::GitVersion;
 pub use worktree::IgnoreRule;
 pub use worktrees::{NewWorktree, Worktree, parse_worktrees};

@@ -37,6 +37,7 @@ fn reads_are_told_apart_from_changes() {
         &["config", "--get", "user.name"],
         &["branch", "--list"],
         &["remote"],
+        &["reflog", "-1", "--format=%gs"],
     ] {
         assert!(record(read).is_read_only(), "{read:?}");
     }
@@ -48,6 +49,7 @@ fn reads_are_told_apart_from_changes() {
         &["remote", "add", "origin", "url"],
         &["push", "origin", "main"],
         &["fetch", "--prune"],
+        &["reflog", "expire", "--all"],
     ] {
         assert!(!record(change).is_read_only(), "{change:?}");
     }

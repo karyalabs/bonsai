@@ -9,7 +9,12 @@ use std::{
     time::Duration,
 };
 
-use bonsai_git::{CancelToken, CloneProgress, CommandRecord, Progress, Repository, Snapshot};
+use std::path::PathBuf;
+
+use bonsai_git::{
+    CancelToken, CloneProgress, CommandRecord, Progress, RefState, Repository, ResetMode, Snapshot,
+    Undo, UndoStep, plan_undo,
+};
 use gpui_kit::{AppContext as _, Context, EventEmitter, SharedString, Task};
 
 pub use activity::Activity;
@@ -17,6 +22,9 @@ use activity::ActivitySink;
 
 /// How long the watcher waits for file events to settle before refreshing.
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// How many operations Undo can go back.
+const UNDO_LIMIT: usize = 50;
 
 type OperationFn = Box<dyn FnOnce(&Repository) -> bonsai_git::Result<()> + Send>;
 
@@ -26,6 +34,40 @@ struct PendingOperation {
     network: Option<NetworkRun>,
     /// A background run, whose failure the workspace doesn't announce.
     quiet: bool,
+    hints: UndoHints,
+    history: UndoRole,
+}
+
+/// What an operation tells undo beyond the refs it changes.
+#[derive(Clone, Debug, Default)]
+pub struct UndoHints {
+    /// Files to save before it runs, so a discard can be undone.
+    pub backup: Vec<PathBuf>,
+    /// The mode, when it's a reset, so undo restores the index the same way.
+    pub reset: Option<ResetMode>,
+}
+
+/// The refs before and after an operation, and the files saved before it.
+type Recorded = ((RefState, RefState), Option<Vec<bonsai_git::FileBackup>>);
+
+/// How an operation relates to the undo history.
+enum UndoRole {
+    /// An ordinary operation: its undo is recorded.
+    Record,
+    /// Undoing one: its reverse becomes the redo.
+    Undo(Undo, Arc<Mutex<Option<Undo>>>),
+    /// Redoing one: its reverse becomes the undo again.
+    Redo(Undo, Arc<Mutex<Option<Undo>>>),
+}
+
+/// What a finished operation means for undo, so the workspace can offer it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UndoNote {
+    None,
+    /// It can be undone.
+    Undoable,
+    /// It was an undo, and can be redone.
+    Redoable,
 }
 
 /// Progress and cancellation for an operation that talks to a remote.
@@ -49,6 +91,7 @@ pub enum RepositoryEvent {
         /// Whether the app started it on its own, such as a background
         /// fetch, so a failure shouldn't interrupt the person.
         quiet: bool,
+        undo: UndoNote,
     },
 }
 
@@ -67,6 +110,8 @@ pub struct RepositoryModel {
     operation_task: Option<Task<()>>,
     network: Option<NetworkRun>,
     progress_task: Option<Task<()>>,
+    undo: Vec<Undo>,
+    redo: Vec<Undo>,
     _watcher: Option<watcher::Watcher>,
 }
 
@@ -95,6 +140,8 @@ impl RepositoryModel {
             operation_task: None,
             network: None,
             progress_task: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
             _watcher: watcher,
         };
         this.refresh(cx);
@@ -190,6 +237,85 @@ impl RepositoryModel {
             run: Box::new(operation),
             network: None,
             quiet: false,
+            hints: UndoHints::default(),
+            history: UndoRole::Record,
+        });
+        self.pump(cx);
+    }
+
+    /// Like [`Self::run`], with hints that let undo reverse it exactly, such
+    /// as the files a discard throws away.
+    pub fn run_with(
+        &mut self,
+        name: impl Into<SharedString>,
+        hints: UndoHints,
+        operation: impl FnOnce(&Repository) -> bonsai_git::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.queue.push_back(PendingOperation {
+            name: name.into(),
+            run: Box::new(operation),
+            network: None,
+            quiet: false,
+            hints,
+            history: UndoRole::Record,
+        });
+        self.pump(cx);
+    }
+
+    /// The operation Undo would reverse, newest first.
+    #[must_use]
+    pub fn undo_name(&self) -> Option<&str> {
+        self.undo.last().map(|undo| undo.name.as_str())
+    }
+
+    /// The operation Redo would repeat.
+    #[must_use]
+    pub fn redo_name(&self) -> Option<&str> {
+        self.redo.last().map(|undo| undo.name.as_str())
+    }
+
+    /// Undoes the newest undoable operation. Returns false when there is none.
+    pub fn undo(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(undo) = self.undo.pop() else {
+            return false;
+        };
+        self.queue_history(format!("Undo {}", undo.name), UndoRole::Undo, undo, cx);
+        true
+    }
+
+    /// Repeats the newest undone operation. Returns false when there is none.
+    pub fn redo(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(redo) = self.redo.pop() else {
+            return false;
+        };
+        self.queue_history(format!("Redo {}", redo.name), UndoRole::Redo, redo, cx);
+        true
+    }
+
+    fn queue_history(
+        &mut self,
+        name: String,
+        role: fn(Undo, Arc<Mutex<Option<Undo>>>) -> UndoRole,
+        undo: Undo,
+        cx: &mut Context<Self>,
+    ) {
+        let slot = Arc::new(Mutex::new(None));
+        let result = slot.clone();
+        let steps = undo.clone();
+        self.queue.push_back(PendingOperation {
+            name: name.into(),
+            run: Box::new(move |repository| {
+                let reverse = repository.apply_undo(&steps)?;
+                if let Ok(mut slot) = result.lock() {
+                    *slot = reverse;
+                }
+                Ok(())
+            }),
+            network: None,
+            quiet: false,
+            hints: UndoHints::default(),
+            history: role(undo, slot),
         });
         self.pump(cx);
     }
@@ -232,6 +358,8 @@ impl RepositoryModel {
             run: Box::new(move |repository| operation(repository, progress, cancel)),
             network: Some(network),
             quiet,
+            hints: UndoHints::default(),
+            history: UndoRole::Record,
         });
         self.pump(cx);
     }
@@ -292,27 +420,120 @@ impl RepositoryModel {
         cx.notify();
 
         let repository = self.repository.clone();
+        let record = matches!(operation.history, UndoRole::Record) && !operation.quiet;
+        let UndoHints { backup, reset } = operation.hints;
+        let run = operation.run;
         let work = cx.background_spawn(async move {
-            let result = (operation.run)(&repository);
-            (result, repository.snapshot())
+            let before = if record {
+                repository.ref_state().ok()
+            } else {
+                None
+            };
+            let files = if backup.is_empty() {
+                None
+            } else {
+                match repository.back_up_files(&backup) {
+                    Ok(files) => Some(files),
+                    // Without a backup the discard would be final.
+                    Err(error) => return (Err(error), repository.snapshot(), None),
+                }
+            };
+            let result = run(&repository);
+            let after = before.as_ref().and_then(|_| repository.ref_state().ok());
+            let states = before.zip(after).map(|states| (states, files));
+            (result, repository.snapshot(), states)
         });
         let name = operation.name;
         let quiet = operation.quiet;
+        let history = operation.history;
         self.operation_task = Some(cx.spawn(async move |this, cx| {
-            let (result, snapshot) = work.await;
+            let (result, snapshot, states) = work.await;
             let _ = this.update(cx, |this, cx| {
                 this.running = None;
                 this.network = None;
                 this.progress_task = None;
+                let changes_before = this.snapshot.as_ref().map(|s| s.changes.clone());
                 this.apply_snapshot(snapshot, cx);
+                let changes_after = this.snapshot.as_ref().map(|s| &s.changes);
+                let worktree_changed = changes_before.as_ref() != changes_after;
+                let undo = if result.is_ok() {
+                    this.note_history(&name, history, states, worktree_changed, reset)
+                } else {
+                    this.restore_history(history);
+                    UndoNote::None
+                };
                 cx.emit(RepositoryEvent::OperationFinished {
                     name,
                     error: result.err().map(|e| e.to_string().into()),
                     quiet,
+                    undo,
                 });
                 this.pump(cx);
             });
         }));
+    }
+
+    /// Records what a successful operation means for undo and redo.
+    fn note_history(
+        &mut self,
+        name: &str,
+        history: UndoRole,
+        states: Option<Recorded>,
+        worktree_changed: bool,
+        reset: Option<ResetMode>,
+    ) -> UndoNote {
+        match history {
+            UndoRole::Record => {
+                let Some(((before, after), files)) = states else {
+                    return UndoNote::None;
+                };
+                // Refs first: a reset back refuses over changed files, which
+                // are written back once it's done.
+                let mut steps = plan_undo(&before, &after, worktree_changed, reset);
+                if let Some(files) = files.filter(|files| !files.is_empty()) {
+                    steps.push(UndoStep::RestoreFiles { files });
+                }
+                if steps.is_empty() {
+                    return UndoNote::None;
+                }
+                self.redo.clear();
+                self.push_undo(Undo {
+                    name: name.to_owned(),
+                    steps,
+                });
+                UndoNote::Undoable
+            }
+            UndoRole::Undo(_, slot) => match slot.lock().ok().and_then(|mut slot| slot.take()) {
+                Some(redo) => {
+                    self.redo.push(redo);
+                    UndoNote::Redoable
+                }
+                None => UndoNote::None,
+            },
+            UndoRole::Redo(_, slot) => match slot.lock().ok().and_then(|mut slot| slot.take()) {
+                Some(undo) => {
+                    self.push_undo(undo);
+                    UndoNote::Undoable
+                }
+                None => UndoNote::None,
+            },
+        }
+    }
+
+    /// Puts an undo or redo that failed back, so it can be tried again.
+    fn restore_history(&mut self, history: UndoRole) {
+        match history {
+            UndoRole::Record => {}
+            UndoRole::Undo(undo, _) => self.undo.push(undo),
+            UndoRole::Redo(redo, _) => self.redo.push(redo),
+        }
+    }
+
+    fn push_undo(&mut self, undo: Undo) {
+        self.undo.push(undo);
+        if self.undo.len() > UNDO_LIMIT {
+            self.undo.remove(0);
+        }
     }
 
     fn apply_snapshot(&mut self, result: bonsai_git::Result<Snapshot>, cx: &mut Context<Self>) {
