@@ -74,6 +74,10 @@ pub enum RefDialog {
         remote: String,
         branch: String,
     },
+    DeleteRemoteTag {
+        remote: String,
+        name: String,
+    },
     /// A switch was refused; offer to stash first.
     CheckoutBlocked {
         target: Checkout,
@@ -969,6 +973,15 @@ impl RefsPanel {
                     );
                 });
             }
+            RefDialog::DeleteRemoteTag { remote, name } => {
+                self.model.update(cx, |model, cx| {
+                    model.run_network(
+                        format!("Delete tag {name} on {remote}"),
+                        move |repository, _, _| repository.delete_remote_tag(&remote, &name),
+                        cx,
+                    );
+                });
+            }
         }
     }
 
@@ -1381,11 +1394,13 @@ impl RefsPanel {
                     let name = name.clone();
                     move |view, _, cx| {
                         let (name, remote) = (name.clone(), remote.clone());
-                        view.run(
-                            format!("Push tag {name} to {remote}"),
-                            move |repository| repository.push_tag(&remote, &name),
-                            cx,
-                        );
+                        view.model.update(cx, |model, cx| {
+                            model.run_network(
+                                format!("Push tag {name} to {remote}"),
+                                move |repository, _, _| repository.push_tag(&remote, &name),
+                                cx,
+                            );
+                        });
                     }
                 })),
             );
@@ -1396,6 +1411,22 @@ impl RefsPanel {
                 .icon(LucideIcon::Trash2)
                 .on_click(show(&this, RefDialog::DeleteTag { name: name.clone() })),
         );
+        for (i, remote) in snapshot.remotes.iter().enumerate() {
+            items.push(
+                MenuItem::new(
+                    SharedString::from(format!("refs.tag.delete-remote.{i}")),
+                    format!("Delete on {}…", remote.name),
+                )
+                .icon(LucideIcon::CloudOff)
+                .on_click(show(
+                    &this,
+                    RefDialog::DeleteRemoteTag {
+                        remote: remote.name.clone(),
+                        name: name.clone(),
+                    },
+                )),
+            );
+        }
         items.extend(self.integrate_items(&name, cx));
         items.push(MenuItem::separator());
         items.push(copy_item(name));
@@ -1505,6 +1536,12 @@ impl RefsPanel {
                 "Its remote branches disappear from Bonsai and branches stop tracking them. Nothing on the server changes."
                     .to_owned(),
                 "Remove",
+                true,
+            ),
+            RefDialog::DeleteRemoteTag { remote, name } => (
+                format!("Delete tag {name} on {remote}?"),
+                "This deletes the tag on the server for everyone. The local tag stays, so you can push it again.".to_owned(),
+                "Delete on Remote",
                 true,
             ),
             RefDialog::DeleteRemoteBranch { remote, branch } => (

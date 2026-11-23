@@ -178,11 +178,6 @@ impl Repository {
         self.run_args(["tag", "-d", "--", name])
     }
 
-    /// Pushes one tag to a remote.
-    pub fn push_tag(&self, remote: &str, name: &str) -> Result<()> {
-        self.run_args(["push", "--", remote, &format!("refs/tags/{name}")])
-    }
-
     /// Stashes every change, untracked files included, with a message.
     pub fn stash_all(&self, message: &str) -> Result<()> {
         self.run_args(["stash", "push", "--include-untracked", "-m", message])

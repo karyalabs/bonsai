@@ -191,6 +191,9 @@ fn tracks_remote_branches_and_pushes_tags() {
 
     repository.push_tag("origin", "v1").unwrap();
     assert!(run(remote.path(), &["tag", "-l"]).contains("v1"));
+    repository.delete_remote_tag("origin", "v1").unwrap();
+    assert!(!run(remote.path(), &["tag", "-l"]).contains("v1"));
+    assert!(run(root, &["tag", "-l"]).contains("v1"));
     repository.delete_tag("light").unwrap();
     assert_eq!(repository.snapshot().unwrap().tags.len(), 1);
 }
