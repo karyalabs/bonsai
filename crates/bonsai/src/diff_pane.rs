@@ -4,9 +4,9 @@
 use std::{path::PathBuf, sync::Arc};
 
 use bonsai_git::{
-    ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, FileVersion, LinePosition,
-    LineSide, Oid, SignatureStatus, SubmoduleCommit, SubmoduleMove, Whitespace, hunk_changes,
-    parse_submodule_patch, partial_patch,
+    ApplyMode, CommitDetails, DiffOptions, DiffOutput, DiffTarget, FileVersion, LfsPointer,
+    LinePosition, LineSide, Oid, SignatureStatus, SubmoduleCommit, SubmoduleMove, Whitespace,
+    format_bytes, hunk_changes, parse_lfs_patch, parse_submodule_patch, partial_patch,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -34,6 +34,26 @@ use crate::{
     },
     workspace::title_bar::ghost_trigger,
 };
+
+/// A Git LFS file's pointer on each side of a diff.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LfsDiff {
+    pub path: SharedString,
+    pub before: Option<LfsPointer>,
+    pub after: Option<LfsPointer>,
+}
+
+impl LfsDiff {
+    fn read(files: &[DiffFile], patch: &str) -> Option<Self> {
+        let [file] = files else { return None };
+        let (before, after) = parse_lfs_patch(patch)?;
+        Some(Self {
+            path: file.path().as_ref().to_owned().into(),
+            before,
+            after,
+        })
+    }
+}
 
 /// The two sides of a changed image, for a preview instead of a patch.
 #[derive(Clone, Default)]
@@ -176,6 +196,8 @@ pub struct DiffPane {
     preview: Option<ImagePreview>,
     /// The commits a submodule moved across, instead of its one-line patch.
     submodule: Option<SubmoduleMove>,
+    /// A Git LFS file's pointers, instead of their text.
+    lfs: Option<LfsDiff>,
     /// Wraps long lines instead of scrolling sideways.
     wrap: bool,
     /// Shows every line of the file, not just the changes and their context.
@@ -219,6 +241,7 @@ impl DiffPane {
             hunks: Vec::new(),
             preview: None,
             submodule: None,
+            lfs: None,
             wrap: false,
             full_file: false,
             more: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(240.))),
@@ -308,7 +331,8 @@ impl DiffPane {
                         let preview =
                             Self::load_preview(&preview_repository, &preview_target, &files);
                         let submodule = Self::load_submodule(&preview_repository, &files, &patch);
-                        (files, patch, (preview, submodule))
+                        let lfs = LfsDiff::read(&files, &patch);
+                        (files, patch, (preview, submodule, lfs))
                     })
                 })
         });
@@ -324,17 +348,19 @@ impl DiffPane {
                 this.hunks.clear();
                 this.preview = None;
                 this.submodule = None;
+                this.lfs = None;
                 this.status = match result {
                     Ok(Ok((files, _, _))) if files.is_empty() => {
                         this.state
                             .update(cx, |state, cx| state.set_files(Vec::new(), cx));
                         PaneStatus::Empty
                     }
-                    Ok(Ok((files, patch, (preview, submodule)))) => {
+                    Ok(Ok((files, patch, (preview, submodule, lfs)))) => {
                         this.hunks = hunk_ranges(&patch, &files);
                         this.patch = Some(patch);
                         this.preview = preview;
                         this.submodule = submodule;
+                        this.lfs = lfs;
                         this.state
                             .update(cx, |state, cx| state.set_files(files, cx));
                         PaneStatus::Ready
@@ -398,7 +424,13 @@ impl DiffPane {
 
     /// Whether something other than a patch is on screen.
     fn has_preview(&self) -> bool {
-        self.preview.is_some() || self.submodule.is_some()
+        self.preview.is_some() || self.submodule.is_some() || self.lfs.is_some()
+    }
+
+    /// The Git LFS pointers on screen, when the diff is one LFS file.
+    #[must_use]
+    pub fn lfs(&self) -> Option<&LfsDiff> {
+        self.lfs.as_ref()
     }
 
     /// The commits a submodule moved across, when `files` is one submodule.
@@ -1236,6 +1268,118 @@ impl DiffPane {
             .child(tools)
     }
 
+    /// A Git LFS file: its size and content hash on each side.
+    fn render_lfs(lfs: &LfsDiff, theme: &UiTheme) -> gpui_kit::Div {
+        let c = &theme.colors;
+        let mono = theme.fonts.mono.clone();
+        let side = |label: &'static str, pointer: Option<&LfsPointer>, color| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .px(px(12.))
+                .py(px(10.))
+                .child(div().w(px(3.)).h(px(28.)).rounded(px(2.)).bg(color))
+                .child(
+                    div()
+                        .w(px(56.))
+                        .flex_shrink_0()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(label),
+                )
+                .child(match pointer {
+                    Some(pointer) => div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                .child(format_bytes(pointer.size)),
+                        )
+                        .child(
+                            div()
+                                .font_family(mono.clone())
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(format!("sha256 {}", pointer.short())),
+                        ),
+                    None => div()
+                        .text_sm()
+                        .text_color(c.muted_foreground)
+                        .child("Not stored with LFS"),
+                })
+        };
+        let headline = match (&lfs.before, &lfs.after) {
+            (Some(before), Some(after)) if after.size >= before.size => {
+                format!("{} larger", format_bytes(after.size - before.size))
+            }
+            (Some(before), Some(after)) => {
+                format!("{} smaller", format_bytes(before.size - after.size))
+            }
+            (None, Some(_)) => "Added to Git LFS".to_owned(),
+            (Some(_), None) => "No longer in Git LFS".to_owned(),
+            (None, None) => String::new(),
+        };
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .p(px(16.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        lucide(LucideIcon::HardDrive)
+                            .size(px(20.))
+                            .text_color(c.foreground),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .child(format!("{} is stored with Git LFS", lfs.path)),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(c.muted_foreground)
+                                    .child(headline),
+                            ),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .rounded(px(6.))
+                    .border_1()
+                    .border_color(c.border)
+                    .child(side("Before", lfs.before.as_ref(), c.destructive))
+                    .child(
+                        side("After", lfs.after.as_ref(), c.success)
+                            .border_t_1()
+                            .border_color(c.border),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(c.muted_foreground)
+                    .child(
+                        "Git keeps a small pointer in each commit; the contents live on the LFS server and download when you check them out.",
+                    ),
+            )
+    }
+
     /// A submodule's new commit: where it moved and the commits on the way.
     fn render_submodule(
         moved: &SubmoduleMove,
@@ -1564,6 +1708,10 @@ impl Render for DiffPane {
                 Self::render_submodule(self.submodule.as_ref().expect("checked above"), &theme)
                     .into_any_element()
             }
+            PaneStatus::Ready if self.lfs.is_some() => {
+                Self::render_lfs(self.lfs.as_ref().expect("checked above"), &theme)
+                    .into_any_element()
+            }
             PaneStatus::Ready if self.preview.is_some() => {
                 Self::render_preview(self.preview.as_ref().expect("checked above"), &theme)
                     .into_any_element()
@@ -1625,6 +1773,16 @@ mod tests {
     use gpui_kit::TestAppContext;
 
     use super::*;
+
+    #[test]
+    fn reads_an_lfs_files_pointers_from_its_patch() {
+        let patch = "diff --git a/cover.psd b/cover.psd\nindex 80d7d50..9a95d3b 100644\n--- a/cover.psd\n+++ b/cover.psd\n@@ -1,3 +1,3 @@\n version https://git-lfs.github.com/spec/v1\n-oid sha256:aaaa\n-size 2048\n+oid sha256:bbbb\n+size 4096\n";
+        let files = DiffFile::parse(patch).unwrap();
+        let lfs = LfsDiff::read(&files, patch).expect("an LFS file");
+        assert_eq!(lfs.path.as_ref(), "cover.psd");
+        assert_eq!(lfs.before.unwrap().size, 2048);
+        assert_eq!(lfs.after.unwrap().size, 4096);
+    }
 
     #[gpui_kit::test]
     fn loads_work_tree_diffs_and_follows_the_files(cx: &mut TestAppContext) {
