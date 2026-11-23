@@ -22,12 +22,18 @@ pub struct LogFilter {
     pub author: Option<String>,
     /// Commits that touched this path (a file or folder).
     pub path: Option<std::path::PathBuf>,
+    /// Commits that add or remove this exact text in a file (Git's
+    /// pickaxe, `-S`): where a line of code came from or went.
+    pub code: Option<String>,
 }
 
 impl LogFilter {
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.message.is_none() && self.author.is_none() && self.path.is_none()
+        self.message.is_none()
+            && self.author.is_none()
+            && self.path.is_none()
+            && self.code.is_none()
     }
 }
 
@@ -183,6 +189,9 @@ impl Repository {
         }
         if let Some(author) = &filter.author {
             args.push(format!("--author={author}"));
+        }
+        if let Some(code) = &filter.code {
+            args.push(format!("-S{code}"));
         }
         match scope {
             LogScope::All => {

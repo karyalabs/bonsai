@@ -487,7 +487,7 @@ impl DiffPane {
         if self.whitespace != Whitespace::Show {
             return Vec::new();
         }
-        match self.target {
+        let mut actions = match self.target {
             Some(DiffTarget::Unstaged(_)) => vec![
                 DiffAction::new("stage", "Stage Lines").icon(LucideIcon::Plus),
                 DiffAction::new("discard", "Discard Lines…")
@@ -498,7 +498,26 @@ impl DiffPane {
                 vec![DiffAction::new("unstage", "Unstage Lines").icon(LucideIcon::Minus)]
             }
             _ => Vec::new(),
+        };
+        if self.target.is_some() {
+            actions.push(
+                DiffAction::new("history", "Find Where This Changed").icon(LucideIcon::Clock),
+            );
         }
+        actions
+    }
+
+    /// The first added or removed line in a selection, trimmed: what to
+    /// search history for.
+    fn selected_code(&self, range: &DiffLineRange) -> Option<String> {
+        let partial = self.partial(range, ApplyMode::Stage)?;
+        partial
+            .lines()
+            .filter(|line| !line.starts_with("+++") && !line.starts_with("---"))
+            .find_map(|line| line.strip_prefix('+').or_else(|| line.strip_prefix('-')))
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
     }
 
     /// The gutter button beside each hunk: Stage for unstaged changes,
@@ -521,6 +540,19 @@ impl DiffPane {
     /// Stages, unstages or (after confirming) discards the selected lines.
     pub fn act(&mut self, intent: &DiffIntent, window: &mut Window, cx: &mut Context<Self>) {
         let Some(range) = &intent.range else { return };
+        if intent.action.as_ref() == "history" {
+            match self.selected_code(range) {
+                Some(code) => {
+                    self.error = None;
+                    cx.emit(DiffPaneEvent::SearchHistory(code));
+                }
+                None => {
+                    self.error = Some("Select an added or removed line to search for.".into());
+                }
+            }
+            cx.notify();
+            return;
+        }
         let mode = match intent.action.as_ref() {
             "stage" => ApplyMode::Stage,
             "unstage" => ApplyMode::Unstage,
@@ -1463,6 +1495,8 @@ impl DiffPane {
 pub enum DiffPaneEvent {
     /// Blame asked to show this commit in History.
     ShowInHistory(Oid),
+    /// Find the commits that added or removed this code.
+    SearchHistory(String),
 }
 
 impl EventEmitter<DiffPaneEvent> for DiffPane {}
@@ -1656,8 +1690,25 @@ mod tests {
             range: Some(DiffLineRange::new("f.txt", DiffSide::Modified, line, line)),
         };
 
+        // Find Where This Changed asks History for the selected line's text.
+        let searched = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let _events = cx.update({
+            let searched = searched.clone();
+            |_, cx| {
+                cx.subscribe(&pane, move |_, event: &DiffPaneEvent, _| {
+                    if let DiffPaneEvent::SearchHistory(code) = event {
+                        *searched.borrow_mut() = Some(code.clone());
+                    }
+                })
+            }
+        });
         pane.update_in(cx, |pane, window, cx| {
-            assert_eq!(pane.line_actions().len(), 2);
+            pane.act(&intent("history", 4), window, cx);
+        });
+        assert_eq!(searched.borrow().as_deref(), Some("Y"));
+
+        pane.update_in(cx, |pane, window, cx| {
+            assert_eq!(pane.line_actions().len(), 3);
             assert_eq!(pane.hunks().len(), 1, "X and Y share a hunk");
             assert!(pane.hunk_action().is_some());
             pane.act(&intent("stage", 2), window, cx);
@@ -1685,7 +1736,7 @@ mod tests {
         });
         cx.run_until_parked();
         pane.update_in(cx, |pane, window, cx| {
-            assert_eq!(pane.line_actions().len(), 1);
+            assert_eq!(pane.line_actions().len(), 2);
             pane.act(&intent("unstage", 2), window, cx);
         });
         cx.run_until_parked();
@@ -1736,8 +1787,9 @@ mod tests {
             let shown = shown.clone();
             |_, cx| {
                 cx.subscribe(&pane, move |_, event: &DiffPaneEvent, _| {
-                    let DiffPaneEvent::ShowInHistory(oid) = event;
-                    *shown.borrow_mut() = Some(oid.clone());
+                    if let DiffPaneEvent::ShowInHistory(oid) = event {
+                        *shown.borrow_mut() = Some(oid.clone());
+                    }
                 })
             }
         });

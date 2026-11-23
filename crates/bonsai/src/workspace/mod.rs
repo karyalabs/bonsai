@@ -440,8 +440,16 @@ impl Workspace {
                 });
             let history_target = history.downgrade();
             let diff_events = cx.subscribe(&diff, move |this, _, event: &DiffPaneEvent, cx| {
-                let DiffPaneEvent::ShowInHistory(oid) = event;
-                let _ = history_target.update(cx, |history, cx| history.reveal(oid, cx));
+                match event {
+                    DiffPaneEvent::ShowInHistory(oid) => {
+                        let _ = history_target.update(cx, |history, cx| history.reveal(oid, cx));
+                    }
+                    DiffPaneEvent::SearchHistory(code) => {
+                        let search = format!("code:{code}");
+                        let _ = history_target
+                            .update(cx, |history, cx| history.search_for(&search, cx));
+                    }
+                }
                 this.set_section(Section::History, cx);
             });
             let files = cx.new(|cx| FilesView::new(model.clone(), cx));
@@ -452,7 +460,7 @@ impl Workspace {
                     FilesEvent::History(path) => {
                         let search = format!("path:{}", path.to_string_lossy());
                         let _ =
-                            files_history.update(cx, |history, cx| history.set_search(&search, cx));
+                            files_history.update(cx, |history, cx| history.search_for(&search, cx));
                         this.set_section(Section::History, cx);
                     }
                     FilesEvent::ShowCommit(oid) => {
