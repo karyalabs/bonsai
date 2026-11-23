@@ -50,6 +50,7 @@ pub use diff::{
     parse_numstat,
 };
 pub use error::{Error, Result};
+pub use files::{GrepHit, GrepResults};
 pub use integrate::{Integration, MergeMode, OperationAction, ResetMode, Side};
 pub use lfs::{LfsPointer, lfs_pattern_for, lfs_patterns, parse_lfs_patch, parse_lfs_pointer};
 pub use log::{CommitDetails, CommitInfo, LogFilter, LogReader, LogScope, SignatureStatus};

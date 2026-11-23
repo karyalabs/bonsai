@@ -94,3 +94,44 @@ fn stops_tracking_and_ignores_a_file_but_keeps_it_on_disk() {
         "/.env\n"
     );
 }
+
+#[test]
+fn searches_file_contents_in_the_work_tree_and_at_a_revision() {
+    let git = bonsai_git::Git::locate(None).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let repository = bonsai_git::Repository::init(&git, dir.path(), Some("main")).unwrap();
+    std::fs::create_dir(dir.path().join("src")).unwrap();
+    std::fs::write(
+        dir.path().join("src/mill.rs"),
+        "fn grind() {}\n// Grind slowly\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("logo.bin"), b"grind\x00\x01").unwrap();
+    repository.stage_all().unwrap();
+    git.run(
+        &git.command([
+            "-c",
+            "user.name=Ada Lovelace",
+            "-c",
+            "user.email=ada@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            "Add the mill",
+        ])
+        .cwd(dir.path()),
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("src/mill.rs"), "fn mill() {}\n").unwrap();
+
+    let lower = repository.grep("grind", Some("HEAD"), 100).unwrap();
+    let lines: Vec<usize> = lower.hits.iter().map(|hit| hit.line).collect();
+    assert_eq!(lines, [1, 2]);
+    assert_eq!(lower.hits[0].path, std::path::PathBuf::from("src/mill.rs"));
+    let exact = repository.grep("Grind", Some("HEAD"), 100).unwrap();
+    assert_eq!(exact.hits.len(), 1);
+    assert_eq!(exact.hits[0].text, "// Grind slowly");
+    assert_eq!(repository.grep("grind", None, 100).unwrap().hits.len(), 0);
+    assert_eq!(repository.grep("mill", None, 100).unwrap().hits.len(), 1);
+}
