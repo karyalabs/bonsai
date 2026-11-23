@@ -27,6 +27,7 @@ pub mod rebase_sheet;
 pub mod reflog_view;
 pub mod refs;
 pub mod remote_browser;
+pub mod repo_settings_sheet;
 pub mod repository;
 pub mod session;
 pub mod settings;

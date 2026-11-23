@@ -55,6 +55,14 @@ files back. Each undo checks the repository is still as the operation left
 it, and Redo runs it again. Changes made outside Bonsai aren't undone.
 _Avoid_: Revert (a new commit that reverses another)
 
+**Repository settings**:
+Values written to one repository's own config that override the global ones:
+the committer name and email, whether and how commits are signed, and
+whether fetching prunes deleted remote branches. Clearing one falls back to
+the global value. Hooks are listed there too, and turned off by removing
+their executable bit.
+_Avoid_: Preferences (that's Settings, for the whole app)
+
 **Bisect**:
 A binary search through history for the first commit with a problem. The
 person marks one bad and one good commit, then each commit Git checks out as
