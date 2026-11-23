@@ -70,6 +70,12 @@ on the LFS server. Storing a file with LFS adds its pattern; files already in
 history stay as they are until purged or rewritten.
 _Avoid_: Large files (any big file), annex
 
+**Co-author**:
+Someone else credited on a commit with a `Co-authored-by: Name <email>`
+trailer at the end of its message, which GitHub and GitLab show beside the
+author. Bonsai offers the people who recently committed to the repository.
+_Avoid_: Pair, contributor
+
 **Bisect**:
 A binary search through history for the first commit with a problem. The
 person marks one bad and one good commit, then each commit Git checks out as
