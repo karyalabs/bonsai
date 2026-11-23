@@ -34,6 +34,10 @@ pub struct RepoSettingsSheet {
     key: Entity<InputState>,
     signing: SigningChoice,
     prune: Option<bool>,
+    /// The installed Git LFS version, if any.
+    lfs_version: Option<String>,
+    /// Patterns stored with Git LFS.
+    lfs_patterns: Vec<String>,
     error: Option<SharedString>,
 }
 
@@ -87,6 +91,9 @@ impl RepoSettingsSheet {
             cx,
         );
         let signing = settings.signing();
+        let repository = model.read(cx).repository();
+        let lfs_version = repository.lfs_version();
+        let lfs_patterns = repository.lfs_tracked().unwrap_or_default();
         let prune = settings
             .prune
             .local
@@ -100,6 +107,8 @@ impl RepoSettingsSheet {
             key,
             signing,
             prune,
+            lfs_version,
+            lfs_patterns,
             error,
         }
     }
@@ -161,6 +170,88 @@ impl RepoSettingsSheet {
             );
         });
         cx.notify();
+    }
+
+    #[must_use]
+    pub fn lfs_patterns(&self) -> &[String] {
+        &self.lfs_patterns
+    }
+
+    /// Stops storing files matching `pattern` with Git LFS, right away.
+    pub fn untrack_lfs(&mut self, pattern: String, cx: &mut Context<Self>) {
+        self.lfs_patterns.retain(|p| *p != pattern);
+        self.model.update(cx, |model, cx| {
+            model.run(
+                format!("Stop storing {pattern} with Git LFS"),
+                move |repository| repository.lfs_untrack(&pattern),
+                cx,
+            );
+        });
+        cx.notify();
+    }
+
+    /// Downloads the LFS files the checked-out commit needs.
+    pub fn pull_lfs(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |model, cx| {
+            model.run_network(
+                "Download Git LFS files",
+                |repository, _, _| repository.lfs_pull(),
+                cx,
+            );
+        });
+    }
+
+    fn lfs_rows(&self, theme: &UiTheme, cx: &mut Context<Self>) -> Vec<gpui_kit::Div> {
+        let c = &theme.colors;
+        let note = |text: String| {
+            div()
+                .px(px(14.))
+                .py(px(10.))
+                .text_xs()
+                .text_color(c.muted_foreground)
+                .child(text)
+        };
+        let Some(version) = &self.lfs_version else {
+            return vec![note(
+                "Git LFS isn't installed. Install it with `brew install git-lfs` to store large files outside the repository."
+                    .to_owned(),
+            )];
+        };
+        let mut rows = Vec::new();
+        if self.lfs_patterns.is_empty() {
+            rows.push(note(format!(
+                "Nothing is stored with Git LFS {version} yet. In Changes, a file's Git LFS menu starts storing it."
+            )));
+        }
+        for (index, pattern) in self.lfs_patterns.iter().enumerate() {
+            let pattern = pattern.clone();
+            rows.push(SettingsSheet::row(
+                pattern.clone(),
+                "Stored with Git LFS",
+                None,
+                Button::new(("repo-settings.lfs.untrack", index))
+                    .label("Stop Storing")
+                    .variant(ButtonVariant::Outline)
+                    .on_click(cx.listener(move |sheet, _, _, cx| {
+                        sheet.untrack_lfs(pattern.clone(), cx);
+                    })),
+                theme,
+            ));
+        }
+        if self.lfs_patterns.is_empty() {
+            return rows;
+        }
+        rows.push(SettingsSheet::row(
+            "Download files",
+            format!("Fetches the LFS files this checkout needs, with Git LFS {version}."),
+            None,
+            Button::new("repo-settings.lfs.pull")
+                .label("Download")
+                .variant(ButtonVariant::Outline)
+                .on_click(cx.listener(|sheet, _, _, cx| sheet.pull_lfs(cx))),
+            theme,
+        ));
+        rows
     }
 
     fn signing_caption(&self) -> String {
@@ -282,6 +373,7 @@ impl Render for RepoSettingsSheet {
                 &theme,
             ));
         }
+        let lfs_rows = self.lfs_rows(&theme, cx);
         let hooks_dir = self.settings.hooks_dir.display().to_string();
         let hook_rows: Vec<gpui_kit::Div> = if self.settings.hooks.is_empty() {
             vec![
@@ -371,6 +463,12 @@ impl Render for RepoSettingsSheet {
                     prune,
                     &theme,
                 )],
+                &theme,
+            ))
+            .child(SettingsSheet::section(
+                "Git LFS",
+                LucideIcon::HardDrive,
+                lfs_rows,
                 &theme,
             ))
             .child(SettingsSheet::section(

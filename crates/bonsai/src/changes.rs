@@ -697,6 +697,17 @@ impl ChangesView {
         });
     }
 
+    /// Stores files matching `pattern` with Git LFS from now on.
+    pub fn store_with_lfs(&mut self, pattern: String, cx: &mut Context<Self>) {
+        self.model.update(cx, |model, cx| {
+            model.run(
+                format!("Store {pattern} with Git LFS"),
+                move |repository| repository.lfs_track(&pattern),
+                cx,
+            );
+        });
+    }
+
     /// Discards without asking; the UI asks first through [`Self::ask_discard`].
     pub fn discard(&mut self, targets: Targets, cx: &mut Context<Self>) {
         if targets.discardable() == 0 {
@@ -997,6 +1008,27 @@ impl ChangesView {
             items.push(
                 MenuItem::submenu("changes.ignore", "Ignore", ignore).icon(LucideIcon::EyeOff),
             );
+            let lfs_item = |id: &'static str, label: String, pattern: String| {
+                let this = this.clone();
+                MenuItem::new(id, label).on_click(move |_, _, cx| {
+                    let _ = this.update(cx, |view, cx| view.store_with_lfs(pattern.clone(), cx));
+                })
+            };
+            let mut lfs = Vec::new();
+            if let Some(extension) = path.extension().map(|e| e.to_string_lossy().into_owned()) {
+                lfs.push(lfs_item(
+                    "changes.lfs.extension",
+                    format!("Store All .{extension} Files"),
+                    bonsai_git::lfs_pattern_for(path, true),
+                ));
+            }
+            lfs.push(lfs_item(
+                "changes.lfs.path",
+                format!("Store “{}”", path.to_string_lossy()),
+                bonsai_git::lfs_pattern_for(path, false),
+            ));
+            items
+                .push(MenuItem::submenu("changes.lfs", "Git LFS", lfs).icon(LucideIcon::HardDrive));
             items.push(MenuItem::separator());
             let purge = path.to_path_buf();
             items.push(

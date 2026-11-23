@@ -63,6 +63,13 @@ the global value. Hooks are listed there too, and turned off by removing
 their executable bit.
 _Avoid_: Preferences (that's Settings, for the whole app)
 
+**LFS**:
+Git Large File Storage: files matching patterns in `.gitattributes` are
+committed as a small pointer (a size and a SHA-256), and their contents live
+on the LFS server. Storing a file with LFS adds its pattern; files already in
+history stay as they are until purged or rewritten.
+_Avoid_: Large files (any big file), annex
+
 **Bisect**:
 A binary search through history for the first commit with a problem. The
 person marks one bad and one good commit, then each commit Git checks out as
