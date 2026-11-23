@@ -771,6 +771,18 @@ impl Workspace {
         self.show_purge(None, window, cx);
     }
 
+    fn on_scan_history(
+        &mut self,
+        _: &commands::ScanHistory,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_purge(None, window, cx);
+        if let Some(sheet) = &self.purge {
+            sheet.update(cx, |sheet, cx| sheet.show_suggested(true, cx));
+        }
+    }
+
     /// Where the accounts list is kept: beside the session file.
     fn accounts_path(&self) -> PathBuf {
         let dir = self
@@ -2537,6 +2549,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_pull))
             .on_action(cx.listener(Self::on_push))
             .on_action(cx.listener(Self::on_purge))
+            .on_action(cx.listener(Self::on_scan_history))
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
             .on_action(cx.listener(Self::on_pull_requests))

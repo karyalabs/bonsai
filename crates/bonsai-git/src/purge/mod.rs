@@ -7,6 +7,7 @@
 //! files stay on disk; they become untracked.
 
 mod pattern;
+mod scan;
 mod stream;
 
 use std::{
@@ -18,6 +19,9 @@ use std::{
 
 pub use pattern::PurgeTarget;
 use pattern::bytes_to_os;
+pub use scan::{
+    HistoryScan, ScanFinding, ScanOptions, ScanReason, credentials_in, format_bytes, sensitive_name,
+};
 
 /// A path from Git's raw bytes.
 pub(crate) fn bytes_to_path(bytes: &[u8]) -> PathBuf {
