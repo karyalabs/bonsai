@@ -4,7 +4,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use bonsai_git::{Git, PurgeBlocker, PurgeStep, PurgeTarget, Repository};
+use bonsai_git::{Git, PurgeBlocker, PurgeStep, PurgeTarget, Repository, ScanOptions, ScanReason};
 
 fn git() -> Git {
     Git::locate(None).expect("git is installed")
@@ -425,4 +425,46 @@ fn force_pushes_rewritten_branches_with_a_lease() {
         error.sync_failure(),
         Some(bonsai_git::SyncFailure::StaleLease)
     );
+}
+
+#[test]
+fn scans_history_for_secrets_and_large_files() {
+    let (dir, repository) = fixture();
+    let root = dir.path();
+    let key = format!("const KEY: &str = \"AKIA{}\";\n", "ABCDEFGHIJKLMNOP");
+    write(root, "src/config.rs", &key);
+    write(root, "assets/video.bin", &"x".repeat(3000));
+    commit(root, "add config and video");
+    write(root, "src/config.rs", "const KEY: &str = env!(\"KEY\");\n");
+    commit(root, "read the key from the environment");
+
+    let options = ScanOptions {
+        large_bytes: 2000,
+        ..ScanOptions::default()
+    };
+    let scan = repository.scan_history(&options).unwrap();
+    assert!(scan.contents_complete);
+    let found: Vec<(&str, &[ScanReason], bool)> = scan
+        .findings
+        .iter()
+        .map(|f| (f.path.to_str().unwrap(), f.reasons.as_slice(), f.in_head))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                "src/config.rs",
+                &[ScanReason::Credential("AWS access key")][..],
+                true
+            ),
+            (".env", &[ScanReason::SensitiveName][..], false),
+            ("assets/video.bin", &[ScanReason::Large(3000)][..], true),
+        ]
+    );
+
+    let budget = ScanOptions {
+        content_budget: 10,
+        ..options
+    };
+    assert!(!repository.scan_history(&budget).unwrap().contents_complete);
 }

@@ -11,12 +11,13 @@ use std::{
 };
 
 use bonsai_git::{
-    PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange, Repository, RewrittenBranch,
+    HistoryScan, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange, Repository,
+    RewrittenBranch, ScanFinding, ScanOptions,
 };
 use gpui_kit::{
-    AppContext as _, Context, Entity, EventEmitter, IntoElement, ParentElement as _,
-    PathPromptOptions, Render, SharedString, Styled, Subscription, Task, Window, div,
-    prelude::FluentBuilder as _, px,
+    AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    ParentElement as _, PathPromptOptions, Render, SharedString, StatefulInteractiveElement as _,
+    Styled, Subscription, Task, Window, div, prelude::FluentBuilder as _, px,
 };
 
 use gpui_icons::{LucideIcon, lucide};
@@ -31,6 +32,7 @@ use crate::{
         dialog::{dialog_description, dialog_footer, dialog_title},
         input::{Input, InputEvent, InputState},
         theme::UiTheme,
+        toggle_group::{ToggleGroup, ToggleGroupItem},
         tree::{Tree, TreeEvent, TreeNode, TreeRow, TreeRowKind, TreeState},
     },
 };
@@ -103,6 +105,16 @@ pub enum PurgeEvent {
     Dismissed,
 }
 
+/// The history scan behind the Suggested list.
+#[derive(Clone, Debug, Default)]
+pub enum Suggestions {
+    #[default]
+    NotScanned,
+    Scanning,
+    Ready(HistoryScan),
+    Failed(SharedString),
+}
+
 #[derive(Clone, Debug)]
 pub enum Phase {
     Pick,
@@ -166,6 +178,9 @@ pub struct PurgeSheet {
     tree: TreeState,
     selected: BTreeSet<PathBuf>,
     patterns: Vec<String>,
+    /// Whether the picker shows suggestions instead of every path.
+    suggested: bool,
+    suggestions: Suggestions,
     /// Filled by the purge operation for the sheet to pick up.
     outcome: Arc<Mutex<Option<Result<PurgeReport, String>>>>,
     step: Arc<Mutex<Option<PurgeStep>>>,
@@ -220,6 +235,8 @@ impl PurgeSheet {
             tree: TreeState::new(Vec::new(), []).expect("an empty tree has no duplicates"),
             selected: initial.into_iter().collect(),
             patterns: Vec::new(),
+            suggested: false,
+            suggestions: Suggestions::NotScanned,
             outcome: Arc::new(Mutex::new(None)),
             step: Arc::new(Mutex::new(None)),
             restored: Arc::new(Mutex::new(None)),
@@ -267,6 +284,56 @@ impl PurgeSheet {
                 this.refresh_tree(cx);
             });
         }));
+    }
+
+    #[must_use]
+    pub fn suggestions(&self) -> &Suggestions {
+        &self.suggestions
+    }
+
+    /// Switches the picker between every path and the scan's suggestions,
+    /// scanning the first time.
+    pub fn show_suggested(&mut self, suggested: bool, cx: &mut Context<Self>) {
+        self.suggested = suggested;
+        if suggested && matches!(self.suggestions, Suggestions::NotScanned) {
+            self.scan_suggestions(cx);
+        }
+        cx.notify();
+    }
+
+    /// Looks through history for secrets and large files.
+    pub fn scan_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.suggestions = Suggestions::Scanning;
+        let repository = self.repository(cx);
+        let scan =
+            cx.background_spawn(async move { repository.scan_history(&ScanOptions::default()) });
+        self.tasks.push(cx.spawn(async move |this, cx| {
+            let result = scan.await;
+            let _ = this.update(cx, |this, cx| {
+                this.suggestions = match result {
+                    Ok(scan) => Suggestions::Ready(scan),
+                    Err(error) => Suggestions::Failed(error.to_string().into()),
+                };
+                cx.notify();
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Checks every suggestion, or clears them all when all are checked.
+    pub fn toggle_all_suggestions(&mut self, cx: &mut Context<Self>) {
+        let Suggestions::Ready(scan) = &self.suggestions else {
+            return;
+        };
+        let paths: Vec<PathBuf> = scan.findings.iter().map(|f| f.path.clone()).collect();
+        if paths.iter().all(|p| self.selected.contains(p)) {
+            for path in &paths {
+                self.selected.remove(path);
+            }
+        } else {
+            self.selected.extend(paths);
+        }
+        cx.notify();
     }
 
     /// Rebuilds the tree from the history paths matching the query.
@@ -545,7 +612,9 @@ impl PurgeSheet {
             .border_color(c.border)
             .rounded(px(6.))
             .overflow_hidden()
-            .child(if self.history.is_none() {
+            .child(if self.suggested {
+                self.render_suggestions(&theme, &query, cx)
+            } else if self.history.is_none() {
                 div()
                     .p(px(8.))
                     .text_sm()
@@ -554,6 +623,19 @@ impl PurgeSheet {
                     .into_any_element()
             } else {
                 self.render_tree(&theme, cx).into_any_element()
+            });
+        let view = cx.entity().downgrade();
+        let mode = ToggleGroup::new("purge.mode")
+            .aria_label("Show")
+            .segmented(true)
+            .value([if self.suggested { "suggested" } else { "all" }])
+            .item(ToggleGroupItem::new("purge.mode.all", "all").child("All Paths"))
+            .item(ToggleGroupItem::new("purge.mode.suggested", "suggested").child("Suggested"))
+            .on_change(move |values, _, cx| {
+                if let Some(value) = values.first() {
+                    let suggested = value == "suggested";
+                    let _ = view.update(cx, |view, cx| view.show_suggested(suggested, cx));
+                }
             });
         div()
             .flex()
@@ -564,8 +646,20 @@ impl PurgeSheet {
             .child(dialog_description("purge.description", cx).child(
                 "Remove files such as a committed .env from every commit on every branch and tag. The files stay on disk, untracked.",
             ))
-            .child(Input::new(&self.query).aria_label("Search history"))
-            .when(is_pattern, |this| {
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .child(Input::new(&self.query).aria_label("Search history")),
+                    )
+                    .child(mode),
+            )
+            .when(is_pattern && !self.suggested, |this| {
                 this.child(
                     Button::new("purge.add-pattern")
                         .variant(ButtonVariant::Outline)
@@ -607,6 +701,233 @@ impl PurgeSheet {
                             .on_click(cx.listener(|this, _, _, cx| this.preview(cx))),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn render_suggestions(
+        &self,
+        theme: &UiTheme,
+        query: &str,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::AnyElement {
+        let c = &theme.colors;
+        let note = |text: String| {
+            div()
+                .p(px(8.))
+                .text_sm()
+                .text_color(c.muted_foreground)
+                .child(text)
+                .into_any_element()
+        };
+        let scan = match &self.suggestions {
+            Suggestions::NotScanned | Suggestions::Scanning => {
+                return note(
+                    "Looking through every version of every file for secrets and large files…"
+                        .to_owned(),
+                );
+            }
+            Suggestions::Failed(error) => return note(format!("The scan failed: {error}")),
+            Suggestions::Ready(scan) => scan,
+        };
+        if scan.findings.is_empty() {
+            return div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap(px(6.))
+                .size_full()
+                .p(px(16.))
+                .child(
+                    lucide(LucideIcon::ShieldCheck)
+                        .size(px(22.))
+                        .text_color(c.success),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .child("Nothing in history looks like a secret or a large file."),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child(format!("Read {} file versions.", scan.blobs_read)),
+                )
+                .into_any_element();
+        }
+        let shown: Vec<&ScanFinding> = scan
+            .findings
+            .iter()
+            .filter(|f| query.is_empty() || f.path.to_string_lossy().to_lowercase().contains(query))
+            .collect();
+        let all_checked = scan
+            .findings
+            .iter()
+            .all(|f| self.selected.contains(&f.path));
+        let secrets = scan.findings.iter().filter(|f| f.is_secret()).count();
+        let large = scan.findings.len() - secrets;
+        let mut summary = Vec::new();
+        if secrets > 0 {
+            summary.push(format!(
+                "{secrets} possible secret{}",
+                if secrets == 1 { "" } else { "s" }
+            ));
+        }
+        if large > 0 {
+            summary.push(format!(
+                "{large} large file{}",
+                if large == 1 { "" } else { "s" }
+            ));
+        }
+        let header = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .px(px(8.))
+            .py(px(6.))
+            .border_b_1()
+            .border_color(c.border)
+            .text_xs()
+            .text_color(c.muted_foreground)
+            .child(
+                Checkbox::new("purge.suggested.all")
+                    .checked(all_checked)
+                    .indeterminate(
+                        !all_checked
+                            && scan
+                                .findings
+                                .iter()
+                                .any(|f| self.selected.contains(&f.path)),
+                    )
+                    .aria_label("Check every suggestion")
+                    .on_change(cx.listener(|this, _, _, cx| this.toggle_all_suggestions(cx))),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .child(format!("Found {}", summary.join(" and "))),
+            )
+            .when(!scan.contents_complete, |this| {
+                this.child(div().flex_shrink_0().child("Contents partly read"))
+            })
+            .child(
+                div().flex_shrink_0().child(
+                    Button::new("purge.rescan")
+                        .variant(ButtonVariant::Ghost)
+                        .label("Scan Again")
+                        .on_click(cx.listener(|this, _, _, cx| this.scan_suggestions(cx))),
+                ),
+            );
+        let mut rows = div()
+            .id("purge.suggested.list")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .flex()
+            .flex_col()
+            .p(px(4.));
+        for (i, finding) in shown.into_iter().enumerate() {
+            let path = finding.path.clone();
+            let checked = self.selected.contains(&path);
+            let tone = if finding.is_secret() {
+                c.destructive
+            } else {
+                c.warning
+            };
+            let reasons = finding
+                .reasons
+                .iter()
+                .map(bonsai_git::ScanReason::label)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            rows = rows.child(
+                div()
+                    .id(("purge.suggested.row", i))
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .px(px(6.))
+                    .py(px(5.))
+                    .rounded(px(4.))
+                    .cursor_pointer()
+                    .hover(|this| this.bg(c.muted))
+                    .on_click({
+                        let path = path.clone();
+                        cx.listener(move |this, _, _, cx| this.toggle(path.clone(), cx))
+                    })
+                    .child(
+                        div()
+                            .id(("purge.suggested.check-wrap", i))
+                            .flex_none()
+                            // The row toggles too; stop the click there so it counts once.
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(
+                                Checkbox::new(("purge.suggested.check", i))
+                                    .checked(checked)
+                                    .aria_label(path.to_string_lossy().into_owned())
+                                    .on_change({
+                                        let path = path.clone();
+                                        cx.listener(move |this, _, _, cx| {
+                                            this.toggle(path.clone(), cx);
+                                        })
+                                    }),
+                            ),
+                    )
+                    .child(
+                        lucide(if finding.is_secret() {
+                            LucideIcon::KeyRound
+                        } else {
+                            LucideIcon::HardDrive
+                        })
+                        .size(px(14.))
+                        .flex_none()
+                        .text_color(tone),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .flex_1()
+                            .min_w_0()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .truncate()
+                                    .font_family(theme.fonts.mono.clone())
+                                    .child(path.to_string_lossy().into_owned()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .truncate()
+                                    .text_color(c.muted_foreground)
+                                    .child(reasons),
+                            ),
+                    )
+                    .when(finding.in_head, |this| {
+                        this.child(
+                            div()
+                                .flex_shrink_0()
+                                .px(px(6.))
+                                .py(px(1.))
+                                .rounded(px(4.))
+                                .bg(c.muted)
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child("In current files"),
+                        )
+                    }),
+            );
+        }
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(header)
+            .child(rows)
             .into_any_element()
     }
 
@@ -1317,5 +1638,47 @@ mod tests {
             assert!(matches!(sheet.phase(), Phase::Restored(1)));
         });
         assert_eq!(git(&root, &["rev-parse", "main"]), before);
+    }
+
+    #[gpui_kit::test]
+    fn suggests_secrets_found_in_history(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("demo");
+        std::fs::create_dir(&root).unwrap();
+        let repository =
+            Repository::init(&Git::locate(None).unwrap(), &root, Some("main")).unwrap();
+        for (key, value) in [
+            ("user.name", "Ada Lovelace"),
+            ("user.email", "ada@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(&root, &["config", key, value]);
+        }
+        std::fs::write(root.join("app.txt"), "app").unwrap();
+        std::fs::write(root.join(".env"), "SECRET").unwrap();
+        std::fs::write(root.join("deploy.pem"), "-----BEGIN PRIVATE KEY-----\n").unwrap();
+        git(&root, &["add", "."]);
+        git(&root, &["commit", "-qm", "init"]);
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (sheet, cx) = cx.add_window_view(|window, cx| {
+            PurgeSheet::new(model.clone(), dir.path().join("backups"), None, window, cx)
+        });
+        sheet.update(cx, |sheet, cx| sheet.show_suggested(true, cx));
+        cx.run_until_parked();
+        sheet.read_with(cx, |sheet, _| {
+            let Suggestions::Ready(scan) = sheet.suggestions() else {
+                panic!("expected a scan, got {:?}", sheet.suggestions());
+            };
+            let paths: Vec<_> = scan.findings.iter().map(|f| f.path.clone()).collect();
+            assert_eq!(paths, [PathBuf::from("deploy.pem"), PathBuf::from(".env")]);
+        });
+        sheet.update(cx, PurgeSheet::toggle_all_suggestions);
+        sheet.read_with(cx, |sheet, _| assert_eq!(sheet.targets().len(), 2));
+        sheet.update(cx, PurgeSheet::toggle_all_suggestions);
+        sheet.read_with(cx, |sheet, _| {
+            assert_eq!(sheet.targets(), Vec::<PurgeTarget>::new());
+        });
     }
 }

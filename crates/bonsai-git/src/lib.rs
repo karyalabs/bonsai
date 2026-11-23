@@ -46,7 +46,10 @@ pub use error::{Error, Result};
 pub use integrate::{Integration, MergeMode, OperationAction, ResetMode, Side};
 pub use log::{CommitDetails, CommitInfo, LogFilter, LogReader, LogScope, SignatureStatus};
 pub use patch::{ApplyMode, LinePosition, LineSide, hunk_changes, partial_patch};
-pub use purge::{PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange};
+pub use purge::{
+    HistoryScan, PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange,
+    ScanFinding, ScanOptions, ScanReason, credentials_in, format_bytes, sensitive_name,
+};
 pub use rebase::{RebaseAction, RebaseStep, rebase_todo};
 pub use reflog::{ReflogAction, ReflogEntry};
 pub use remote::RemoteFailure;

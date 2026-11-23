@@ -267,6 +267,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.pull",
         "repository.push",
         "repository.purge",
+        "repository.scan-history",
         "repository.publish",
         "repository.create-pull-request",
         "repository.new-issue",
