@@ -315,6 +315,34 @@ impl Repository {
         )
     }
 
+    /// Pushes one tag to a remote.
+    pub fn push_tag(&self, remote: &str, name: &str) -> Result<()> {
+        self.network(
+            vec![
+                "push".into(),
+                "--".into(),
+                remote.into(),
+                format!("refs/tags/{name}").into(),
+            ],
+            None,
+            None,
+        )
+    }
+
+    /// Deletes a tag on a remote; the local tag stays.
+    pub fn delete_remote_tag(&self, remote: &str, name: &str) -> Result<()> {
+        self.network(
+            vec![
+                "push".into(),
+                "--".into(),
+                remote.into(),
+                format!(":refs/tags/{name}").into(),
+            ],
+            None,
+            None,
+        )
+    }
+
     fn config_remote(&self, args: &[&str]) -> Result<()> {
         self.git().run(&self.git().command(args).cwd(self.root()))?;
         Ok(())
