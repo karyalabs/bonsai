@@ -570,6 +570,7 @@ mod tests {
                 .collect(),
             stashes: Vec::new(),
             worktrees: Vec::new(),
+            submodules: Vec::new(),
             operation: None,
         }
     }

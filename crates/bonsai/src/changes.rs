@@ -1240,10 +1240,14 @@ impl ChangesView {
             .items_center()
             .gap(px(8.))
             .child(
-                lucide(file_icon(&change.path))
-                    .size(px(15.))
-                    .flex_shrink_0()
-                    .text_color(c.muted_foreground),
+                lucide(if change.submodule {
+                    LucideIcon::Package
+                } else {
+                    file_icon(&change.path)
+                })
+                .size(px(15.))
+                .flex_shrink_0()
+                .text_color(c.muted_foreground),
             )
             .child(
                 div()

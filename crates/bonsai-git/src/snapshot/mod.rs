@@ -54,6 +54,8 @@ pub struct Snapshot {
     pub stashes: Vec<Stash>,
     /// Every worktree, the main one first.
     pub worktrees: Vec<crate::Worktree>,
+    /// Every submodule, by path; empty without `.gitmodules`.
+    pub submodules: Vec<crate::Submodule>,
     pub operation: Option<InProgress>,
 }
 
@@ -198,7 +200,7 @@ impl Repository {
     pub fn snapshot(&self) -> Result<Snapshot> {
         let git = self.git();
         let root = self.root();
-        let (status, refs, remotes, stashes, worktrees) = thread::scope(|scope| {
+        let (status, refs, remotes, stashes, worktrees, submodules) = thread::scope(|scope| {
             let status = (!self.is_bare()).then(|| {
                 scope.spawn(|| {
                     git.run(
@@ -235,12 +237,14 @@ impl Repository {
             let worktrees = scope.spawn(|| {
                 git.run_unchecked(&git.command(["worktree", "list", "--porcelain"]).cwd(root))
             });
+            let submodules = scope.spawn(|| self.submodules());
             (
                 status.map(|h| h.join().expect("status thread")),
                 refs.join().expect("refs thread"),
                 remotes.join().expect("remotes thread"),
                 stashes.join().expect("stash thread"),
                 worktrees.join().expect("worktree thread"),
+                submodules.join().expect("submodule thread"),
             )
         });
 
@@ -268,6 +272,8 @@ impl Repository {
             remotes: parse_remotes(&remotes?.stdout),
             stashes: parse_stashes(&stashes?.stdout_lossy()),
             worktrees: crate::parse_worktrees(&worktrees?.stdout_lossy()),
+            // A submodule Git can't read shouldn't hide the repository.
+            submodules: submodules.unwrap_or_default(),
             operation: self.in_progress(),
         })
     }

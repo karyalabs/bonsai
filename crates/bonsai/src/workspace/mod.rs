@@ -816,6 +816,18 @@ impl Workspace {
         self.set_section(Section::History, cx);
     }
 
+    fn on_add_submodule(
+        &mut self,
+        _: &commands::AddSubmodule,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.tabs.get(self.active).filter(|_| !self.welcome) {
+            tab.refs
+                .update(cx, |refs, cx| refs.show(RefDialog::AddSubmodule, cx));
+        }
+    }
+
     fn on_scan_history(
         &mut self,
         _: &commands::ScanHistory,
@@ -2602,6 +2614,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_purge))
             .on_action(cx.listener(Self::on_scan_history))
             .on_action(cx.listener(Self::on_start_bisect))
+            .on_action(cx.listener(Self::on_add_submodule))
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
             .on_action(cx.listener(Self::on_pull_requests))

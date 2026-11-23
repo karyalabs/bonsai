@@ -9,7 +9,7 @@ use std::{
 
 use bonsai_git::{
     Branch, CheckoutBlocker, DiffTarget, Head, Integration, MergeMode, NewWorktree, Oid, ResetMode,
-    Snapshot, Stash, Worktree, is_valid_ref_name, stash_diff,
+    Snapshot, Stash, Submodule, SubmoduleState, Worktree, is_valid_ref_name, stash_diff,
 };
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -94,6 +94,11 @@ pub enum RefDialog {
     RemoveWorktree {
         path: PathBuf,
         dirty: bool,
+    },
+    /// Clone a repository into a folder of this one.
+    AddSubmodule,
+    RemoveSubmodule {
+        path: PathBuf,
     },
 }
 
@@ -608,9 +613,142 @@ impl RefsPanel {
                 is_valid_ref_name(&new) && new != *name
             }
             Some(RefDialog::AddWorktree { .. }) => self.worktree_problem(cx).is_none(),
+            Some(RefDialog::AddSubmodule) => self.submodule_problem(cx).is_none(),
             Some(_) => true,
             None => false,
         }
+    }
+
+    /// Where the Add Submodule dialog puts the submodule: the folder typed,
+    /// or one named after the repository.
+    fn submodule_path(&self, cx: &gpui_kit::App) -> PathBuf {
+        let typed = self
+            .inputs
+            .as_ref()
+            .map(|i| {
+                i.folder
+                    .read(cx)
+                    .value()
+                    .trim()
+                    .trim_matches('/')
+                    .to_owned()
+            })
+            .unwrap_or_default();
+        if !typed.is_empty() {
+            return PathBuf::from(typed);
+        }
+        PathBuf::from(submodule_folder(&self.url_value(cx)))
+    }
+
+    /// Why the Add Submodule dialog can't add yet: empty when nothing is
+    /// typed.
+    fn submodule_problem(&self, cx: &gpui_kit::App) -> Option<String> {
+        if self.url_value(cx).is_empty() {
+            return Some(String::new());
+        }
+        let path = self.submodule_path(cx);
+        if path.as_os_str().is_empty() || path.is_absolute() || path.starts_with("..") {
+            return Some("Pick a folder inside this repository.".to_owned());
+        }
+        if self.root(cx).join(&path).exists() {
+            return Some(format!("{} already exists.", path.display()));
+        }
+        None
+    }
+
+    /// Runs a submodule command that may clone or fetch.
+    fn run_submodules(
+        &mut self,
+        name: String,
+        operation: impl FnOnce(&bonsai_git::Repository) -> bonsai_git::Result<()> + Send + 'static,
+        cx: &mut Context<Self>,
+    ) {
+        self.model.update(cx, |model, cx| {
+            model.run_network(name, move |repository, _, _| operation(repository), cx);
+        });
+    }
+
+    fn submodule_menu(&self, submodule: &Submodule, cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let this = cx.entity().downgrade();
+        let path = submodule.path.clone();
+        let absolute = self.root(cx).join(&path);
+        let initialized = submodule.state != SubmoduleState::NotInitialized;
+        let label = path.display().to_string();
+        let mut items = Vec::new();
+        if initialized {
+            items.push(
+                MenuItem::new("refs.submodule.open", "Open in Tab")
+                    .icon(LucideIcon::AppWindow)
+                    .on_click(with(&this, {
+                        let absolute = absolute.clone();
+                        move |_, _, cx| cx.emit(RefsEvent::OpenRepository(absolute.clone()))
+                    })),
+            );
+        }
+        items.push(
+            MenuItem::new(
+                "refs.submodule.update",
+                if initialized {
+                    "Check Out Recorded Commit"
+                } else {
+                    "Clone"
+                },
+            )
+            .icon(LucideIcon::RefreshCw)
+            .disabled(submodule.state == SubmoduleState::UpToDate)
+            .on_click(with(&this, {
+                let path = path.clone();
+                let label = label.clone();
+                move |view, _, cx| {
+                    let path = path.clone();
+                    view.run_submodules(
+                        format!("Update submodule {label}"),
+                        move |repository| repository.update_submodules(&[path]),
+                        cx,
+                    );
+                }
+            })),
+        );
+        items.push(
+            MenuItem::new("refs.submodule.latest", "Update to Latest from Remote")
+                .icon(LucideIcon::CloudDownload)
+                .on_click(with(&this, {
+                    let path = path.clone();
+                    let label = label.clone();
+                    move |view, _, cx| {
+                        let path = path.clone();
+                        view.run_submodules(
+                            format!("Update submodule {label} to latest"),
+                            move |repository| repository.update_submodules_remote(&[path]),
+                            cx,
+                        );
+                    }
+                })),
+        );
+        items.push(MenuItem::separator());
+        if initialized {
+            items.push(
+                MenuItem::new("refs.submodule.reveal", "Reveal in Finder")
+                    .icon(LucideIcon::FolderOpen)
+                    .on_click(move |_, _, cx| cx.reveal_path(&absolute)),
+            );
+        }
+        if let Some(url) = submodule.url.clone() {
+            items.push(
+                MenuItem::new("refs.submodule.copy", "Copy URL")
+                    .icon(LucideIcon::Copy)
+                    .on_click(move |_, _, cx| {
+                        cx.write_to_clipboard(ClipboardItem::new_string(url.clone()));
+                    }),
+            );
+        }
+        items.push(MenuItem::separator());
+        items.push(
+            MenuItem::new("refs.submodule.remove", "Remove…")
+                .icon(LucideIcon::Trash2)
+                .on_click(show(&this, RefDialog::RemoveSubmodule { path })),
+        );
+        items
     }
 
     /// Why the Add Worktree dialog can't create its worktree yet.
@@ -759,6 +897,20 @@ impl RefsPanel {
                 );
             }
             RefDialog::RemoveWorktree { path, dirty } => self.remove_worktree(path, dirty, cx),
+            RefDialog::AddSubmodule => {
+                let url = self.url_value(cx);
+                let path = self.submodule_path(cx);
+                self.run_submodules(
+                    format!("Add submodule {}", path.display()),
+                    move |repository| repository.add_submodule(&url, &path),
+                    cx,
+                );
+            }
+            RefDialog::RemoveSubmodule { path } => self.run(
+                format!("Remove submodule {}", path.display()),
+                move |repository| repository.remove_submodule(&path),
+                cx,
+            ),
             RefDialog::DeleteRemoteBranch { remote, branch } => {
                 self.model.update(cx, |model, cx| {
                     model.run_network(
@@ -788,7 +940,10 @@ impl RefsPanel {
         };
         let folder = inputs.folder.clone();
         folder.update(cx, |input, cx| input.set_value(String::new(), window, cx));
-        let edit_url = matches!(self.dialog, Some(RefDialog::EditRemoteUrl { .. }));
+        let edit_url = matches!(
+            self.dialog,
+            Some(RefDialog::EditRemoteUrl { .. } | RefDialog::AddSubmodule)
+        );
         let (name, url, message) = (
             inputs.name.clone(),
             inputs.url.clone(),
@@ -1354,6 +1509,20 @@ impl RefsPanel {
                 "Remove",
                 true,
             ),
+            RefDialog::AddSubmodule => (
+                "Add Submodule".to_owned(),
+                "Clones another repository into a folder of this one, pinned at its current commit. Commit the change to share it."
+                    .to_owned(),
+                "Add Submodule",
+                false,
+            ),
+            RefDialog::RemoveSubmodule { path } => (
+                format!("Remove {}?", path.display()),
+                "Its folder and its entry in .gitmodules are removed, staged for you to commit. The other repository is untouched."
+                    .to_owned(),
+                "Remove",
+                true,
+            ),
             RefDialog::RemoveWorktree { path, dirty: true } => (
                 format!("{} has changes", path.file_name().unwrap_or_default().to_string_lossy()),
                 "It has uncommitted changes or untracked files. Removing it anyway deletes them for good."
@@ -1371,7 +1540,10 @@ impl RefsPanel {
                 | RefDialog::RenameRemote { .. }
                 | RefDialog::AddWorktree { .. }
         );
-        let with_url = matches!(open, RefDialog::AddRemote | RefDialog::EditRemoteUrl { .. });
+        let with_url = matches!(
+            open,
+            RefDialog::AddRemote | RefDialog::EditRemoteUrl { .. } | RefDialog::AddSubmodule
+        );
         let name_value = self.name_value(cx);
         let invalid = with_name && !name_value.is_empty() && !is_valid_ref_name(&name_value);
         let can_confirm = self.can_confirm(cx);
@@ -1389,6 +1561,15 @@ impl RefsPanel {
             .as_ref()
             .map(|i| i.stash_message.clone())
             .filter(|_| matches!(open, RefDialog::StashChanges));
+        let submodule = matches!(open, RefDialog::AddSubmodule).then(|| {
+            (
+                self.inputs.as_ref().map(|i| i.folder.clone()),
+                Some(self.submodule_path(cx).display().to_string())
+                    .filter(|p| !p.is_empty())
+                    .unwrap_or_else(|| "Goes in a folder named after the repository".to_owned()),
+                self.submodule_problem(cx).filter(|p| !p.is_empty()),
+            )
+        });
         let worktree = matches!(open, RefDialog::AddWorktree { .. }).then(|| {
             let snapshot = self.snapshot(cx);
             let hint = if name_value.is_empty() {
@@ -1487,6 +1668,42 @@ impl RefsPanel {
             })
             .when_some(url_input, |this, url| {
                 this.child(Input::new(&url).aria_label("Remote URL"))
+            })
+            .when_some(submodule, |this, (folder, path, problem)| {
+                this.child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(8.))
+                        .when_some(folder, |this, folder| {
+                            this.child(Input::new(&folder).aria_label("Folder"))
+                        })
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(6.))
+                                .min_w_0()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(
+                                    lucide(LucideIcon::Package)
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(c.muted_foreground),
+                                )
+                                .child(
+                                    div()
+                                        .min_w_0()
+                                        .truncate()
+                                        .font_family(theme.fonts.mono.clone())
+                                        .child(path),
+                                ),
+                        )
+                        .when_some(problem, |this, problem| {
+                            this.child(div().text_xs().text_color(c.destructive).child(problem))
+                        }),
+                )
             })
             .when_some(worktree, |this, (folder, hint, path, problem)| {
                 this.child(
@@ -1661,6 +1878,146 @@ impl RefsPanel {
     }
 }
 
+impl RefsPanel {
+    fn render_submodules(
+        &self,
+        snapshot: &Snapshot,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let theme = UiTheme::read(cx).clone();
+        let c = &theme.colors;
+        let this = cx.entity().downgrade();
+        let root = self.root(cx);
+        let stale = snapshot
+            .submodules
+            .iter()
+            .any(|s| s.state != SubmoduleState::UpToDate);
+        let header_button = |id: &'static str, label: &'static str, icon: LucideIcon| {
+            Button::new(id)
+                .variant(ButtonVariant::Ghost)
+                .aria_label(label)
+                .child(lucide(icon).size(px(12.)).text_color(c.sidebar_foreground))
+        };
+        let mut list = div().flex().flex_col().child(
+            div()
+                .mt(px(12.))
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(sidebar_group_label("SUBMODULES", cx))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .when(stale, |this| {
+                            this.child(
+                                header_button(
+                                    "refs.update-submodules",
+                                    "Update All Submodules",
+                                    LucideIcon::RefreshCw,
+                                )
+                                .on_click(cx.listener(
+                                    |this, _, _, cx| {
+                                        this.run_submodules(
+                                            "Update submodules".to_owned(),
+                                            |repository| repository.update_submodules(&[]),
+                                            cx,
+                                        );
+                                    },
+                                )),
+                            )
+                        })
+                        .child(
+                            header_button("refs.add-submodule", "Add Submodule", LucideIcon::Plus)
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.show(RefDialog::AddSubmodule, cx);
+                                })),
+                        ),
+                ),
+        );
+        for submodule in &snapshot.submodules {
+            let (icon, color, trailing) = match submodule.state {
+                SubmoduleState::NotInitialized => (
+                    LucideIcon::PackageOpen,
+                    c.muted_foreground,
+                    "not cloned".to_owned(),
+                ),
+                SubmoduleState::UpToDate => (
+                    LucideIcon::Package,
+                    c.sidebar_foreground,
+                    submodule
+                        .describe
+                        .clone()
+                        .filter(|d| !d.starts_with("heads/"))
+                        .unwrap_or_else(|| submodule.oid.short().to_string()),
+                ),
+                SubmoduleState::OtherCommit => (
+                    LucideIcon::Package,
+                    c.warning,
+                    format!("at {}", submodule.oid.short()),
+                ),
+                SubmoduleState::Conflicted => (
+                    LucideIcon::TriangleAlert,
+                    c.destructive,
+                    "conflicted".to_owned(),
+                ),
+            };
+            let mut item = SidebarItem::new(
+                SharedString::from(format!("submodule:{}", submodule.path.display())),
+                submodule.path.display().to_string(),
+            )
+            .icon(lucide(icon).size(px(16.)).text_color(color))
+            .trailing(
+                div()
+                    .max_w(px(96.))
+                    .truncate()
+                    .text_xs()
+                    .text_color(if submodule.state == SubmoduleState::OtherCommit {
+                        c.warning
+                    } else {
+                        c.muted_foreground
+                    })
+                    .child(trailing),
+            );
+            if submodule.state == SubmoduleState::NotInitialized {
+                let path = submodule.path.clone();
+                item = item.on_activate(with(&this, move |view, _, cx| {
+                    let path = path.clone();
+                    view.run_submodules(
+                        format!("Clone submodule {}", path.display()),
+                        move |repository| repository.update_submodules(&[path]),
+                        cx,
+                    );
+                }));
+            } else {
+                let absolute = root.join(&submodule.path);
+                item = item.on_activate(with(&this, move |_, _, cx| {
+                    cx.emit(RefsEvent::OpenRepository(absolute.clone()));
+                }));
+            }
+            let menu_submodule = submodule.clone();
+            list = list.child(div().child(item).on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, _, _, cx| {
+                    let items = this.submodule_menu(&menu_submodule, cx);
+                    this.set_menu(items, cx);
+                }),
+            ));
+        }
+        list
+    }
+}
+
+/// `vendor-lib` for `https://example.com/team/vendor-lib.git`.
+fn submodule_folder(url: &str) -> String {
+    url.trim_end_matches('/')
+        .rsplit(['/', ':'])
+        .next()
+        .unwrap_or_default()
+        .trim_end_matches(".git")
+        .to_owned()
+}
+
 fn canonical(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
@@ -1808,6 +2165,9 @@ impl Render for RefsPanel {
             }
 
             list = list.child(self.render_worktrees(snapshot, cx));
+            if !snapshot.submodules.is_empty() {
+                list = list.child(self.render_submodules(snapshot, cx));
+            }
 
             let mut remotes: Vec<&str> = snapshot.remotes.iter().map(|r| r.name.as_str()).collect();
             for branch in &snapshot.remote_branches {
@@ -2316,5 +2676,93 @@ mod tests {
         model.read_with(cx, |model, _| {
             assert_eq!(model.snapshot().unwrap().worktrees.len(), 2);
         });
+    }
+
+    #[test]
+    fn names_a_submodule_folder_after_its_repository() {
+        assert_eq!(submodule_folder("https://example.com/team/lib.git"), "lib");
+        assert_eq!(
+            submodule_folder("git@example.com:team/vendor-lib.git"),
+            "vendor-lib"
+        );
+        assert_eq!(submodule_folder("../shared/"), "shared");
+    }
+
+    #[gpui_kit::test]
+    fn adds_and_removes_submodules(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path().canonicalize().unwrap();
+        // Submodules from a local folder need this since Git 2.38.
+        let g = Git::locate(None)
+            .unwrap()
+            .with_env("GIT_CONFIG_COUNT", "1")
+            .with_env("GIT_CONFIG_KEY_0", "protocol.file.allow")
+            .with_env("GIT_CONFIG_VALUE_0", "always");
+        let mut repositories = Vec::new();
+        for name in ["library", "app"] {
+            let root = base.join(name);
+            std::fs::create_dir(&root).unwrap();
+            repositories.push(Repository::init(&g, &root, Some("main")).unwrap());
+            for (key, value) in [
+                ("user.name", "Ada Lovelace"),
+                ("user.email", "ada@example.com"),
+                ("commit.gpgsign", "false"),
+            ] {
+                git(&root, &["config", key, value]);
+            }
+            std::fs::write(root.join("a.txt"), name).unwrap();
+            git(&root, &["add", "."]);
+            git(&root, &["commit", "-qm", "base"]);
+        }
+        let app = base.join("app");
+        let repository = repositories.pop().unwrap();
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| RefsPanel::new(model.clone(), cx));
+        cx.run_until_parked();
+
+        panel.update(cx, |panel, cx| panel.show(RefDialog::AddSubmodule, cx));
+        cx.run_until_parked();
+        let url = panel.read_with(cx, |panel, _| panel.inputs.as_ref().unwrap().url.clone());
+        panel.read_with(cx, |panel, cx| assert!(!panel.can_confirm(cx)));
+        url.update_in(cx, |input, window, cx| {
+            input.set_value(
+                base.join("library").to_string_lossy().into_owned(),
+                window,
+                cx,
+            );
+        });
+        panel.read_with(cx, |panel, cx| {
+            assert_eq!(panel.submodule_path(cx), PathBuf::from("library"));
+            assert!(panel.can_confirm(cx));
+        });
+        let folder = panel.read_with(cx, |panel, _| panel.inputs.as_ref().unwrap().folder.clone());
+        folder.update_in(cx, |input, window, cx| {
+            input.set_value("vendor/lib", window, cx);
+        });
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        model.update(cx, RepositoryModel::refresh);
+        cx.run_until_parked();
+        model.read_with(cx, |model, _| {
+            let submodules = &model.snapshot().unwrap().submodules;
+            assert_eq!(submodules.len(), 1);
+            assert_eq!(submodules[0].path, PathBuf::from("vendor/lib"));
+            assert_eq!(submodules[0].state, SubmoduleState::UpToDate);
+        });
+        assert!(app.join("vendor/lib/a.txt").exists());
+
+        panel.update(cx, |panel, cx| {
+            panel.show(
+                RefDialog::RemoveSubmodule {
+                    path: "vendor/lib".into(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert!(!app.join("vendor/lib").exists());
     }
 }
