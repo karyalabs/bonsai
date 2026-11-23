@@ -105,6 +105,31 @@ impl Repository {
         Ok(authors)
     }
 
+    /// The text of the file `commit.template` names, which starts every
+    /// commit message, or `None` when it isn't set or can't be read.
+    pub fn commit_template(&self) -> Result<Option<String>> {
+        let output = self.git().run_unchecked(
+            &self
+                .git()
+                .command(["config", "--path", "commit.template"])
+                .cwd(self.root()),
+        )?;
+        let path = output.stdout_lossy().trim().to_owned();
+        if !output.status.success() || path.is_empty() {
+            return Ok(None);
+        }
+        let path = std::path::PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            self.root().join(path)
+        };
+        Ok(std::fs::read_to_string(path)
+            .ok()
+            .map(|text| text.trim_end().to_owned())
+            .filter(|text| !text.is_empty()))
+    }
+
     /// Messages of up to `count` recent commits on HEAD, newest first,
     /// without duplicates.
     pub fn recent_messages(&self, count: usize) -> Result<Vec<String>> {
