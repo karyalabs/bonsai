@@ -345,6 +345,7 @@ impl Workspace {
             let diff_target = diff.downgrade();
             let conflict = cx.new(|_| ConflictView::new(model.clone()));
             let conflict_target = conflict.downgrade();
+            let stash_target = refs.downgrade();
             let changes_events = cx.subscribe(
                 &changes,
                 move |this, _, event: &ChangesEvent, cx| match event {
@@ -369,6 +370,11 @@ impl Workspace {
                     ChangesEvent::Purge(path) => {
                         this.purge_requested = Some(path.clone());
                         cx.notify();
+                    }
+                    ChangesEvent::Stash(paths) => {
+                        let _ = stash_target.update(cx, |refs, cx| {
+                            refs.show_stash_files(paths.clone(), cx);
+                        });
                     }
                 },
             );

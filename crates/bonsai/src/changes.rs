@@ -302,6 +302,8 @@ pub enum ChangesEvent {
     Focused(Option<DiffTarget>, SharedString),
     /// Purge from History was chosen for this path.
     Purge(PathBuf),
+    /// Stash was chosen for these paths.
+    Stash(Vec<PathBuf>),
     /// The active row is this conflicted file: show the resolver.
     Conflict(PathBuf, bonsai_git::ConflictKind),
 }
@@ -950,6 +952,34 @@ impl ChangesView {
                 })),
         );
         items.push(MenuItem::separator());
+        let stash: Vec<PathBuf> = [
+            targets.staged.clone(),
+            targets.unstaged.clone(),
+            targets.untracked.clone(),
+        ]
+        .concat()
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+        items.push(
+            MenuItem::new(
+                "changes.stash",
+                if stash.len() == 1 {
+                    "Stash This File…".to_owned()
+                } else {
+                    format!("Stash {} Files…", stash.len())
+                },
+            )
+            .icon(LucideIcon::Archive)
+            .disabled(stash.is_empty() || !targets.conflicted.is_empty())
+            .on_click({
+                let this = this.clone();
+                move |_, _, cx| {
+                    let _ = this.update(cx, |_, cx| cx.emit(ChangesEvent::Stash(stash.clone())));
+                }
+            }),
+        );
         items.push(
             MenuItem::new("changes.discard", "Discard Changes…")
                 .icon(LucideIcon::Undo2)

@@ -174,6 +174,8 @@ pub struct RefsPanel {
     inputs: Option<Inputs>,
     checkout_new: bool,
     stash_untracked: bool,
+    /// The files Stash Changes stashes; all changes when empty.
+    stash_paths: Vec<PathBuf>,
     collapsed_remotes: BTreeSet<String>,
     _events: Subscription,
 }
@@ -206,6 +208,7 @@ impl RefsPanel {
             inputs: None,
             checkout_new: true,
             stash_untracked: true,
+            stash_paths: Vec::new(),
             collapsed_remotes: BTreeSet::new(),
             _events: events,
         }
@@ -218,9 +221,22 @@ impl RefsPanel {
 
     /// Opens a dialog on the next render.
     pub fn show(&mut self, dialog: RefDialog, cx: &mut Context<Self>) {
+        self.stash_paths.clear();
         self.dialog = Some(dialog);
         self.open_requested = true;
         cx.notify();
+    }
+
+    /// Asks for a message, then stashes only `paths`.
+    pub fn show_stash_files(&mut self, paths: Vec<PathBuf>, cx: &mut Context<Self>) {
+        self.show(RefDialog::StashChanges, cx);
+        self.stash_paths = paths;
+    }
+
+    /// The files the open Stash Changes dialog stashes; empty for all.
+    #[must_use]
+    pub fn stash_paths(&self) -> &[PathBuf] {
+        &self.stash_paths
     }
 
     fn snapshot<'a>(&self, cx: &'a gpui_kit::App) -> Option<&'a Snapshot> {
@@ -859,9 +875,15 @@ impl RefsPanel {
                     .map(|i| i.stash_message.read(cx).value().trim().to_owned())
                     .unwrap_or_default();
                 let untracked = self.stash_untracked;
+                let paths = std::mem::take(&mut self.stash_paths);
+                let name = match paths.as_slice() {
+                    [] => "Stash changes".to_owned(),
+                    [path] => format!("Stash {}", path.display()),
+                    _ => format!("Stash {} files", paths.len()),
+                };
                 self.run(
-                    "Stash changes".to_owned(),
-                    move |repository| repository.stash_save(&message, untracked),
+                    name,
+                    move |repository| repository.stash_paths(&message, untracked, &paths),
                     cx,
                 );
             }
@@ -1509,8 +1531,18 @@ impl RefsPanel {
             }
             RefDialog::StashChanges => (
                 "Stash Changes".to_owned(),
-                "Puts your uncommitted changes aside and cleans the working tree. Apply the stash to bring them back."
-                    .to_owned(),
+                match self.stash_paths.as_slice() {
+                    [] => "Puts your uncommitted changes aside and cleans the working tree. Apply the stash to bring them back."
+                        .to_owned(),
+                    [path] => format!(
+                        "Puts the changes to {} aside; everything else stays. Apply the stash to bring them back.",
+                        path.display()
+                    ),
+                    paths => format!(
+                        "Puts the changes to {} files aside; everything else stays. Apply the stash to bring them back.",
+                        paths.len()
+                    ),
+                },
                 "Stash",
                 false,
             ),
@@ -2492,6 +2524,43 @@ mod tests {
         panel.update_in(cx, RefsPanel::confirm);
         cx.run_until_parked();
         assert_eq!(head(&model, cx), "fresh");
+    }
+
+    #[gpui_kit::test]
+    fn stashes_only_the_chosen_files(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repository = Repository::init(&Git::locate(None).unwrap(), root, Some("main")).unwrap();
+        for (key, value) in [
+            ("user.name", "Ada Lovelace"),
+            ("user.email", "ada@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(root, &["config", key, value]);
+        }
+        std::fs::write(root.join("a.txt"), "1").unwrap();
+        std::fs::write(root.join("b.txt"), "1").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "base"]);
+        std::fs::write(root.join("a.txt"), "2").unwrap();
+        std::fs::write(root.join("b.txt"), "2").unwrap();
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (panel, cx) = cx.add_window_view(|_, cx| RefsPanel::new(model.clone(), cx));
+        cx.run_until_parked();
+        panel.update(cx, |panel, cx| {
+            panel.show_stash_files(vec![PathBuf::from("a.txt")], cx);
+            assert_eq!(panel.stash_paths(), [PathBuf::from("a.txt")]);
+        });
+        cx.run_until_parked();
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "1");
+        assert_eq!(std::fs::read_to_string(root.join("b.txt")).unwrap(), "2");
+        model.read_with(cx, |model, _| {
+            assert_eq!(model.snapshot().unwrap().stashes.len(), 1);
+        });
     }
 
     #[gpui_kit::test]

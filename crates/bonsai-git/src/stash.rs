@@ -45,12 +45,28 @@ impl Repository {
     /// Stashes uncommitted changes with a message (Git writes one when it
     /// is empty), including untracked files when asked.
     pub fn stash_save(&self, message: &str, include_untracked: bool) -> Result<()> {
+        self.stash_paths(message, include_untracked, &[])
+    }
+
+    /// Stashes only the changes to `paths` (all changes when empty), leaving
+    /// the rest in the working tree.
+    pub fn stash_paths(
+        &self,
+        message: &str,
+        include_untracked: bool,
+        paths: &[PathBuf],
+    ) -> Result<()> {
         let mut args = vec!["stash", "push"];
         if include_untracked {
             args.push("--include-untracked");
         }
         if !message.trim().is_empty() {
             args.extend(["-m", message.trim()]);
+        }
+        let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();
+        if !paths.is_empty() {
+            args.push("--".into());
+            args.extend(paths.iter().map(|p| p.as_os_str().to_owned()));
         }
         self.git().run(&self.git().command(args).cwd(self.root()))?;
         Ok(())

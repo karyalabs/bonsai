@@ -126,3 +126,25 @@ fn drop_checks_the_stash_has_not_moved() {
     assert_eq!(left.len(), 1);
     assert!(left[0].message.contains("two"));
 }
+
+#[test]
+fn stashes_only_the_chosen_files() {
+    let (dir, repository) = repo();
+    let root = dir.path();
+    commit(root, "b.txt", "base\n", "add b");
+    std::fs::write(root.join("a.txt"), "edited\n").unwrap();
+    std::fs::write(root.join("b.txt"), "edited\n").unwrap();
+    std::fs::write(root.join("new.txt"), "new\n").unwrap();
+    repository
+        .stash_paths(
+            "just a",
+            true,
+            &[PathBuf::from("a.txt"), PathBuf::from("new.txt")],
+        )
+        .unwrap();
+    assert_eq!(status(root), " M b.txt\n");
+    let stash = &repository.snapshot().unwrap().stashes[0];
+    let contents = repository.stash_contents(&stash.oid).unwrap();
+    assert_eq!(contents.tracked, [PathBuf::from("a.txt")]);
+    assert_eq!(contents.untracked, [PathBuf::from("new.txt")]);
+}
