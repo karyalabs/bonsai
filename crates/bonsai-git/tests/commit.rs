@@ -77,3 +77,41 @@ fn reports_signing_configuration() {
     config(dir.path(), "gpg.format", "ssh");
     assert_eq!(repository.commit_signing().unwrap(), Some(Signing::Ssh));
 }
+
+#[test]
+fn lists_recent_authors_other_than_me() {
+    let (dir, repository) = repository();
+    let commit_as = |name: &str, email: &str, file: &str| {
+        std::fs::write(dir.path().join(file), file).unwrap();
+        repository.stage_all().unwrap();
+        git()
+            .run(
+                &git()
+                    .command([
+                        "commit",
+                        "-q",
+                        "-m",
+                        file,
+                        &format!("--author={name} <{email}>"),
+                    ])
+                    .cwd(dir.path()),
+            )
+            .unwrap();
+    };
+    commit_as("Grace Hopper", "grace@example.com", "a");
+    commit_as("Bonsai", "bonsai@example.com", "b");
+    commit_as("Ada Lovelace", "ada@example.com", "c");
+    commit_as("Ada Lovelace", "ADA@example.com", "d");
+    commit_as(
+        "dependabot[bot]",
+        "49699333+dependabot[bot]@users.noreply.github.com",
+        "e",
+    );
+    assert_eq!(
+        repository.recent_authors(5).unwrap(),
+        [
+            ("Ada Lovelace".to_owned(), "ADA@example.com".to_owned()),
+            ("Grace Hopper".to_owned(), "grace@example.com".to_owned()),
+        ]
+    );
+}

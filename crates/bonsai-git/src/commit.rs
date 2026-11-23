@@ -60,6 +60,51 @@ impl Repository {
         Ok(output.stdout_lossy().trim_end().to_owned())
     }
 
+    /// Up to `count` people who recently authored commits on any branch,
+    /// most recent first, as `(name, email)`, leaving out the committer
+    /// identity this repository uses. Offered as co-authors.
+    pub fn recent_authors(&self, count: usize) -> Result<Vec<(String, String)>> {
+        if self.head_is_unborn()? {
+            return Ok(Vec::new());
+        }
+        let me = self
+            .git()
+            .run_unchecked(
+                &self
+                    .git()
+                    .command(["config", "user.email"])
+                    .cwd(self.root()),
+            )?
+            .stdout_lossy()
+            .trim()
+            .to_lowercase();
+        let output = self.git().run(
+            &self
+                .git()
+                .command(["log", "--all", "--max-count=1000", "--format=%an%x1f%ae"])
+                .cwd(self.root()),
+        )?;
+        let mut authors: Vec<(String, String)> = Vec::new();
+        for line in output.stdout_lossy().lines() {
+            let Some((name, email)) = line.split_once('\x1f') else {
+                continue;
+            };
+            let key = email.trim().to_lowercase();
+            if key.is_empty()
+                || key == me
+                || key.contains("[bot]")
+                || authors.iter().any(|(_, e)| e.to_lowercase() == key)
+            {
+                continue;
+            }
+            authors.push((name.trim().to_owned(), email.trim().to_owned()));
+            if authors.len() == count {
+                break;
+            }
+        }
+        Ok(authors)
+    }
+
     /// Messages of up to `count` recent commits on HEAD, newest first,
     /// without duplicates.
     pub fn recent_messages(&self, count: usize) -> Result<Vec<String>> {

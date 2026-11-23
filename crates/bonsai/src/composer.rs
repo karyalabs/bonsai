@@ -25,6 +25,27 @@ use crate::{
 const SUMMARY_SOFT_LIMIT: usize = 50;
 const SUMMARY_HARD_LIMIT: usize = 72;
 const RECENT_MESSAGES: usize = 10;
+const RECENT_AUTHORS: usize = 12;
+
+/// Adds a trailer such as `Co-authored-by: …` to the end of a commit body,
+/// after a blank line unless the body already ends in trailers. A trailer
+/// already there isn't added twice.
+#[must_use]
+pub fn add_trailer(body: &str, trailer: &str) -> String {
+    let body = body.trim_end();
+    if body.lines().any(|line| line.trim() == trailer) {
+        return body.to_owned();
+    }
+    if body.is_empty() {
+        return trailer.to_owned();
+    }
+    let last = body.lines().last().unwrap_or_default();
+    let ends_in_trailer = last.split_once(": ").is_some_and(|(key, _)| {
+        !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+    });
+    let gap = if ends_in_trailer { "\n" } else { "\n\n" };
+    format!("{body}{gap}{trailer}")
+}
 
 /// Joins the summary and body the way `git commit` expects.
 #[must_use]
@@ -55,6 +76,9 @@ pub struct CommitComposer {
     signing: Option<Signing>,
     recent: Vec<String>,
     recent_menu: Entity<MenuState>,
+    /// People who recently committed here, offered as co-authors.
+    authors: Vec<(String, String)>,
+    authors_menu: Entity<MenuState>,
     /// Commit and Push, and other commit options.
     commit_menu: Entity<MenuState>,
     /// Push once the commit in flight lands.
@@ -78,6 +102,7 @@ impl CommitComposer {
                 .placeholder("Description")
         });
         let recent_menu = cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(360.)));
+        let authors_menu = cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(320.)));
         let this = cx.entity().downgrade();
         let commit_menu = cx.new(|cx| {
             MenuState::new(
@@ -163,6 +188,8 @@ impl CommitComposer {
             signing: None,
             recent: Vec::new(),
             recent_menu,
+            authors: Vec::new(),
+            authors_menu,
             commit_menu,
             push_after: false,
             pending: None,
@@ -206,14 +233,19 @@ impl CommitComposer {
                 repository
                     .recent_messages(RECENT_MESSAGES)
                     .unwrap_or_default(),
+                repository
+                    .recent_authors(RECENT_AUTHORS)
+                    .unwrap_or_default(),
             )
         });
         cx.spawn(async move |this, cx| {
-            let (signing, recent) = task.await;
+            let (signing, recent, authors) = task.await;
             let _ = this.update(cx, |this, cx| {
                 this.signing = signing;
                 this.recent = recent;
+                this.authors = authors;
                 this.rebuild_recent_menu(cx);
+                this.rebuild_authors_menu(cx);
                 cx.notify();
             });
         })
@@ -237,6 +269,40 @@ impl CommitComposer {
             .collect();
         self.recent_menu
             .update(cx, |menu, cx| menu.set_items(items, cx));
+    }
+
+    fn rebuild_authors_menu(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let heading = MenuItem::label("composer.co-authors", "Add Co-author");
+        let items: Vec<MenuItem> = std::iter::once(heading)
+            .chain(
+                self.authors
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (name, email))| {
+                        let trailer = format!("Co-authored-by: {name} <{email}>");
+                        let this = this.clone();
+                        MenuItem::new(("composer.co-author", index), name.clone())
+                            .description(email.clone())
+                            .on_click(move |_, window, cx| {
+                                let _ = this.update(cx, |this, cx| {
+                                    this.add_co_author(&trailer, window, cx);
+                                });
+                            })
+                    }),
+            )
+            .collect();
+        self.authors_menu
+            .update(cx, |menu, cx| menu.set_items(items, cx));
+    }
+
+    /// Credits someone else on this commit with a `Co-authored-by` trailer,
+    /// which GitHub and GitLab show on the commit.
+    fn add_co_author(&mut self, trailer: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let body = add_trailer(&self.body.read(cx).value(), trailer);
+        self.body
+            .update(cx, |input, cx| input.set_value(body, window, cx));
+        cx.notify();
     }
 
     fn staged_count(&self, cx: &gpui_kit::App) -> usize {
@@ -416,6 +482,26 @@ impl Render for CommitComposer {
                         )
                     })
                     .child(div().flex_1())
+                    .when(!self.authors.is_empty(), |this| {
+                        let theme = theme.clone();
+                        this.child(
+                            Menu::new(&self.authors_menu, "Add co-author")
+                                .trigger_style_with(move |button| {
+                                    style_button(
+                                        button,
+                                        false,
+                                        ButtonVariant::Ghost,
+                                        ButtonSize::IconSm,
+                                        &theme,
+                                    )
+                                })
+                                .trigger(
+                                    lucide(LucideIcon::UserPlus)
+                                        .size(px(15.))
+                                        .text_color(c.muted_foreground),
+                                ),
+                        )
+                    })
                     .when(!self.recent.is_empty(), |this| {
                         let theme = theme.clone();
                         this.child(
@@ -492,6 +578,24 @@ mod tests {
     use gpui_kit::TestAppContext;
 
     use super::*;
+
+    #[test]
+    fn co_authors_go_in_a_trailer_block_once() {
+        let ada = "Co-authored-by: Ada Lovelace <ada@example.com>";
+        let grace = "Co-authored-by: Grace Hopper <grace@example.com>";
+        assert_eq!(add_trailer("", ada), ada);
+        assert_eq!(
+            add_trailer("Fixes the mill.\n", ada),
+            format!("Fixes the mill.\n\n{ada}")
+        );
+        let once = add_trailer("Fixes the mill.", ada);
+        assert_eq!(add_trailer(&once, ada), once);
+        assert_eq!(add_trailer(&once, grace), format!("{once}\n{grace}"));
+        assert_eq!(
+            add_trailer("Note: it works", ada),
+            format!("Note: it works\n{ada}")
+        );
+    }
 
     #[test]
     fn messages_round_trip_between_fields_and_git() {
