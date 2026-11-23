@@ -77,6 +77,12 @@ language, a README and a license), committed as "Initial commit". It has no
 remote until it's published.
 _Avoid_: Init (the Git command), template repository
 
+**Content search**:
+Finding text inside the tracked files, in the work tree or at a chosen
+commit, from the Files view (`git grep`). A query in lowercase matches any
+case; one with a capital letter matches exactly. Binary files are skipped.
+_Avoid_: Find in files, filter (Files' filter matches names)
+
 **Co-author**:
 Someone else credited on a commit with a `Co-authored-by: Name <email>`
 trailer at the end of its message, which GitHub and GitLab show beside the

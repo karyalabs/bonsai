@@ -7,15 +7,15 @@ use std::{
     sync::Arc,
 };
 
-use bonsai_git::{FileVersion, Oid};
+use bonsai_git::{FileVersion, GrepResults, Oid};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::component::{ActiveTheme as _, Rope, highlighter::SyntaxHighlighter};
 use gpui_kit::{
-    AnyElement, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, Image, ImageFormat,
-    InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, StyledImage as _, StyledText, Subscription,
-    UniformListScrollHandle, WeakEntity, Window, div, img, prelude::FluentBuilder as _, px,
-    uniform_list,
+    AnyElement, AppContext as _, ClipboardItem, Context, Entity, EventEmitter, HighlightStyle,
+    Image, ImageFormat, InteractiveElement as _, IntoElement, ObjectFit, ParentElement as _,
+    Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled,
+    StyledImage as _, StyledText, Subscription, UniformListScrollHandle, WeakEntity, Window, div,
+    img, prelude::FluentBuilder as _, px, uniform_list,
 };
 
 use crate::{
@@ -40,6 +40,64 @@ const MAX_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_HIGHLIGHT_BYTES: usize = 512 * 1024;
 /// A text row's height.
 const ROW: f32 = 20.;
+/// Matching lines kept from a search of the files' contents.
+const MAX_HITS: usize = 2000;
+/// A search result row's height.
+const HIT_ROW: f32 = 24.;
+
+/// What a search of the files' contents shows.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SearchStatus {
+    Searching,
+    Done(Arc<GrepResults>),
+    Failed(SharedString),
+}
+
+/// A row of search results: a file, or one of its matching lines (an
+/// index into the hits).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ResultRow {
+    File { first: usize, count: usize },
+    Hit(usize),
+}
+
+fn result_rows(results: &GrepResults) -> Vec<ResultRow> {
+    let mut rows = Vec::new();
+    let mut index = 0;
+    while index < results.hits.len() {
+        let path = &results.hits[index].path;
+        let count = results.hits[index..]
+            .iter()
+            .take_while(|hit| &hit.path == path)
+            .count();
+        rows.push(ResultRow::File {
+            first: index,
+            count,
+        });
+        rows.extend((index..index + count).map(ResultRow::Hit));
+        index += count;
+    }
+    rows
+}
+
+/// Where `query` appears in `text`, ignoring case when the query is all
+/// lowercase, as the search does.
+fn match_ranges(text: &str, query: &str) -> Vec<std::ops::Range<usize>> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+    let fold = !query.chars().any(char::is_uppercase);
+    let (haystack, needle) = if fold {
+        (text.to_ascii_lowercase(), query.to_ascii_lowercase())
+    } else {
+        (text.to_owned(), query.to_owned())
+    };
+    haystack
+        .match_indices(&needle)
+        .map(|(start, found)| start..start + found.len())
+        .filter(|range| text.is_char_boundary(range.start) && text.is_char_boundary(range.end))
+        .collect()
+}
 
 pub enum FilesEvent {
     /// Purge from History was chosen for this path.
@@ -101,6 +159,13 @@ pub struct FilesView {
     tree: TreeState,
     filter: Option<(Entity<InputState>, Subscription)>,
     filter_text: String,
+    /// The box searches the files' contents instead of their names.
+    search_contents: bool,
+    search: Option<SearchStatus>,
+    search_generation: u64,
+    results_scroll: UniformListScrollHandle,
+    /// The line a search result points at, highlighted in the viewer.
+    goto_line: Option<usize>,
     /// The file the viewer shows.
     selected: Option<PathBuf>,
     content: Option<Content>,
@@ -347,6 +412,11 @@ impl FilesView {
             tree,
             filter: None,
             filter_text: String::new(),
+            search_contents: false,
+            search: None,
+            search_generation: 0,
+            results_scroll: UniformListScrollHandle::new(),
+            goto_line: None,
             selected: None,
             content: None,
             syntax: None,
@@ -417,6 +487,9 @@ impl FilesView {
                         this.paths = Arc::new(paths);
                         this.status = ListStatus::Ready;
                         this.sync(cx);
+                        if this.search_contents {
+                            this.run_search(cx);
+                        }
                     }
                     Err(error) => this.status = ListStatus::Failed(error.to_string().into()),
                 }
@@ -452,6 +525,112 @@ impl FilesView {
         }
     }
 
+    #[must_use]
+    pub fn search(&self) -> Option<&SearchStatus> {
+        self.search.as_ref()
+    }
+
+    /// Switches the box between filtering names and searching contents.
+    pub fn set_search_contents(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_contents == on {
+            return;
+        }
+        self.search_contents = on;
+        let filter = self.ensure_filter(window, cx);
+        filter.update(cx, |input, cx| {
+            input.set_placeholder(
+                if on {
+                    "Search file contents"
+                } else {
+                    "Filter files"
+                },
+                window,
+                cx,
+            );
+            input.focus(window, cx);
+        });
+        if on {
+            // The names stay unfiltered while the box searches contents.
+            self.set_filter_text(String::new(), cx);
+            self.run_search(cx);
+        } else {
+            self.search = None;
+            self.goto_line = None;
+            let text = filter.read(cx).value().to_string();
+            self.set_filter_text(text, cx);
+        }
+        cx.notify();
+    }
+
+    fn set_filter_text(&mut self, text: String, cx: &mut Context<Self>) {
+        if self.filter_text != text {
+            self.filter_text = text;
+            self.sync(cx);
+        }
+    }
+
+    /// The text in the box.
+    fn query(&self, cx: &gpui_kit::App) -> String {
+        self.filter
+            .as_ref()
+            .map(|(input, _)| input.read(cx).value().to_string())
+            .unwrap_or_default()
+    }
+
+    /// Searches the files' contents for the text in the box.
+    pub fn run_search(&mut self, cx: &mut Context<Self>) {
+        self.search_generation += 1;
+        let generation = self.search_generation;
+        let query = self.query(cx);
+        if query.trim().is_empty() {
+            self.search = None;
+            cx.notify();
+            return;
+        }
+        self.search = Some(SearchStatus::Searching);
+        let repository = self.model.read(cx).repository().clone();
+        let rev = self.revision.as_ref().map(|r| r.spec.clone());
+        let task =
+            cx.background_spawn(async move { repository.grep(&query, rev.as_deref(), MAX_HITS) });
+        cx.spawn(async move |this, cx| {
+            let result = task.await;
+            let _ = this.update(cx, |this, cx| {
+                if this.search_generation != generation {
+                    return;
+                }
+                this.search = Some(match result {
+                    Ok(results) => SearchStatus::Done(Arc::new(results)),
+                    Err(error) => SearchStatus::Failed(error.to_string().into()),
+                });
+                this.results_scroll = UniformListScrollHandle::new();
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Shows a search result's file in the viewer at its line.
+    pub fn open_hit(&mut self, path: &Path, line: usize, cx: &mut Context<Self>) {
+        if self.selected.as_deref() == Some(path) {
+            self.goto_line = Some(line);
+            self.scroll_to_goto_line();
+            cx.notify();
+        } else {
+            self.reveal(path, cx);
+            // After revealing, which clears it; the line scrolls into view
+            // once the file is read.
+            self.goto_line = Some(line);
+        }
+    }
+
+    fn scroll_to_goto_line(&self) {
+        if let Some(line) = self.goto_line {
+            self.scroll
+                .scroll_to_item(line.saturating_sub(1), ScrollStrategy::Center);
+        }
+    }
+
     fn ensure_filter(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
         if let Some((input, _)) = &self.filter {
             return input.clone();
@@ -459,8 +638,12 @@ impl FilesView {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
         let subscription = cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
-                let text = input.read(cx).value().to_string();
-                this.set_filter(&text, cx);
+                if this.search_contents {
+                    this.run_search(cx);
+                } else {
+                    let text = input.read(cx).value().to_string();
+                    this.set_filter(&text, cx);
+                }
             }
         });
         self.filter = Some((input.clone(), subscription));
@@ -473,6 +656,7 @@ impl FilesView {
             return;
         }
         self.selected = path;
+        self.goto_line = None;
         self.blame = None;
         self.scroll = UniformListScrollHandle::new();
         self.content = None;
@@ -524,6 +708,7 @@ impl FilesView {
                 if this.generation == generation {
                     this.content = Some(content);
                     this.syntax = syntax;
+                    this.scroll_to_goto_line();
                     cx.notify();
                 }
             });
@@ -728,6 +913,156 @@ impl FilesView {
     fn rebuild_menu(&mut self, cx: &mut Context<Self>) {
         let items = self.actions(cx);
         self.menu.update(cx, |menu, cx| menu.set_items(items, cx));
+    }
+
+    fn render_results(&self, theme: &UiTheme, cx: &mut Context<Self>) -> AnyElement {
+        let c = &theme.colors;
+        let note = |text: SharedString, color| {
+            div()
+                .p(px(16.))
+                .text_sm()
+                .text_color(color)
+                .child(text)
+                .into_any_element()
+        };
+        let results = match &self.search {
+            None => {
+                return note(
+                    "Type to search the text of every tracked file.".into(),
+                    c.muted_foreground,
+                );
+            }
+            Some(SearchStatus::Searching) => {
+                return note("Searching…".into(), c.muted_foreground);
+            }
+            Some(SearchStatus::Failed(error)) => return note(error.clone(), c.destructive),
+            Some(SearchStatus::Done(results)) if results.hits.is_empty() => {
+                return note("No file contains this text.".into(), c.muted_foreground);
+            }
+            Some(SearchStatus::Done(results)) => results.clone(),
+        };
+        let rows = Arc::new(result_rows(&results));
+        let query = self.query(cx);
+        let mono = theme.fonts.mono.clone();
+        let muted = c.muted_foreground;
+        let hover = c.accent;
+        let found = HighlightStyle {
+            background_color: Some(gpui_kit::Hsla::from(c.warning.opacity(0.28))),
+            ..HighlightStyle::default()
+        };
+        let selected = self.selected.clone();
+        let goto = self.goto_line;
+        let selected_bg = c.accent;
+        let view = cx.entity().downgrade();
+        let count = rows.len();
+        uniform_list("files.results", count, move |range, _, _| {
+            range
+                .map(|index| match rows[index] {
+                    ResultRow::File { first, count } => {
+                        let path = results.hits[first].path.clone();
+                        let name = path.file_name().map_or_else(
+                            || path.to_string_lossy().into_owned(),
+                            |n| n.to_string_lossy().into_owned(),
+                        );
+                        let folder = path
+                            .parent()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default();
+                        div()
+                            .id(("files.result", index))
+                            .h(px(HIT_ROW))
+                            .px(px(12.))
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_sm()
+                            .child(
+                                lucide(file_icon(&path))
+                                    .size(px(14.))
+                                    .flex_none()
+                                    .text_color(muted),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .font_weight(gpui_kit::FontWeight::MEDIUM)
+                                    .child(name),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(folder),
+                            )
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(muted)
+                                    .child(count.to_string()),
+                            )
+                            .into_any_element()
+                    }
+                    ResultRow::Hit(hit) => {
+                        let hit = results.hits[hit].clone();
+                        let text = hit.text.trim_start().to_owned();
+                        let highlights: Vec<_> = match_ranges(&text, &query)
+                            .into_iter()
+                            .map(|range| (range, found))
+                            .collect();
+                        let is_selected =
+                            selected.as_ref() == Some(&hit.path) && goto == Some(hit.line);
+                        let view = view.clone();
+                        div()
+                            .id(("files.result", index))
+                            .w_full()
+                            .h(px(HIT_ROW))
+                            .pl(px(32.))
+                            .pr(px(12.))
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .cursor_pointer()
+                            .when(is_selected, |row| row.bg(selected_bg))
+                            .hover(move |row| row.bg(hover))
+                            .child(
+                                div()
+                                    .w(px(36.))
+                                    .flex_none()
+                                    .flex()
+                                    .justify_end()
+                                    .text_xs()
+                                    .font_family(mono.clone())
+                                    .text_color(muted)
+                                    .child(hit.line.to_string()),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_xs()
+                                    .font_family(mono.clone())
+                                    .child(StyledText::new(text).with_highlights(highlights)),
+                            )
+                            .on_click(move |_, _, cx| {
+                                let _ = view.update(cx, |view, cx| {
+                                    view.open_hit(&hit.path, hit.line, cx);
+                                });
+                            })
+                            .into_any_element()
+                    }
+                })
+                .collect()
+        })
+        .track_scroll(&self.results_scroll)
+        .size_full()
+        .py(px(4.))
+        .into_any_element()
     }
 
     fn render_tree(&self, theme: &UiTheme, cx: &mut Context<Self>) -> Tree {
@@ -945,13 +1280,18 @@ impl FilesView {
             )
             .child(
                 div()
+                    .flex_1()
                     .min_w_0()
+                    .overflow_hidden()
                     .flex()
                     .items_baseline()
                     .gap(px(6.))
                     .child(
                         div()
-                            .flex_none()
+                            .min_w_0()
+                            .flex_shrink_0()
+                            .max_w_full()
+                            .truncate()
                             .text_sm()
                             .font_weight(gpui_kit::FontWeight::MEDIUM)
                             .child(name),
@@ -965,18 +1305,18 @@ impl FilesView {
                                 .text_color(c.muted_foreground)
                                 .child(folder),
                         )
+                    })
+                    .when_some(facts, |this, facts| {
+                        this.child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .text_xs()
+                                .text_color(c.muted_foreground)
+                                .child(facts),
+                        )
                     }),
             )
-            .when_some(facts, |this, facts| {
-                this.child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(c.muted_foreground)
-                        .child(facts),
-                )
-            })
-            .child(div().flex_1())
             .child(
                 button(
                     "files.header.blame",
@@ -1028,6 +1368,8 @@ impl FilesView {
         let muted = theme.colors.muted_foreground;
         let count = lines.len();
         let syntax = self.syntax.clone();
+        let target = self.goto_line.map(|line| line.saturating_sub(1));
+        let target_bg = theme.colors.warning.opacity(0.16);
         uniform_list("files.text", count, move |range, _, cx| {
             let colors = cx.theme().highlight_theme.clone();
             range
@@ -1049,9 +1391,11 @@ impl FilesView {
                         None => StyledText::new(line),
                     };
                     div()
+                        .w_full()
                         .h(px(ROW))
                         .flex()
                         .items_center()
+                        .when(target == Some(index), |row| row.bg(target_bg))
                         .child(
                             div()
                                 .w(px(8. * f32::from(digits) + 24.))
@@ -1086,6 +1430,17 @@ impl FilesView {
 
 /// A ghost icon button with a tooltip.
 fn icon_button(id: &'static str, icon: LucideIcon, tip: &'static str, theme: &UiTheme) -> Button {
+    toggle_button(id, icon, tip, false, theme)
+}
+
+/// An icon button that shows whether it's on.
+fn toggle_button(
+    id: &'static str,
+    icon: LucideIcon,
+    tip: &'static str,
+    on: bool,
+    theme: &UiTheme,
+) -> Button {
     let style = theme.clone();
     Button::new(id)
         .aria_label(tip)
@@ -1093,7 +1448,11 @@ fn icon_button(id: &'static str, icon: LucideIcon, tip: &'static str, theme: &Ui
             crate::ui::button::style_button(
                 button,
                 false,
-                ButtonVariant::Ghost,
+                if on {
+                    ButtonVariant::Secondary
+                } else {
+                    ButtonVariant::Ghost
+                },
                 ButtonSize::IconSm,
                 &style,
             )
@@ -1157,6 +1516,7 @@ impl Render for FilesView {
                 .text_color(c.destructive)
                 .child(error.clone())
                 .into_any_element(),
+            ListStatus::Ready if self.search_contents => self.render_results(&theme, cx),
             ListStatus::Ready => {
                 context_menu(&self.menu, "File actions", self.render_tree(&theme, cx))
                     .size_full()
@@ -1164,6 +1524,22 @@ impl Render for FilesView {
             }
         };
         let count = self.paths.len();
+        let search_contents = self.search_contents;
+        let found = match &self.search {
+            Some(SearchStatus::Done(results)) if search_contents && !results.hits.is_empty() => {
+                Some((
+                    results.hits.len(),
+                    results.truncated,
+                    results
+                        .hits
+                        .iter()
+                        .map(|hit| &hit.path)
+                        .collect::<std::collections::BTreeSet<_>>()
+                        .len(),
+                ))
+            }
+            _ => None,
+        };
         div()
             .size_full()
             .flex()
@@ -1209,22 +1585,60 @@ impl Render for FilesView {
                         div()
                             .flex_1()
                             .min_w_0()
-                            .child(Input::new(&filter).aria_label("Filter files")),
+                            .child(Input::new(&filter).aria_label(if search_contents {
+                                "Search file contents"
+                            } else {
+                                "Filter files"
+                            })),
                     )
-                    .when(self.status == ListStatus::Ready, |this| {
+                    .child(
+                        toggle_button(
+                            "files.search-contents",
+                            LucideIcon::TextSearch,
+                            if search_contents {
+                                "Filter file names"
+                            } else {
+                                "Search file contents"
+                            },
+                            search_contents,
+                            &theme,
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.set_search_contents(!search_contents, window, cx);
+                            },
+                        )),
+                    )
+                    .when_some(found, |this, (lines, truncated, files)| {
                         this.child(
                             div()
-                                .id("files.count")
                                 .flex_none()
                                 .text_xs()
                                 .text_color(c.muted_foreground)
-                                .tooltip(|_, cx| text_tooltip("Files Git tracks".into(), cx))
                                 .child(format!(
-                                    "{count} {}",
-                                    if count == 1 { "file" } else { "files" }
+                                    "{}{lines} in {files} {}",
+                                    if truncated { "First " } else { "" },
+                                    if files == 1 { "file" } else { "files" }
                                 )),
                         )
-                    }),
+                    })
+                    .when(
+                        self.status == ListStatus::Ready && !search_contents,
+                        |this| {
+                            this.child(
+                                div()
+                                    .id("files.count")
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(c.muted_foreground)
+                                    .tooltip(|_, cx| text_tooltip("Files Git tracks".into(), cx))
+                                    .child(format!(
+                                        "{count} {}",
+                                        if count == 1 { "file" } else { "files" }
+                                    )),
+                            )
+                        },
+                    ),
             )
             .child(div().flex_1().min_h_0().child(body))
     }
@@ -1233,6 +1647,31 @@ impl Render for FilesView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn groups_hits_by_file_and_finds_matches() {
+        let hit = |path: &str, line| bonsai_git::GrepHit {
+            path: PathBuf::from(path),
+            line,
+            text: String::new(),
+        };
+        let results = GrepResults {
+            hits: vec![hit("a.rs", 1), hit("a.rs", 9), hit("b.rs", 3)],
+            truncated: false,
+        };
+        assert_eq!(
+            result_rows(&results),
+            [
+                ResultRow::File { first: 0, count: 2 },
+                ResultRow::Hit(0),
+                ResultRow::Hit(1),
+                ResultRow::File { first: 2, count: 1 },
+                ResultRow::Hit(2),
+            ]
+        );
+        assert_eq!(match_ranges("Grind, grind", "grind"), [0..5, 7..12]);
+        assert_eq!(match_ranges("Grind, grind", "Grind"), vec![(0..5)]);
+    }
 
     #[test]
     fn builds_folders_before_files_and_filters_paths() {
