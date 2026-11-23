@@ -6,6 +6,7 @@ use std::sync::{Arc, LazyLock};
 
 mod branch_picker;
 mod clone;
+mod new_repo;
 pub(crate) mod title_bar;
 
 use bonsai_git::{DiffTarget, Git, Oid, Repository, Snapshot};
@@ -18,6 +19,7 @@ use gpui_kit::{
     SharedString, StatefulInteractiveElement as _, Styled, StyledImage as _, Subscription, Task,
     Window, div, img, prelude::FluentBuilder as _, px,
 };
+pub use new_repo::{NewRepoDialog, NewRepoEvent};
 pub use title_bar::BranchSummary;
 
 use crate::{
@@ -132,6 +134,9 @@ pub struct Workspace {
     clone_handle: DialogHandle,
     clone: Option<Entity<CloneDialog>>,
     clone_events: Option<Subscription>,
+    new_repo_handle: DialogHandle,
+    new_repo: Option<Entity<NewRepoDialog>>,
+    new_repo_events: Option<Subscription>,
     purge_handle: DialogHandle,
     purge: Option<Entity<PurgeSheet>>,
     purge_events: Option<Subscription>,
@@ -209,6 +214,9 @@ impl Workspace {
             clone_handle: DialogHandle::new(false),
             clone: None,
             clone_events: None,
+            new_repo_handle: DialogHandle::new(false),
+            new_repo: None,
+            new_repo_events: None,
             purge_handle: DialogHandle::new(false),
             purge: None,
             purge_events: None,
@@ -692,33 +700,57 @@ impl Workspace {
         cx.notify();
     }
 
-    fn prompt_new(&mut self, cx: &mut Context<Self>) {
+    /// Opens the New Repository dialog.
+    pub fn show_new_repo(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Ok(git) = self.git.clone() else { return };
-        let directory = self
+        let parent = self
             .session
             .clone_parent
             .clone()
+            .filter(|p| p.is_dir())
             .or_else(home_dir)
             .unwrap_or_else(|| PathBuf::from("/"));
-        let path = cx.prompt_for_new_path(&directory, Some("new-repository"));
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(path))) = path.await else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| {
-                match Repository::init(&git, &path, None) {
-                    Ok(repository) => {
-                        let root = repository.root().to_path_buf();
-                        if let Err(error) = this.open_path(&root, true, cx) {
-                            this.message = Some(error);
-                        }
+        let dialog = cx.new(|cx| NewRepoDialog::new(git, parent, window, cx));
+        self.new_repo_events = Some(cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &NewRepoEvent, window, cx| match event {
+                NewRepoEvent::Created { path, commit } => {
+                    this.new_repo_handle.close(window, cx);
+                    this.new_repo = None;
+                    if let Err(error) = this.open_path(path, true, cx) {
+                        this.message = Some(error);
+                    } else if *commit && let Some(model) = this.active_model().cloned() {
+                        model.update(cx, |model, cx| {
+                            model.run(
+                                "Initial commit",
+                                |repository| repository.commit("Initial commit", false).map(|_| ()),
+                                cx,
+                            );
+                        });
                     }
-                    Err(error) => this.message = Some(error.to_string().into()),
+                    cx.notify();
                 }
-                cx.notify();
-            });
-        })
-        .detach();
+                NewRepoEvent::ParentChanged(parent) => {
+                    this.session.clone_parent = Some(parent.clone());
+                    this.save_session();
+                }
+                NewRepoEvent::Dismissed => {
+                    this.new_repo_handle.close(window, cx);
+                    this.new_repo = None;
+                    cx.notify();
+                }
+            },
+        ));
+        self.new_repo_handle.open(window, cx);
+        // The dialog takes focus as it first draws; the name field gets it
+        // after that.
+        let target = dialog.downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = target.update(cx, |dialog, cx| dialog.focus(window, cx));
+        });
+        self.new_repo = Some(dialog);
+        cx.notify();
     }
 
     /// Opens the Clone dialog, optionally filled with `url`.
@@ -1454,8 +1486,12 @@ impl Workspace {
                 }
             },
         ));
-        self.clone = Some(dialog);
         self.clone_handle.open(window, cx);
+        let target = dialog.downgrade();
+        window.on_next_frame(move |window, cx| {
+            let _ = target.update(cx, |dialog, cx| dialog.focus(window, cx));
+        });
+        self.clone = Some(dialog);
         cx.notify();
     }
 
@@ -1465,14 +1501,19 @@ impl Workspace {
     }
 
     #[must_use]
+    pub fn new_repo_dialog(&self) -> Option<&Entity<NewRepoDialog>> {
+        self.new_repo.as_ref()
+    }
+
+    #[must_use]
     pub fn is_showing_welcome(&self) -> bool {
         self.welcome || self.tabs.is_empty()
     }
 
     // Action handlers.
 
-    fn on_new(&mut self, _: &commands::NewRepository, _: &mut Window, cx: &mut Context<Self>) {
-        self.prompt_new(cx);
+    fn on_new(&mut self, _: &commands::NewRepository, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_new_repo(window, cx);
     }
 
     fn on_clone(
@@ -2294,7 +2335,7 @@ impl Workspace {
                     "⌘N",
                 )
                 .when(available, |this| {
-                    this.on_click(cx.listener(|this, _, _, cx| this.prompt_new(cx)))
+                    this.on_click(cx.listener(|this, _, window, cx| this.show_new_repo(window, cx)))
                 }),
             );
         let recents = self.session.recents.clone();
@@ -2492,6 +2533,23 @@ impl Workspace {
                     _ => true,
                 }
             },
+        )
+    }
+
+    fn render_new_repo(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.new-repo.popup", "New Repository", cx)
+            .max_w(px(520.))
+            .when_some(self.new_repo.clone(), gpui_kit::ParentElement::child);
+        dialog(
+            "workspace.new-repo",
+            &self.new_repo_handle,
+            popup,
+            window,
+            cx,
         )
     }
 
@@ -2824,6 +2882,7 @@ impl Render for Workspace {
             .child(div().flex_1().min_h_0().child(body))
             .child(self.render_palette(window, cx))
             .child(self.render_clone(window, cx))
+            .child(self.render_new_repo(window, cx))
             .child(self.render_purge(window, cx))
             .child(self.render_rebase(window, cx))
             .child(self.render_accounts(window, cx))

@@ -70,6 +70,13 @@ on the LFS server. Storing a file with LFS adds its pattern; files already in
 history stay as they are until purged or rewritten.
 _Avoid_: Large files (any big file), annex
 
+**New repository**:
+A repository started on this Mac from File > New Repository: a folder, a
+first branch, and optional starting files (a `.gitignore` for the project's
+language, a README and a license), committed as "Initial commit". It has no
+remote until it's published.
+_Avoid_: Init (the Git command), template repository
+
 **Co-author**:
 Someone else credited on a commit with a `Co-authored-by: Name <email>`
 trailer at the end of its message, which GitHub and GitLab show beside the
