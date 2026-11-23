@@ -207,3 +207,68 @@ fn stages_one_hunk_of_several() {
     let staged: String = (1..=20).map(|n| line(n, false)).collect();
     assert_eq!(index(dir.path()), staged.as_bytes());
 }
+
+#[test]
+fn saves_a_commit_as_a_patch_and_applies_it_elsewhere() {
+    use bonsai_git::{Git, Integration, Repository};
+    let git = Git::locate(None).unwrap();
+    let make = || {
+        let dir = tempfile::tempdir().unwrap();
+        let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+        let run = |args: &[&str]| {
+            git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+                .unwrap()
+                .stdout_lossy()
+        };
+        for (key, value) in [
+            ("user.name", "Ada Lovelace"),
+            ("user.email", "ada@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            run(&["config", key, value]);
+        }
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        run(&["add", "a.txt"]);
+        run(&["commit", "-qm", "Start"]);
+        (dir, repository)
+    };
+    let (source, from) = make();
+    std::fs::write(source.path().join("a.txt"), "one\ntwo\n").unwrap();
+    git.run(
+        &git.command(["commit", "-qam", "Add two"])
+            .cwd(source.path()),
+    )
+    .unwrap();
+    let file = source.path().join("two.patch");
+    from.save_patch("HEAD", &file).unwrap();
+    assert!(
+        std::fs::read_to_string(&file)
+            .unwrap()
+            .contains("Subject: [PATCH] Add two")
+    );
+
+    let (target, to) = make();
+    assert_eq!(to.apply_patch_file(&file).unwrap(), Integration::Completed);
+    let log = git
+        .run(
+            &git.command(["log", "-1", "--format=%s|%an"])
+                .cwd(target.path()),
+        )
+        .unwrap()
+        .stdout_lossy();
+    assert_eq!(log, "Add two|Ada Lovelace\n");
+
+    // A plain diff changes the files without committing.
+    let (plain_dir, plain) = make();
+    let diff = plain_dir.path().join("plain.diff");
+    std::fs::write(
+        &diff,
+        "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1,2 @@\n one\n+three\n",
+    )
+    .unwrap();
+    plain.apply_patch_file(&diff).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(plain_dir.path().join("a.txt")).unwrap(),
+        "one\nthree\n"
+    );
+}

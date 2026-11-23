@@ -222,6 +222,39 @@ pub struct HistoryView {
     subscriptions: Vec<Subscription>,
 }
 
+/// `git format-patch`'s file name for a commit, such as
+/// `0001-Fix-the-parser.patch`, with its short hash instead of the number.
+#[must_use]
+pub fn patch_file_name(oid: &Oid, summary: &str) -> String {
+    let mut slug = String::new();
+    for c in summary.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c);
+        } else if !slug.ends_with('-') {
+            slug.push('-');
+        }
+        if slug.len() >= 52 {
+            break;
+        }
+    }
+    let slug = slug.trim_matches('-');
+    if slug.is_empty() {
+        format!("{}.patch", oid.short())
+    } else {
+        format!("{}-{slug}.patch", oid.short())
+    }
+}
+
+/// A menu click that updates the history view.
+fn with_this(
+    this: &gpui_kit::WeakEntity<HistoryView>,
+    f: impl Fn(&mut HistoryView, &mut Context<HistoryView>) + 'static,
+) -> impl Fn(&gpui_kit::ClickEvent, &mut Window, &mut gpui_kit::App) + 'static {
+    let this = this.clone();
+    move |_, _, cx| {
+        let _ = this.update(cx, |view, cx| f(view, cx));
+    }
+}
 impl EventEmitter<HistoryEvent> for HistoryView {}
 
 /// What changing refs looks like, so a reload happens only when they move.
@@ -560,6 +593,38 @@ impl HistoryView {
         });
     }
 
+    /// Copies the commit as an email-style patch.
+    pub fn copy_patch(&mut self, oid: Oid, cx: &mut Context<Self>) {
+        let repository = self.model.read(cx).repository().clone();
+        let patch = cx.background_spawn(async move { repository.format_patch(oid.as_str()) });
+        cx.spawn(async move |_, cx| {
+            if let Ok(patch) = patch.await {
+                cx.update(|cx| cx.write_to_clipboard(ClipboardItem::new_string(patch)));
+            }
+        })
+        .detach();
+    }
+
+    /// Asks where to save the commit as a patch file, then writes it.
+    pub fn save_patch(&mut self, oid: Oid, summary: &str, cx: &mut Context<Self>) {
+        let root = self.model.read(cx).repository().root().to_path_buf();
+        let path = cx.prompt_for_new_path(&root, Some(&patch_file_name(&oid, summary)));
+        let model = self.model.downgrade();
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(path))) = path.await else {
+                return;
+            };
+            let _ = model.update(cx, |model, cx| {
+                model.run(
+                    format!("Save {} as a patch", short(&oid)),
+                    move |repository| repository.save_patch(oid.as_str(), &path),
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
     /// Adds a commit that undoes the commit.
     pub fn revert(&mut self, oid: Oid, cx: &mut Context<Self>) {
         let name = format!("Revert {}", short(&oid));
@@ -664,6 +729,19 @@ impl HistoryView {
                     let hash = hash.clone();
                     move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(hash.clone()))
                 }),
+            MenuItem::new("history.copy-patch", "Copy as Patch")
+                .icon(LucideIcon::ClipboardCopy)
+                .on_click(with_this(&this, {
+                    let oid = oid.clone();
+                    move |view, cx| view.copy_patch(oid.clone(), cx)
+                })),
+            MenuItem::new("history.save-patch", "Save as Patch…")
+                .icon(LucideIcon::FileDown)
+                .on_click(with_this(&this, {
+                    let oid = oid.clone();
+                    let summary = commit.summary.clone();
+                    move |view, cx| view.save_patch(oid.clone(), &summary, cx)
+                })),
             MenuItem::separator(),
             MenuItem::new("history.checkout", "Check Out (Detached)")
                 .icon(LucideIcon::GitCommitHorizontal)
@@ -1063,6 +1141,16 @@ impl Render for HistoryView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_patch_files_after_the_commit() {
+        let oid = Oid::new("1a2b3c4d5e6f7a8b9c0d1a2b3c4d5e6f7a8b9c0d");
+        assert_eq!(
+            patch_file_name(&oid, "Fix the parser's “edge” case!"),
+            "1a2b3c4-Fix-the-parser-s-edge-case.patch"
+        );
+        assert_eq!(patch_file_name(&oid, "…"), "1a2b3c4.patch");
+    }
 
     #[test]
     fn reads_the_search_field() {

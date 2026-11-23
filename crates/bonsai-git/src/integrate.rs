@@ -85,7 +85,7 @@ impl OperationAction {
 
 impl Repository {
     /// Runs an integrating command; a stop with conflicts is not an error.
-    fn integrate(&self, args: Vec<OsString>) -> Result<Integration> {
+    pub(crate) fn integrate(&self, args: Vec<OsString>) -> Result<Integration> {
         self.integrate_with(args, "true")
     }
 

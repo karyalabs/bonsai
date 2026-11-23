@@ -270,6 +270,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.scan-history",
         "edit.undo",
         "repository.settings",
+        "repository.apply-patch",
         "edit.redo",
         "repository.bisect",
         "repository.add-submodule",
