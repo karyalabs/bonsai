@@ -5,7 +5,8 @@
 use std::{collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
 use bonsai_git::{
-    CommitInfo, Head, LogFilter, LogReader, LogScope, Oid, RebaseAction, ResetMode, Snapshot,
+    BisectVerdict, CommitInfo, Head, LogFilter, LogReader, LogScope, Oid, RebaseAction, ResetMode,
+    Snapshot,
 };
 use bonsai_graph::{Commit, Layout, Row};
 use gpui_icons::LucideIcon;
@@ -54,6 +55,8 @@ pub enum HistoryEvent {
     EditCommits(EditCommits),
     /// Show this commit's files in Files.
     BrowseFiles(Oid),
+    /// Mark this commit good or bad in a bisect, starting one if needed.
+    Bisect(Oid, BisectVerdict),
 }
 
 /// An interactive rebase to plan: the commits after `base` (`None`: every
@@ -684,6 +687,34 @@ impl HistoryView {
                     })
                 })),
         ];
+        let bisect = |id: &'static str, label: &'static str, verdict: BisectVerdict| {
+            let this = this.clone();
+            let oid = oid.clone();
+            MenuItem::new(id, label).on_click(move |_, _, cx| {
+                let _ = this.update(cx, |_, cx| {
+                    cx.emit(HistoryEvent::Bisect(oid.clone(), verdict));
+                });
+            })
+        };
+        items.push(
+            MenuItem::submenu(
+                "history.bisect",
+                "Find a Bad Commit",
+                vec![
+                    bisect(
+                        "history.bisect.bad",
+                        "Mark as Bad (has the problem)",
+                        BisectVerdict::Bad,
+                    ),
+                    bisect(
+                        "history.bisect.good",
+                        "Mark as Good (before the problem)",
+                        BisectVerdict::Good,
+                    ),
+                ],
+            )
+            .icon(LucideIcon::Crosshair),
+        );
         if let Some(current) = self.current_branch(cx) {
             let with_view = |f: ViewAction| {
                 let this = this.clone();

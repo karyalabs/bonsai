@@ -1487,7 +1487,13 @@ impl Render for ChangesView {
         } else {
             list.into_any_element()
         };
-        let operation = self.model.read(cx).snapshot().and_then(|s| s.operation);
+        // A bisect has its own bar across every section.
+        let operation = self
+            .model
+            .read(cx)
+            .snapshot()
+            .and_then(|s| s.operation)
+            .filter(|o| *o != InProgress::Bisect);
         let conflicts = self
             .rows
             .iter()

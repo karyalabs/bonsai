@@ -47,6 +47,12 @@ _Avoid_: Remove from history, scrub, filter
 A Git bundle of all refs written before a purge or other history rewrite, so
 the rewrite can be undone.
 
+**Bisect**:
+A binary search through history for the first commit with a problem. The
+person marks one bad and one good commit, then each commit Git checks out as
+good, bad or skipped, or lets a command decide, until one commit is left.
+_Avoid_: Regression finder
+
 **Provider**:
 A Git hosting service Bonsai speaks to over its API: GitHub, GitLab or
 Bitbucket. A remote on any other server is a plain remote with no provider.
