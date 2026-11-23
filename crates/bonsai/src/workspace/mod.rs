@@ -24,6 +24,7 @@ use crate::{
     accounts::Accounts,
     accounts_sheet::{AccountsEvent, AccountsSheet},
     activity_panel::ActivityPanel,
+    bisect_bar::{BisectBar, BisectEvent},
     changes::{ChangesEvent, ChangesView},
     commands::{self, COMMANDS},
     compare_view::{CompareEvent, CompareView},
@@ -97,6 +98,7 @@ struct RepositoryTab {
     diff: Entity<DiffPane>,
     refs: Entity<RefsPanel>,
     sync: Entity<SyncBar>,
+    bisect: Entity<BisectBar>,
     activity: Entity<ActivityPanel>,
     history: Entity<HistoryView>,
     files: Entity<FilesView>,
@@ -114,6 +116,7 @@ struct RepositoryTab {
     _files_events: Subscription,
     _reflog_events: Subscription,
     _compare_events: Subscription,
+    _bisect_events: Subscription,
 }
 
 pub struct Workspace {
@@ -337,6 +340,7 @@ impl Workspace {
             let diff = cx.new(|cx| DiffPane::new(model.clone(), cx));
             let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
             let sync = cx.new(|cx| SyncBar::new(model.clone(), cx));
+            let bisect = cx.new(|cx| BisectBar::new(model.clone(), cx));
             let diff_target = diff.downgrade();
             let conflict = cx.new(|_| ConflictView::new(model.clone()));
             let conflict_target = conflict.downgrade();
@@ -382,6 +386,14 @@ impl Workspace {
                         }
                         HistoryEvent::BrowseFiles(oid) => {
                             this.browse_files(oid, cx);
+                            return;
+                        }
+                        HistoryEvent::Bisect(oid, verdict) => {
+                            if let Some(tab) = this.tabs.iter().find(|t| t.model == history_model) {
+                                tab.bisect.update(cx, |bar, cx| {
+                                    bar.mark_commit(oid.clone(), *verdict, cx);
+                                });
+                            }
                             return;
                         }
                     };
@@ -498,6 +510,12 @@ impl Workspace {
                     }
                 },
             );
+            let bisect_history = history.downgrade();
+            let bisect_events = cx.subscribe(&bisect, move |this, _, event: &BisectEvent, cx| {
+                let BisectEvent::ShowCommit(oid) = event;
+                let _ = bisect_history.update(cx, |history, cx| history.reveal(oid, cx));
+                this.set_section(Section::History, cx);
+            });
             self.tabs.push(RepositoryTab {
                 id: self.next_tab_id,
                 title,
@@ -506,6 +524,7 @@ impl Workspace {
                 diff,
                 refs,
                 sync,
+                bisect,
                 activity,
                 history,
                 files,
@@ -521,6 +540,7 @@ impl Workspace {
                 _files_events: files_events,
                 _reflog_events: reflog_events,
                 _compare_events: compare_events,
+                _bisect_events: bisect_events,
                 _events: events,
             });
             self.next_tab_id += 1;
@@ -769,6 +789,31 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.show_purge(None, window, cx);
+    }
+
+    /// Marks the commit checked out as bad and opens History to pick a
+    /// good one.
+    fn on_start_bisect(
+        &mut self,
+        _: &commands::StartBisect,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.tabs.get(self.active).filter(|_| !self.welcome) else {
+            return;
+        };
+        let head = tab.model.read(cx).snapshot().and_then(|s| match &s.head {
+            bonsai_git::Head::Branch { oid, .. } => oid.clone(),
+            bonsai_git::Head::Detached { oid } => Some(oid.clone()),
+        });
+        let Some(head) = head else { return };
+        let bisecting = tab.bisect.read(cx).state().is_some();
+        if !bisecting {
+            tab.bisect.update(cx, |bar, cx| {
+                bar.mark_commit(head, bonsai_git::BisectVerdict::Bad, cx);
+            });
+        }
+        self.set_section(Section::History, cx);
     }
 
     fn on_scan_history(
@@ -2470,6 +2515,12 @@ impl Render for Workspace {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let model = self.active_model().cloned().filter(|_| !self.welcome);
+        let bisect_bar = model.as_ref().and_then(|_| {
+            self.tabs
+                .get(self.active)
+                .map(|tab| tab.bisect.clone())
+                .filter(|bar| bar.read(cx).state().is_some())
+        });
         let body = match model {
             None => self.render_welcome(cx).into_any_element(),
             Some(model) => {
@@ -2550,6 +2601,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_push))
             .on_action(cx.listener(Self::on_purge))
             .on_action(cx.listener(Self::on_scan_history))
+            .on_action(cx.listener(Self::on_start_bisect))
             .on_action(cx.listener(Self::on_stash))
             .on_action(cx.listener(Self::on_activity))
             .on_action(cx.listener(Self::on_pull_requests))
@@ -2570,6 +2622,7 @@ impl Render for Workspace {
             .font_family(theme.fonts.body.clone())
             .child(title_bar)
             .when(self.tabs.len() > 1, |this| this.child(self.render_tabs(cx)))
+            .children(bisect_bar)
             .child(div().flex_1().min_h_0().child(body))
             .child(self.render_palette(window, cx))
             .child(self.render_clone(window, cx))

@@ -5,6 +5,7 @@
 //! they do in the user's terminal (ADR 2). Views never spawn processes; they go
 //! through [`Repository`].
 
+mod bisect;
 mod blame;
 mod branch;
 mod clone;
@@ -32,6 +33,7 @@ mod version;
 mod worktree;
 mod worktrees;
 
+pub use bisect::{BisectCommit, BisectState, BisectVerdict};
 pub use blame::{Blame, BlameCommit, BlameLine, parse_porcelain};
 pub use branch::{CheckoutBlocker, is_valid_ref_name};
 pub use clone::{CloneProgress, clone_name};
