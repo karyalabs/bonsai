@@ -28,6 +28,7 @@ mod remote;
 mod repo_settings;
 mod repository;
 mod runner;
+mod scaffold;
 mod snapshot;
 mod stash;
 mod submodules;
@@ -65,6 +66,7 @@ pub use repository::Repository;
 pub use runner::{
     ASKPASS_MODE_ENV, CancelToken, CommandLog, CommandRecord, Git, GitCommand, Output, OutputStream,
 };
+pub use scaffold::{IgnoreTemplate, License, NewRepository, is_empty_or_missing};
 pub use snapshot::{
     Branch, Change, ChangeKind, ConflictKind, EntryStatus, Head, InProgress, Oid, Remote,
     RemoteBranch, Snapshot, Stash, Tag, Tracking,

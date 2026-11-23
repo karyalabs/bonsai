@@ -1,8 +1,8 @@
 //! The Clone Repository dialog: a URL, a destination, progress and cancel.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use bonsai_git::{CancelToken, CloneProgress, Git, Repository, clone_name};
+use bonsai_git::{CancelToken, CloneProgress, Git, Repository, clone_name, is_empty_or_missing};
 use futures::{StreamExt as _, channel::mpsc};
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
@@ -97,6 +97,16 @@ impl CloneDialog {
             phase: Phase::Editing,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Puts the cursor in the URL field, or the name when a URL is set.
+    pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let field = if self.url.read(cx).value().is_empty() {
+            &self.url
+        } else {
+            &self.name
+        };
+        field.update(cx, |input, cx| input.focus(window, cx));
     }
 
     /// Sets the URL, as a paste or a provider's repository browser would.
@@ -239,13 +249,6 @@ impl CloneDialog {
             });
         })
         .detach();
-    }
-}
-
-fn is_empty_or_missing(path: &Path) -> bool {
-    match std::fs::read_dir(path) {
-        Ok(mut entries) => entries.next().is_none(),
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
     }
 }
 

@@ -375,6 +375,39 @@ fn clones_from_a_url_and_opens_the_result(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn creates_a_new_repository_with_starting_files_and_opens_it(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let parent = dir.path().join("projects");
+    std::fs::create_dir(&parent).unwrap();
+    let session = Session {
+        clone_parent: Some(parent.clone()),
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+
+    cx.dispatch_action(commands::NewRepository);
+    let dialog = workspace.read_with(cx, |workspace, _| {
+        workspace.new_repo_dialog().cloned().unwrap()
+    });
+    dialog.read_with(cx, |dialog, cx| assert!(dialog.plan(cx).is_err()));
+    cx.update(|window, cx| dialog.update(cx, |dialog, cx| dialog.set_name("mill", window, cx)));
+    let plan = dialog
+        .read_with(cx, super::new_repo::NewRepoDialog::plan)
+        .unwrap();
+    assert_eq!(plan.path, parent.join("mill"));
+    assert_eq!(plan.branch.as_deref(), Some("main"));
+
+    dialog.update(cx, super::new_repo::NewRepoDialog::create);
+    cx.run_until_parked();
+    workspace.read_with(cx, |workspace, _| {
+        assert_eq!(workspace.tab_titles(), ["mill"]);
+        assert!(workspace.new_repo_dialog().is_none());
+    });
+    assert!(parent.join("mill/.gitignore").exists());
+    assert!(parent.join("mill/README.md").exists());
+}
+
+#[gpui_kit::test]
 fn a_failed_operation_offers_details_in_the_activity_log(cx: &mut TestAppContext) {
     let dir = tempfile::tempdir().unwrap();
     let session = Session {
