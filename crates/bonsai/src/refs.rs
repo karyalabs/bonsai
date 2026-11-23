@@ -20,7 +20,7 @@ use gpui_kit::{
 
 use crate::{
     confirm::Confirm,
-    repository::{RepositoryEvent, RepositoryModel},
+    repository::{RepositoryEvent, RepositoryModel, UndoHints},
     ui::{
         button::{Button, ButtonVariant},
         checkbox::Checkbox,
@@ -506,7 +506,34 @@ impl RefsPanel {
 
     pub fn reset(&mut self, target: String, mode: ResetMode, cx: &mut Context<Self>) {
         let name = format!("Reset to {target}");
-        self.run(name, move |repository| repository.reset(&target, mode), cx);
+        // A hard reset throws away uncommitted changes; save them for undo.
+        let backup = if mode == ResetMode::Hard {
+            self.model
+                .read(cx)
+                .snapshot()
+                .map(|s| {
+                    s.changes
+                        .iter()
+                        .filter(|c| c.kind != bonsai_git::ChangeKind::Untracked)
+                        .map(|c| c.path.clone())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let hints = UndoHints {
+            backup,
+            reset: Some(mode),
+        };
+        self.model.update(cx, |model, cx| {
+            model.run_with(
+                name,
+                hints,
+                move |repository| repository.reset(&target, mode),
+                cx,
+            );
+        });
     }
 
     /// Merge, rebase and reset items for a revision other than HEAD.
@@ -1427,7 +1454,7 @@ impl RefsPanel {
             ),
             RefDialog::ResetHard { target } => (
                 format!("Reset {current} to {target}?"),
-                "Every uncommitted change is discarded and commits after it leave the branch. The commits stay in the reflog for a while."
+                "Every uncommitted change is discarded and commits after it leave the branch. You can undo this with ⌘Z."
                     .to_owned(),
                 "Reset and Discard",
                 true,

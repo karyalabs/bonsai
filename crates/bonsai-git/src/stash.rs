@@ -25,7 +25,7 @@ fn nul_paths(bytes: &[u8]) -> Vec<PathBuf> {
 impl Repository {
     /// The `stash@{n}` name for `index`, after checking it still names
     /// `oid`, since the list shifts as stashes are saved and dropped.
-    fn stash_ref(&self, index: usize, oid: &Oid) -> Result<String> {
+    pub(crate) fn stash_ref(&self, index: usize, oid: &Oid) -> Result<String> {
         let name = format!("stash@{{{index}}}");
         let output = self.git().run_unchecked(
             &self

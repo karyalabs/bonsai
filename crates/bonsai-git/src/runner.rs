@@ -80,6 +80,7 @@ impl CommandRecord {
                 .any(|a| a.starts_with("--get") || *a == "--list" || *a == "-l"),
             "stash" => matches!(rest.first(), Some(&"list" | &"show")),
             "worktree" => rest.first() == Some(&"list"),
+            "reflog" => !matches!(rest.first(), Some(&"expire" | &"delete" | &"drop")),
             "remote" => {
                 rest.is_empty() || matches!(rest.first(), Some(&"-v" | &"get-url" | &"show"))
             }

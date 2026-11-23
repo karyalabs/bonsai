@@ -23,7 +23,7 @@ use crate::{
     blame_view::{BlameEvent, BlameView},
     confirm::{self, Confirm},
     file_icon::file_icon,
-    repository::{RepositoryEvent, RepositoryModel},
+    repository::{RepositoryEvent, RepositoryModel, UndoHints},
     ui::{
         button::{Button, ButtonSize, ButtonVariant, style_button},
         dialog::{DialogHandle, dialog},
@@ -594,9 +594,19 @@ impl DiffPane {
             ApplyMode::Unstage => "Unstage lines",
             ApplyMode::Discard => "Discard lines",
         };
+        // Discarding lines rewrites the file; save it so undo can restore it.
+        let backup = match (&self.target, mode) {
+            (Some(DiffTarget::Unstaged(paths)), ApplyMode::Discard) => paths.clone(),
+            _ => Vec::new(),
+        };
+        let hints = UndoHints {
+            backup,
+            reset: None,
+        };
         self.model.update(cx, |model, cx| {
-            model.run(
+            model.run_with(
                 name,
+                hints,
                 move |repository| repository.apply_patch(&partial, mode),
                 cx,
             );
@@ -611,7 +621,7 @@ impl DiffPane {
         let popup = confirm::popup(
             "diff.discard",
             "Discard these lines?",
-            "The selected changes go back to the staged or committed version. This can't be undone.",
+            "The selected changes go back to the staged or committed version. You can undo this with ⌘Z.",
             cx,
         )
         .child(

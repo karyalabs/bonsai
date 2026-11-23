@@ -188,3 +188,109 @@ fn a_background_fetch_is_quiet_and_waits_its_turn(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(*finished.lock().unwrap(), [(true, true)]);
 }
+
+fn committed_repository() -> (tempfile::TempDir, Repository) {
+    let (dir, repository) = new_repository();
+    let git = repository.git().clone();
+    let run = |args: &[&str]| {
+        git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+            .unwrap();
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        run(&["config", key, value]);
+    }
+    std::fs::write(dir.path().join("a.txt"), "base\n").unwrap();
+    run(&["add", "a.txt"]);
+    run(&["commit", "-qm", "base"]);
+    (dir, repository)
+}
+
+#[gpui_kit::test]
+fn undoes_and_redoes_a_commit_and_a_discard(cx: &mut TestAppContext) {
+    use super::UndoNote::{None as Nothing, Redoable, Undoable};
+    let (dir, repository) = committed_repository();
+    let root = dir.path().to_path_buf();
+    let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+    let notes = Arc::new(Mutex::new(Vec::new()));
+    let recorded = notes.clone();
+    cx.update(|cx| {
+        cx.subscribe(&model, move |_, event: &RepositoryEvent, _| {
+            if let RepositoryEvent::OperationFinished { name, undo, .. } = event {
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push((name.to_string(), undo.clone()));
+            }
+        })
+        .detach();
+    });
+    cx.run_until_parked();
+
+    std::fs::write(root.join("a.txt"), "edited\n").unwrap();
+    model.update(cx, |model, cx| {
+        model.run("Stage a.txt", |r| r.stage(&["a.txt".into()]), cx);
+        model.run("Commit", |r| r.commit("Edit a", false).map(|_| ()), cx);
+    });
+    cx.run_until_parked();
+    model.read_with(cx, |model, _| assert_eq!(model.undo_name(), Some("Commit")));
+
+    model.update(cx, |model, cx| assert!(model.undo(cx)));
+    cx.run_until_parked();
+    model.read_with(cx, |model, _| {
+        let snapshot = model.snapshot().unwrap();
+        assert_eq!(
+            snapshot.changes.len(),
+            1,
+            "the commit's change is staged again"
+        );
+        assert!(snapshot.changes[0].is_staged());
+        assert_eq!(model.redo_name(), Some("Commit"));
+        assert_eq!(model.undo_name(), None);
+    });
+    model.update(cx, |model, cx| assert!(model.redo(cx)));
+    cx.run_until_parked();
+    model.read_with(cx, |model, _| {
+        assert_eq!(model.snapshot().unwrap().changes.len(), 0);
+        assert_eq!(model.undo_name(), Some("Commit"));
+    });
+
+    std::fs::write(root.join("a.txt"), "precious\n").unwrap();
+    model.update(cx, |model, cx| {
+        model.run_with(
+            "Discard a.txt",
+            super::UndoHints {
+                backup: vec!["a.txt".into()],
+                reset: None,
+            },
+            |r| r.discard(&["a.txt".into()]),
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "edited\n"
+    );
+    model.update(cx, |model, cx| assert!(model.undo(cx)));
+    cx.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "precious\n"
+    );
+
+    assert_eq!(
+        *notes.lock().unwrap(),
+        [
+            ("Stage a.txt".to_owned(), Nothing),
+            ("Commit".to_owned(), Undoable),
+            ("Undo Commit".to_owned(), Redoable),
+            ("Redo Commit".to_owned(), Undoable),
+            ("Discard a.txt".to_owned(), Undoable),
+            ("Undo Discard a.txt".to_owned(), Redoable),
+        ]
+    );
+}

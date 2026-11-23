@@ -28,6 +28,8 @@ actions!(
         ShowPullRequests,
         ShowIssues,
         Refresh,
+        Undo,
+        Redo,
         Commit,
         Fetch,
         Pull,
@@ -51,15 +53,17 @@ actions!(
 pub enum MenuPlacement {
     App,
     File,
+    Edit,
     View,
     Repository,
     Window,
 }
 
 impl MenuPlacement {
-    const ORDER: [Self; 5] = [
+    const ORDER: [Self; 6] = [
         Self::App,
         Self::File,
+        Self::Edit,
         Self::View,
         Self::Repository,
         Self::Window,
@@ -69,6 +73,7 @@ impl MenuPlacement {
         match self {
             Self::App => "Bonsai",
             Self::File => "File",
+            Self::Edit => "Edit",
             Self::View => "View",
             Self::Repository => "Repository",
             Self::Window => "Window",
@@ -120,6 +125,8 @@ pub const COMMANDS: &[CommandSpec] = &[
     command!(ManageAccounts, "app.accounts", "Accounts…", "Bonsai", keys: [], menu: Some(MenuPlacement::App), palette: true, keywords: ["sign in", "github", "gitlab", "bitbucket", "token", "login"]),
     command!(ShowWelcome, "file.new-tab", "New Tab", "Window", keys: ["secondary-t"], menu: Some(MenuPlacement::File), palette: true, keywords: ["welcome", "recent"]),
     command!(CloseTab, "file.close-tab", "Close Tab", "Window", keys: ["secondary-w"], menu: Some(MenuPlacement::File), palette: true, separator: true),
+    command!(Undo, "edit.undo", "Undo", "Edit", keys: ["secondary-z"], menu: Some(MenuPlacement::Edit), palette: true, keywords: ["revert", "back", "uncommit", "restore", "take back"]),
+    command!(Redo, "edit.redo", "Redo", "Edit", keys: ["secondary-shift-z"], menu: Some(MenuPlacement::Edit), palette: true, keywords: ["again", "repeat"]),
     command!(ShowCommandPalette, "view.command-palette", "Command Palette…", "View", keys: ["secondary-shift-p", "secondary-k"], menu: Some(MenuPlacement::View), palette: false),
     command!(ToggleSidebar, "view.toggle-sidebar", "Toggle Sidebar", "View", keys: ["secondary-ctrl-s"], menu: Some(MenuPlacement::View), palette: true, separator: true),
     command!(ShowChanges, "view.changes", "Show Changes", "View", keys: ["secondary-1"], menu: Some(MenuPlacement::View), palette: true, separator: true, keywords: ["status", "working tree", "stage"]),

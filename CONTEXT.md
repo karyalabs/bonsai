@@ -47,6 +47,14 @@ _Avoid_: Remove from history, scrub, filter
 A Git bundle of all refs written before a purge or other history rewrite, so
 the rewrite can be undone.
 
+**Undo**:
+Reversing the newest operation Bonsai ran, from the refs it changed and any
+files it saved first: a commit goes back to staged changes, a switch switches
+back, a deleted branch, tag or stash comes back, and a discard writes the
+files back. Each undo checks the repository is still as the operation left
+it, and Redo runs it again. Changes made outside Bonsai aren't undone.
+_Avoid_: Revert (a new commit that reverses another)
+
 **Bisect**:
 A binary search through history for the first commit with a problem. The
 person marks one bad and one good commit, then each commit Git checks out as
