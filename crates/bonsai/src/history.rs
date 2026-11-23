@@ -76,6 +76,7 @@ pub struct Search {
 }
 
 /// Reads the search field: `author:` and `path:` narrow by author or path,
+/// `code:` finds commits that add or remove that text,
 /// a hexadecimal word of 7 or more characters jumps to that commit, and any
 /// other text searches commit messages.
 #[must_use]
@@ -87,6 +88,8 @@ pub fn parse_search(text: &str) -> Search {
     }
     if let Some(author) = text.strip_prefix("author:") {
         search.filter.author = Some(author.trim().to_owned()).filter(|a| !a.is_empty());
+    } else if let Some(code) = text.strip_prefix("code:") {
+        search.filter.code = Some(code.trim().to_owned()).filter(|c| !c.is_empty());
     } else if let Some(path) = text.strip_prefix("path:") {
         search.filter.path = Some(PathBuf::from(path.trim())).filter(|p| !p.as_os_str().is_empty());
     } else if text.len() >= 7 && text.len() <= 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -211,8 +214,9 @@ pub struct HistoryView {
     refs_key: Option<String>,
     /// Built on first render, which has the window an input needs.
     search_input: Option<Entity<InputState>>,
-    /// Empties the search field on the next render, which has the window.
-    clear_search_field: bool,
+    /// Text to put in the search field on the next render, which has the
+    /// window.
+    search_field_text: Option<String>,
     menu: Entity<MenuState>,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
@@ -272,7 +276,7 @@ impl HistoryView {
             started: false,
             refs_key: None,
             search_input: None,
-            clear_search_field: false,
+            search_field_text: None,
             menu,
             tasks: Vec::new(),
             subscriptions,
@@ -471,7 +475,7 @@ impl HistoryView {
     /// that would hide it.
     pub fn reveal(&mut self, oid: &Oid, cx: &mut Context<Self>) {
         self.started = true;
-        self.clear_search_field = true;
+        self.search_field_text = Some(String::new());
         let had_filter = !self.search.filter.is_empty();
         self.search = Search {
             filter: LogFilter::default(),
@@ -483,6 +487,13 @@ impl HistoryView {
         } else if !self.reveal_hash(oid.as_str(), cx) && self.paging != Paging::End {
             self.load(self.commits.len(), PAGE, cx);
         }
+    }
+
+    /// Searches for `text` and shows it in the search field.
+    pub fn search_for(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.started = true;
+        self.search_field_text = Some(text.to_owned());
+        self.set_search(text, cx);
     }
 
     /// Applies the search field's text.
@@ -786,7 +797,7 @@ impl HistoryView {
         }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search messages, author:name, path:folder or a hash")
+                .placeholder("Search messages, author:, path:, code: or a hash")
         });
         self.subscriptions
             .push(cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
@@ -906,8 +917,8 @@ impl Render for HistoryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start(cx);
         let search = self.ensure_search(window, cx);
-        if std::mem::take(&mut self.clear_search_field) {
-            search.update(cx, |input, cx| input.set_value("", window, cx));
+        if let Some(text) = self.search_field_text.take() {
+            search.update(cx, |input, cx| input.set_value(text, window, cx));
         }
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
@@ -1067,6 +1078,10 @@ mod tests {
         assert_eq!(
             parse_search("path:src/ui").filter.path,
             Some(PathBuf::from("src/ui"))
+        );
+        assert_eq!(
+            parse_search("code: retry(3) ").filter.code.as_deref(),
+            Some("retry(3)")
         );
         let hash = parse_search("ABCDEF1");
         assert_eq!(hash.hash.as_deref(), Some("abcdef1"));

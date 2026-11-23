@@ -158,10 +158,44 @@ fn filters_by_message_author_and_path() {
         summaries(LogFilter {
             message: Some("guide".into()),
             author: Some("grace".into()),
-            path: None,
+            ..LogFilter::default()
         }),
         Vec::<String>::new()
     );
+}
+
+#[test]
+fn finds_commits_that_add_or_remove_code() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repository = Repository::init(&git(), root, Some("main")).unwrap();
+    for (contents, message) in [
+        ("fn main() {}\n", "Start"),
+        ("fn main() { retry(3) }\n", "Retry three times"),
+        ("fn main() { retry(3) }\n// notes\n", "Add notes"),
+        ("fn main() { run() }\n// notes\n", "Stop retrying"),
+    ] {
+        std::fs::write(root.join("main.rs"), contents).unwrap();
+        run(root, &["add", "."]);
+        run(root, &["commit", "-qm", message]);
+    }
+    let summaries: Vec<String> = repository
+        .log_filtered(
+            &LogScope::All,
+            &LogFilter {
+                code: Some("retry(3)".into()),
+                ..LogFilter::default()
+            },
+            0,
+            100,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.summary)
+        .collect();
+    // Literal text, not a pattern; the commit that only moved lines around
+    // it doesn't count.
+    assert_eq!(summaries, ["Stop retrying", "Retry three times"]);
 }
 
 #[test]
