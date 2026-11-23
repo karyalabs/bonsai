@@ -141,6 +141,16 @@ impl CommitComposer {
                     }
                     cx.notify();
                 }
+                // Undoing a commit brings its message back, ready to commit
+                // again; the reset leaves the undone commit in ORIG_HEAD.
+                RepositoryEvent::OperationFinished {
+                    name, error: None, ..
+                } if name.as_ref() == "Undo Commit" && this.message(cx).trim().is_empty() => {
+                    let message = this.model.read(cx).repository().commit_message("ORIG_HEAD");
+                    if let Ok(message) = message {
+                        this.set_message(&message, window, cx);
+                    }
+                }
                 RepositoryEvent::SnapshotChanged => cx.notify(),
                 RepositoryEvent::OperationFinished { .. } => {}
             }),
@@ -500,6 +510,37 @@ mod tests {
     fn git(dir: &std::path::Path, args: &[&str]) {
         let g = Git::locate(None).unwrap();
         g.run(&g.command(args.iter().copied()).cwd(dir)).unwrap();
+    }
+
+    #[gpui_kit::test]
+    fn undoing_a_commit_brings_its_message_back(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let repository =
+            Repository::init(&Git::locate(None).unwrap(), dir.path(), Some("main")).unwrap();
+        git(dir.path(), &["config", "user.name", "Ada Lovelace"]);
+        git(dir.path(), &["config", "user.email", "ada@example.com"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Start"]);
+        std::fs::write(dir.path().join("a.txt"), "b").unwrap();
+        git(dir.path(), &["add", "."]);
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| CommitComposer::new(model.clone(), window, cx));
+        cx.run_until_parked();
+        composer.update_in(cx, |composer, window, cx| {
+            composer.set_message("Change a\n\nTo b.", window, cx);
+            composer.commit(cx);
+        });
+        cx.run_until_parked();
+        composer.read_with(cx, |composer, cx| assert_eq!(composer.message(cx), ""));
+        model.update(cx, |model, cx| assert!(model.undo(cx)));
+        cx.run_until_parked();
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.message(cx), "Change a\n\nTo b.");
+        });
     }
 
     #[gpui_kit::test]

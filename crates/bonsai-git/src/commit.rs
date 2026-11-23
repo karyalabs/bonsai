@@ -48,6 +48,18 @@ impl Repository {
         Ok(self.recent_messages(1)?.into_iter().next())
     }
 
+    /// The full message of `revision`, such as `ORIG_HEAD` after an undone
+    /// commit.
+    pub fn commit_message(&self, revision: &str) -> Result<String> {
+        let output = self.git().run(
+            &self
+                .git()
+                .command(["log", "-1", "--format=%B", revision, "--"])
+                .cwd(self.root()),
+        )?;
+        Ok(output.stdout_lossy().trim_end().to_owned())
+    }
+
     /// Messages of up to `count` recent commits on HEAD, newest first,
     /// without duplicates.
     pub fn recent_messages(&self, count: usize) -> Result<Vec<String>> {
