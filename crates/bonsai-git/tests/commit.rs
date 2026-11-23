@@ -115,3 +115,17 @@ fn lists_recent_authors_other_than_me() {
         ]
     );
 }
+
+#[test]
+fn reads_the_commit_template() {
+    let (dir, repository) = repository();
+    assert_eq!(repository.commit_template().unwrap(), None);
+    std::fs::write(dir.path().join(".gitmessage"), "Area: \n\n# Why?\n\n").unwrap();
+    config(dir.path(), "commit.template", ".gitmessage");
+    assert_eq!(
+        repository.commit_template().unwrap().as_deref(),
+        Some("Area: \n\n# Why?")
+    );
+    config(dir.path(), "commit.template", "missing.txt");
+    assert_eq!(repository.commit_template().unwrap(), None);
+}

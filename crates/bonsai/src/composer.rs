@@ -27,6 +27,20 @@ const SUMMARY_HARD_LIMIT: usize = 72;
 const RECENT_MESSAGES: usize = 10;
 const RECENT_AUTHORS: usize = 12;
 
+/// A message with Git's comment lines removed and spacing trimmed, as
+/// `--cleanup=strip` leaves it.
+#[must_use]
+pub fn strip_comments(message: &str) -> String {
+    message
+        .lines()
+        .filter(|line| !line.starts_with('#'))
+        .map(str::trim_end)
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_owned()
+}
+
 /// Adds a trailer such as `Co-authored-by: …` to the end of a commit body,
 /// after a blank line unless the body already ends in trailers. A trailer
 /// already there isn't added twice.
@@ -76,6 +90,8 @@ pub struct CommitComposer {
     signing: Option<Signing>,
     recent: Vec<String>,
     recent_menu: Entity<MenuState>,
+    /// The `commit.template` text each new message starts from.
+    template: Option<String>,
     /// People who recently committed here, offered as co-authors.
     authors: Vec<(String, String)>,
     authors_menu: Entity<MenuState>,
@@ -156,8 +172,8 @@ impl CommitComposer {
                     match error {
                         None => {
                             this.amend = false;
-                            this.set_message("", window, cx);
-                            this.load_details(cx);
+                            this.reset_message(window, cx);
+                            this.load_details(window, cx);
                             if push {
                                 window.dispatch_action(Box::new(crate::commands::Push), cx);
                             }
@@ -170,7 +186,7 @@ impl CommitComposer {
                 // again; the reset leaves the undone commit in ORIG_HEAD.
                 RepositoryEvent::OperationFinished {
                     name, error: None, ..
-                } if name.as_ref() == "Undo Commit" && this.message(cx).trim().is_empty() => {
+                } if name.as_ref() == "Undo Commit" && this.is_untouched(cx) => {
                     let message = this.model.read(cx).repository().commit_message("ORIG_HEAD");
                     if let Ok(message) = message {
                         this.set_message(&message, window, cx);
@@ -188,6 +204,7 @@ impl CommitComposer {
             signing: None,
             recent: Vec::new(),
             recent_menu,
+            template: None,
             authors: Vec::new(),
             authors_menu,
             commit_menu,
@@ -196,7 +213,7 @@ impl CommitComposer {
             error: None,
             _subscriptions: subscriptions,
         };
-        this.load_details(cx);
+        this.load_details(window, cx);
         this
     }
 
@@ -224,8 +241,24 @@ impl CommitComposer {
         cx.notify();
     }
 
+    /// Whether the message is empty, or the template as it was filled in.
+    fn is_untouched(&self, cx: &gpui_kit::App) -> bool {
+        let message = self.message(cx);
+        message.trim().is_empty()
+            || self
+                .template
+                .as_deref()
+                .is_some_and(|template| strip_comments(&message) == strip_comments(template))
+    }
+
+    /// Empties the message, or fills it with the commit template.
+    fn reset_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let template = self.template.clone().unwrap_or_default();
+        self.set_message(&template, window, cx);
+    }
+
     /// Reads signing settings and recent messages in the background.
-    fn load_details(&mut self, cx: &mut Context<Self>) {
+    fn load_details(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let repository = self.model.read(cx).repository().clone();
         let task = cx.background_spawn(async move {
             (
@@ -236,14 +269,21 @@ impl CommitComposer {
                 repository
                     .recent_authors(RECENT_AUTHORS)
                     .unwrap_or_default(),
+                repository.commit_template().ok().flatten(),
             )
         });
-        cx.spawn(async move |this, cx| {
-            let (signing, recent, authors) = task.await;
-            let _ = this.update(cx, |this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
+            let (signing, recent, authors, template) = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
                 this.signing = signing;
                 this.recent = recent;
                 this.authors = authors;
+                // A new template fills an untouched message box.
+                let untouched = this.is_untouched(cx);
+                this.template = template;
+                if untouched && !this.amend {
+                    this.reset_message(window, cx);
+                }
                 this.rebuild_recent_menu(cx);
                 this.rebuild_authors_menu(cx);
                 cx.notify();
@@ -318,6 +358,8 @@ impl CommitComposer {
             Some("Committing…")
         } else if self.summary.read(cx).value().trim().is_empty() {
             Some("Write a summary to commit.")
+        } else if self.template.is_some() && self.is_untouched(cx) {
+            Some("Fill in the commit template to commit.")
         } else if !self.amend && self.staged_count(cx) == 0 {
             Some("Stage changes to commit them.")
         } else {
@@ -367,13 +409,13 @@ impl CommitComposer {
         let last = self.recent.first().cloned();
         if amend {
             // Prefill the last message unless the user already wrote one.
-            if self.summary.read(cx).value().trim().is_empty()
+            if self.is_untouched(cx)
                 && let Some(last) = last
             {
                 self.set_message(&last, window, cx);
             }
         } else if last.is_some_and(|last| self.message(cx) == last) {
-            self.set_message("", window, cx);
+            self.reset_message(window, cx);
         }
         cx.notify();
     }
@@ -580,6 +622,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn strips_comments_like_git() {
+        assert_eq!(
+            strip_comments("Area: fix\n\n# Why?\nBecause.  \n"),
+            "Area: fix\n\nBecause."
+        );
+        assert_eq!(strip_comments("# only a comment\n"), "");
+    }
+
+    #[test]
     fn co_authors_go_in_a_trailer_block_once() {
         let ada = "Co-authored-by: Ada Lovelace <ada@example.com>";
         let grace = "Co-authored-by: Grace Hopper <grace@example.com>";
@@ -703,5 +754,46 @@ mod tests {
         cx.run_until_parked();
         let repository = model.read_with(cx, |model, _| model.repository().clone());
         assert_eq!(repository.recent_messages(5).unwrap(), ["Add a (amended)"]);
+    }
+
+    #[gpui_kit::test]
+    fn starts_each_message_from_the_commit_template(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let repository =
+            Repository::init(&Git::locate(None).unwrap(), dir.path(), Some("main")).unwrap();
+        git(dir.path(), &["config", "user.name", "Bonsai"]);
+        git(dir.path(), &["config", "user.email", "bonsai@example.com"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join(".gitmessage"), "Area: \n\n# Why?\n").unwrap();
+        git(dir.path(), &["config", "commit.template", ".gitmessage"]);
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| CommitComposer::new(model.clone(), window, cx));
+        cx.run_until_parked();
+
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.message(cx), "Area:\n\n# Why?");
+            assert_eq!(
+                composer.blocker(cx),
+                Some("Fill in the commit template to commit.")
+            );
+        });
+        composer.update_in(cx, |composer, window, cx| {
+            composer.set_message("Mill: add a\n\n# Why?\nIt grinds.", window, cx);
+            composer.commit(cx);
+        });
+        cx.run_until_parked();
+        composer.read_with(cx, |composer, cx| {
+            assert_eq!(composer.error(), None);
+            assert_eq!(composer.message(cx), "Area:\n\n# Why?");
+        });
+        let repository = model.read_with(cx, |model, _| model.repository().clone());
+        assert_eq!(
+            repository.recent_messages(5).unwrap(),
+            ["Mill: add a\n\nIt grinds."]
+        );
     }
 }
