@@ -380,4 +380,53 @@ impl Repository {
         )
         .map(drop)
     }
+
+    /// `commit` as an email-style patch (`git format-patch`), which
+    /// [`Self::apply_patch_file`] or `git am` applies with its message and
+    /// author.
+    pub fn format_patch(&self, commit: &str) -> Result<String> {
+        let output = self.git().run(
+            &self
+                .git()
+                .command(["format-patch", "--stdout", "-1", commit, "--"])
+                .cwd(self.root()),
+        )?;
+        Ok(output.stdout_lossy())
+    }
+
+    /// Writes [`Self::format_patch`] for `commit` to `path`.
+    pub fn save_patch(&self, commit: &str, path: &std::path::Path) -> Result<()> {
+        let text = self.format_patch(commit)?;
+        std::fs::write(path, text).map_err(|source| crate::Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    /// Applies a patch file. One made by `git format-patch` becomes commits
+    /// with their messages and authors (`git am`), stopping on conflicts
+    /// like a rebase; a plain diff changes the work tree and index, with
+    /// conflict markers where it doesn't fit.
+    pub fn apply_patch_file(&self, path: &std::path::Path) -> Result<crate::Integration> {
+        let head = std::fs::read(path).map_err(|source| crate::Error::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let path = path.as_os_str().to_owned();
+        if head.starts_with(b"From ") {
+            return self.integrate(vec!["am".into(), "--3way".into(), "--".into(), path]);
+        }
+        let git = self.git();
+        git.run(
+            &git.command([
+                std::ffi::OsString::from("apply"),
+                "--3way".into(),
+                "--whitespace=nowarn".into(),
+                "--".into(),
+                path,
+            ])
+            .cwd(self.work_tree()?),
+        )?;
+        Ok(crate::Integration::Completed)
+    }
 }

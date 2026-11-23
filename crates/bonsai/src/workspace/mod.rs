@@ -947,6 +947,38 @@ impl Workspace {
         self.repo_settings.as_ref().map(|(sheet, _)| sheet)
     }
 
+    fn on_apply_patch(&mut self, _: &commands::ApplyPatch, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = self.active_model().filter(|_| !self.welcome).cloned() else {
+            return;
+        };
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Apply".into()),
+        });
+        cx.spawn(async move |_, cx| {
+            let Ok(Ok(Some(paths))) = paths.await else {
+                return;
+            };
+            let Some(path) = paths.into_iter().next() else {
+                return;
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            model.update(cx, |model, cx| {
+                model.run(
+                    format!("Apply {name}"),
+                    move |repository| repository.apply_patch_file(&path).map(drop),
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
     fn on_repo_settings(
         &mut self,
         _: &commands::RepositorySettings,
@@ -2751,6 +2783,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_repo_settings))
+            .on_action(cx.listener(Self::on_apply_patch))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_commit))
             .on_action(cx.listener(Self::on_commit_and_push))
