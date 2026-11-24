@@ -5,6 +5,50 @@ notes come from its section here, so a version bump must add one (see
 docs/releasing.md). Write for people using Bonsai: what they can do now and
 what got fixed, grouped by feature, with the pull requests in brackets.
 
+## 0.22.0 (2026-11-24)
+
+### History
+
+- **Show one branch's history.** The menu beside the search field shows
+  all branches, just the current one, or any single branch with its
+  upstream. (#105)
+- **Follow a file past its renames.** A file's history keeps going back
+  through the commits from before it was renamed or moved. (#106)
+- **Compare two commits.** Select two commits and choose Compare These
+  Commits to see everything between them in Compare. (#112)
+- **Revert part of a commit.** In a commit's diff, Revert Hunk and Revert
+  Lines take just those changes back out of your work tree, ready to
+  review. ⌘Z undoes it. (#108)
+
+### Files
+
+- **Restore an earlier version.** Browsing Files at a branch, tag or
+  commit, right-click a file and choose Restore This Version to put that
+  version in your work tree. A deleted file comes back. (#110)
+
+### Stashes
+
+- **New Branch from Stash.** Turns a stash into a branch that starts where
+  the stash was made, so a stash that no longer applies cleanly on top of
+  today's work still comes back. (#111)
+
+### Clone
+
+- **Recent history only.** Clone big repositories faster with only the
+  latest commit of each branch. History offers Fetch Full History when you
+  want the rest. (#113)
+- **Include submodules** when cloning. (#113)
+
+### GitHub, GitLab and Bitbucket
+
+- **Open in Browser works with your own servers** too, such as GitHub
+  Enterprise or a self-hosted GitLab you have signed in to. (#107)
+
+### Fixes
+
+- Right-clicking a section heading in the sidebar no longer opens an empty
+  menu, or the last branch's menu again. (#109)
+
 ## 0.21.0 (2026-11-24)
 
 ### History
