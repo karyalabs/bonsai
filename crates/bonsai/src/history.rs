@@ -986,7 +986,7 @@ impl HistoryView {
             .model
             .read(cx)
             .snapshot()
-            .and_then(crate::web::repository_web);
+            .and_then(|s| crate::web::repository_web(s, cx));
         let mut items = vec![
             MenuItem::new("history.browse", "Browse Files")
                 .icon(LucideIcon::FolderTree)

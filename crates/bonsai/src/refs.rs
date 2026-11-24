@@ -1278,7 +1278,7 @@ impl RefsPanel {
         items.push(MenuItem::separator());
         if let Some(web) = self
             .snapshot(cx)
-            .and_then(|s| crate::web::remote_web(s, remote))
+            .and_then(|s| crate::web::remote_web(s, remote, cx))
         {
             let url = web.branch(branch);
             items.push(

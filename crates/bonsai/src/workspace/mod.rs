@@ -270,6 +270,7 @@ impl Workspace {
         }
         this.active = session.active_tab.min(this.tabs.len().saturating_sub(1));
         this.save_session();
+        this.load_account_hosts(cx);
         // Only a watched window (the app, not tests) fetches on its own.
         if watch {
             this.auto_fetch = Some(cx.spawn(async move |this, cx| {
@@ -893,6 +894,13 @@ impl Workspace {
         }
     }
 
+    /// Tells Open on GitHub and the like which provider each signed-in
+    /// account's host is.
+    fn load_account_hosts(&self, cx: &mut Context<Self>) {
+        let hosts = crate::accounts::account_hosts(&self.accounts_path());
+        cx.set_global(crate::web::AccountHosts(hosts));
+    }
+
     /// Where the accounts list is kept: beside the session file.
     fn accounts_path(&self) -> PathBuf {
         let dir = self
@@ -926,6 +934,7 @@ impl Workspace {
             window,
             |this, _, event: &AccountsEvent, window, cx| match event {
                 AccountsEvent::Dismissed => {
+                    this.load_account_hosts(cx);
                     this.accounts_handle.close(window, cx);
                     this.accounts = None;
                     this.remote_browser = None;
@@ -1189,7 +1198,7 @@ impl Workspace {
         if let Some(web) = model
             .read(cx)
             .snapshot()
-            .and_then(crate::web::repository_web)
+            .and_then(|s| crate::web::repository_web(s, cx))
         {
             cx.open_url(&web.home);
         } else {
