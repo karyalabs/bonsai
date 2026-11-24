@@ -5,6 +5,33 @@ notes come from its section here, so a version bump must add one (see
 docs/releasing.md). Write for people using Bonsai: what they can do now and
 what got fixed, grouped by feature, with the pull requests in brackets.
 
+## 0.21.0 (2026-11-24)
+
+### History
+
+- **Select several commits.** Shift-click a range or ⌘-click commits in
+  History, then cherry-pick them onto the current branch, revert them, or
+  copy their hashes, each in one step. (#101)
+- **Squash several commits.** With a run of commits selected, Squash N
+  Commits… opens Edit Commits with them folded into the oldest, ready to
+  reword. (#102)
+- **Amend an earlier commit.** Stage a fix, then choose Amend with Staged
+  Changes on any commit of the current branch. The changes join that
+  commit and keep its message, and ⌘Z puts them back as staged. (#100)
+
+### Branches
+
+- **Clean Up Branches.** Repository > Clean Up Branches… lists local
+  branches already merged into main and ones deleted on the remote, and
+  deletes the ones you tick in one undoable step. Nothing changes on the
+  remote. (#99)
+
+### GitHub, GitLab and Bitbucket
+
+- **Open on GitHub.** Commits in History, remote branches in the sidebar
+  and files in Files have Open on GitHub (or GitLab, or Bitbucket), and
+  Repository > Open in Browser opens the repository's page. (#103)
+
 ## 0.20.0 (2026-11-23)
 
 ### Commit
