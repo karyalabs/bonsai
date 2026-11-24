@@ -80,6 +80,34 @@ pub fn clone_name(url: &str) -> Option<String> {
     (!name.is_empty() && name != "." && name != "..").then(|| name.to_owned())
 }
 
+/// Choices for [`Repository::clone_with`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CloneOptions {
+    /// Only the latest commit of each branch (`--depth=1`), for big
+    /// repositories. [`Repository::fetch_full_history`] fills in the rest.
+    pub shallow: bool,
+    /// Also clone the repository's submodules.
+    pub submodules: bool,
+}
+
+impl CloneOptions {
+    fn args(self) -> Vec<&'static str> {
+        let mut args = Vec::new();
+        if self.shallow {
+            // Shallow clones fetch one branch unless told otherwise, and
+            // Bonsai shows every branch.
+            args.extend(["--depth=1", "--no-single-branch"]);
+        }
+        if self.submodules {
+            args.push("--recurse-submodules");
+            if self.shallow {
+                args.push("--shallow-submodules");
+            }
+        }
+        args
+    }
+}
+
 impl Repository {
     /// Clones `url` into `destination`, which must not exist or be empty, and
     /// opens it. `progress` receives each update. A cancelled clone removes
@@ -91,20 +119,38 @@ impl Repository {
         progress: impl Fn(CloneProgress) + Send + Sync + 'static,
         cancel: Option<CancelToken>,
     ) -> Result<Self> {
+        Self::clone_with(
+            git,
+            url,
+            destination,
+            CloneOptions::default(),
+            progress,
+            cancel,
+        )
+    }
+
+    /// Like [`Self::clone_from`], with `options`.
+    pub fn clone_with(
+        git: &Git,
+        url: &str,
+        destination: &Path,
+        options: CloneOptions,
+        progress: impl Fn(CloneProgress) + Send + Sync + 'static,
+        cancel: Option<CancelToken>,
+    ) -> Result<Self> {
         let existed = destination.exists();
-        let mut command = git
-            .command([
-                "clone".into(),
-                "--progress".into(),
-                "--".into(),
-                url.to_owned().into(),
-                destination.as_os_str().to_owned(),
-            ])
-            .on_stderr(move |line| {
-                if let Some(update) = CloneProgress::parse(line) {
-                    progress(update);
-                }
-            });
+        let mut args: Vec<std::ffi::OsString> = vec!["clone".into(), "--progress".into()];
+        args.extend(options.args().into_iter().map(Into::into));
+        args.extend([
+            "--".into(),
+            url.to_owned().into(),
+            destination.as_os_str().to_owned(),
+        ]);
+        let mut command = git.command(args).on_stderr(move |line| {
+            if let Some(update) = CloneProgress::parse(line) {
+                progress(update);
+            }
+        });
         if let Some(cancel) = cancel {
             command = command.cancel(cancel);
         }
@@ -119,6 +165,28 @@ impl Repository {
                 Err(error)
             }
         }
+    }
+
+    /// Whether this is a shallow clone, missing older history.
+    pub fn is_shallow(&self) -> Result<bool> {
+        let output = self.git().run(
+            &self
+                .git()
+                .command(["rev-parse", "--is-shallow-repository"])
+                .cwd(self.root()),
+        )?;
+        Ok(output.stdout_lossy().trim() == "true")
+    }
+
+    /// Fetches the history a shallow clone left out (`fetch --unshallow`).
+    pub fn fetch_full_history(&self) -> Result<()> {
+        self.git().run(
+            &self
+                .git()
+                .command(["fetch", "--unshallow", "--quiet"])
+                .cwd(self.root()),
+        )?;
+        Ok(())
     }
 }
 

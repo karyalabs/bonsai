@@ -41,7 +41,7 @@ mod worktrees;
 pub use bisect::{BisectCommit, BisectState, BisectVerdict};
 pub use blame::{Blame, BlameCommit, BlameLine, parse_porcelain};
 pub use branch::{CheckoutBlocker, StaleBranch, StaleReason, is_valid_ref_name};
-pub use clone::{CloneProgress, clone_name};
+pub use clone::{CloneOptions, CloneProgress, clone_name};
 pub use commit::Signing;
 pub use compare::Comparison;
 pub use conflict::{Conflict, Resolution, Segment, parse_conflicts, resolve_conflicts, side_name};
