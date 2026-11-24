@@ -60,11 +60,11 @@ pub enum HistoryEvent {
 }
 
 /// An interactive rebase to plan: the commits after `base` (`None`: every
-/// commit), with `preset` applied to one of them.
+/// commit), with `preset` applied to some of them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EditCommits {
     pub base: Option<Oid>,
-    pub preset: Option<(Oid, RebaseAction)>,
+    pub preset: Vec<(Oid, RebaseAction)>,
 }
 
 /// What the search field asks for.
@@ -274,6 +274,24 @@ fn refs_key(snapshot: &Snapshot) -> String {
         key.push_str(t.target.as_str());
     }
     key
+}
+
+/// Edit Commits squashing `commits` (newest first) into the oldest, when
+/// they are a run of commits each the parent of the one before, with no
+/// merges.
+fn squash_request(commits: &[&CommitInfo]) -> Option<EditCommits> {
+    let (oldest, newer) = commits.split_last()?;
+    let linear = commits.iter().all(|c| c.parents.len() == 1)
+        && commits
+            .windows(2)
+            .all(|pair| pair[0].parents.first() == Some(&pair[1].oid));
+    (linear && !newer.is_empty()).then(|| EditCommits {
+        base: oldest.parents.first().cloned(),
+        preset: newer
+            .iter()
+            .map(|c| (c.oid.clone(), RebaseAction::Squash))
+            .collect(),
+    })
 }
 
 impl HistoryView {
@@ -650,6 +668,7 @@ impl HistoryView {
         let count = oids.len();
         let has_merge = commits.iter().any(|c| c.parents.len() > 1);
         let hashes = oids.iter().map(Oid::as_str).collect::<Vec<_>>().join("\n");
+        let squash = squash_request(commits);
         let mut items = vec![
             MenuItem::label("history.multi", format!("{count} commits selected")),
             MenuItem::new("history.copy-all", "Copy Hashes")
@@ -671,6 +690,19 @@ impl HistoryView {
                     let oids = oids.clone();
                     move |view, cx| view.cherry_pick_all(oids.clone(), cx)
                 })),
+                MenuItem::new("history.squash-all", format!("Squash {count} Commits…"))
+                    .icon(LucideIcon::Combine)
+                    .disabled(squash.is_none())
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            if let Some(request) = squash.clone() {
+                                let _ = this.update(cx, |_, cx| {
+                                    cx.emit(HistoryEvent::EditCommits(request));
+                                });
+                            }
+                        }
+                    }),
                 MenuItem::new("history.revert-all", format!("Revert {count} Commits"))
                     .icon(LucideIcon::Undo2)
                     .disabled(has_merge)
@@ -756,7 +788,7 @@ impl HistoryView {
         };
         let preset = |action| EditCommits {
             base: base.clone(),
-            preset: Some((commit.oid.clone(), action)),
+            preset: vec![(commit.oid.clone(), action)],
         };
         // Squashing into the parent edits from the grandparent, if the
         // parent is loaded and isn't a merge.
@@ -773,7 +805,7 @@ impl HistoryView {
                 .icon(LucideIcon::ListChecks)
                 .on_click(edit(EditCommits {
                     base: base.clone(),
-                    preset: None,
+                    preset: Vec::new(),
                 })),
             MenuItem::new("history.reword", "Reword…")
                 .icon(LucideIcon::PencilLine)
@@ -791,7 +823,7 @@ impl HistoryView {
                     .icon(LucideIcon::Combine)
                     .on_click(edit(EditCommits {
                         base: grandparent,
-                        preset: Some((commit.oid.clone(), RebaseAction::Squash)),
+                        preset: vec![(commit.oid.clone(), RebaseAction::Squash)],
                     })),
             );
         }
@@ -1255,6 +1287,41 @@ impl Render for HistoryView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn commit(oid: &str, parents: &[&str]) -> CommitInfo {
+        CommitInfo {
+            oid: Oid::new(oid),
+            parents: parents.iter().map(|p| Oid::new(*p)).collect(),
+            author_name: "Ada Lovelace".into(),
+            author_email: "ada@example.com".into(),
+            author_time: 0,
+            summary: oid.into(),
+        }
+    }
+
+    #[test]
+    fn squashes_only_a_run_of_commits_into_the_oldest() {
+        let (d, c, b, a) = (
+            commit("d", &["c"]),
+            commit("c", &["b"]),
+            commit("b", &["a"]),
+            commit("a", &["base"]),
+        );
+        let request = squash_request(&[&d, &c, &b]).unwrap();
+        assert_eq!(request.base, Some(Oid::new("a")));
+        assert_eq!(
+            request.preset,
+            [
+                (Oid::new("d"), RebaseAction::Squash),
+                (Oid::new("c"), RebaseAction::Squash)
+            ]
+        );
+        // A gap, a merge or a single commit can't be squashed together.
+        assert!(squash_request(&[&d, &b]).is_none());
+        let merge = commit("m", &["d", "x"]);
+        assert!(squash_request(&[&merge, &d]).is_none());
+        assert!(squash_request(&[&a]).is_none());
+    }
 
     #[test]
     fn names_patch_files_after_the_commit() {

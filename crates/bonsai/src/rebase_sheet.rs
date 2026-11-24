@@ -54,8 +54,8 @@ pub struct RebaseSheet {
     /// The step whose message is open in the editor.
     editing: Option<usize>,
     message: Entity<TextareaState>,
-    /// Applied to a commit once the steps load, from a History shortcut.
-    preset: Option<(Oid, RebaseAction)>,
+    /// Applied to commits once the steps load, from a History shortcut.
+    preset: Vec<(Oid, RebaseAction)>,
 }
 
 impl EventEmitter<RebaseEvent> for RebaseSheet {}
@@ -65,7 +65,7 @@ impl RebaseSheet {
     pub fn new(
         model: Entity<RepositoryModel>,
         base: Option<Oid>,
-        preset: Option<(Oid, RebaseAction)>,
+        preset: Vec<(Oid, RebaseAction)>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -88,15 +88,14 @@ impl RebaseSheet {
                         this.original = steps.iter().map(|s| s.oid.clone()).collect();
                         this.steps = steps;
                         this.status = Status::Ready;
-                        if let Some((oid, action)) = this.preset.take() {
-                            match this.steps.iter().position(|s| s.oid == oid) {
-                                Some(index) => this.set_action(index, action, window, cx),
-                                None => {
-                                    this.status = Status::Failed(
-                                        "That commit isn't on the current branch.".into(),
-                                    );
-                                }
-                            }
+                        for (oid, action) in std::mem::take(&mut this.preset) {
+                            let Some(index) = this.steps.iter().position(|s| s.oid == oid) else {
+                                this.status = Status::Failed(
+                                    "That commit isn't on the current branch.".into(),
+                                );
+                                break;
+                            };
+                            this.set_action(index, action, window, cx);
                         }
                     }
                     Err(error) => this.status = Status::Failed(error),
@@ -552,7 +551,7 @@ mod tests {
             RebaseSheet::new(
                 model.clone(),
                 Some(base),
-                Some((three, RebaseAction::Drop)),
+                vec![(three, RebaseAction::Drop)],
                 window,
                 cx,
             )
