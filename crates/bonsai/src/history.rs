@@ -283,7 +283,7 @@ impl HistoryView {
         cx: &mut Context<Self>,
     ) -> Self {
         let graph = CommitGraphState::new(Vec::new()).expect("an empty graph has no duplicates");
-        graph.set_selection_mode(ListSelectionMode::Single);
+        graph.set_selection_mode(ListSelectionMode::Multiple);
         let menu = cx.new(|cx| MenuState::new(Vec::new(), cx));
         let subscriptions = vec![
             cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
@@ -545,16 +545,36 @@ impl HistoryView {
         }
     }
 
-    /// The selected commit.
+    /// The selected commit: the focused one when several are selected, so
+    /// the diff pane follows the keyboard.
     #[must_use]
     pub fn selected(&self) -> Option<&CommitInfo> {
-        let id = self.graph.selected().into_iter().next()?;
+        let selected = self.graph.selected();
+        let id = self
+            .graph
+            .focused()
+            .filter(|id| selected.contains(id))
+            .or_else(|| selected.into_iter().next())?;
         let ElementId::Name(name) = id else {
             return None;
         };
         self.commits
             .iter()
             .find(|c| c.oid.as_str() == name.as_ref())
+    }
+
+    /// Every selected commit, newest first as History lists them.
+    #[must_use]
+    pub fn selected_commits(&self) -> Vec<&CommitInfo> {
+        let selected = self.graph.selected();
+        self.commits
+            .iter()
+            .filter(|c| {
+                selected
+                    .iter()
+                    .any(|id| matches!(id, ElementId::Name(n) if n.as_ref() == c.oid.as_str()))
+            })
+            .collect()
     }
 
     /// Tells the workspace what to show in the diff pane.
@@ -591,6 +611,76 @@ impl HistoryView {
                 cx,
             );
         });
+    }
+
+    /// Cherry-picks `oids` onto the current branch, oldest first.
+    pub fn cherry_pick_all(&mut self, oids: Vec<Oid>, cx: &mut Context<Self>) {
+        let name = format!("Cherry-pick {} commits", oids.len());
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| {
+                    let hashes: Vec<&str> = oids.iter().rev().map(Oid::as_str).collect();
+                    repository.cherry_pick(&hashes).map(drop)
+                },
+                cx,
+            );
+        });
+    }
+
+    /// Reverts `oids`, newest first.
+    pub fn revert_all(&mut self, oids: Vec<Oid>, cx: &mut Context<Self>) {
+        let name = format!("Revert {} commits", oids.len());
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| {
+                    let hashes: Vec<&str> = oids.iter().map(Oid::as_str).collect();
+                    repository.revert_commits(&hashes).map(drop)
+                },
+                cx,
+            );
+        });
+    }
+
+    /// The menu for several selected commits.
+    fn multi_menu(&self, commits: &[&CommitInfo], cx: &mut Context<Self>) -> Vec<MenuItem> {
+        let this = cx.entity().downgrade();
+        let oids: Vec<Oid> = commits.iter().map(|c| c.oid.clone()).collect();
+        let count = oids.len();
+        let has_merge = commits.iter().any(|c| c.parents.len() > 1);
+        let hashes = oids.iter().map(Oid::as_str).collect::<Vec<_>>().join("\n");
+        let mut items = vec![
+            MenuItem::label("history.multi", format!("{count} commits selected")),
+            MenuItem::new("history.copy-all", "Copy Hashes")
+                .icon(LucideIcon::Copy)
+                .on_click(move |_, _, cx| {
+                    cx.write_to_clipboard(ClipboardItem::new_string(hashes.clone()));
+                }),
+        ];
+        if let Some(current) = self.current_branch(cx) {
+            items.extend([
+                MenuItem::separator(),
+                MenuItem::new(
+                    "history.cherry-pick-all",
+                    format!("Cherry-pick {count} Commits onto {current}"),
+                )
+                .icon(LucideIcon::Cherry)
+                .disabled(has_merge)
+                .on_click(with_this(&this, {
+                    let oids = oids.clone();
+                    move |view, cx| view.cherry_pick_all(oids.clone(), cx)
+                })),
+                MenuItem::new("history.revert-all", format!("Revert {count} Commits"))
+                    .icon(LucideIcon::Undo2)
+                    .disabled(has_merge)
+                    .on_click(with_this(&this, {
+                        let oids = oids.clone();
+                        move |view, cx| view.revert_all(oids.clone(), cx)
+                    })),
+            ]);
+        }
+        items
     }
 
     /// Copies the commit as an email-style patch.
@@ -714,6 +804,12 @@ impl HistoryView {
     }
 
     fn rebuild_menu(&mut self, cx: &mut Context<Self>) {
+        let selected = self.selected_commits();
+        if selected.len() > 1 {
+            let items = self.multi_menu(&selected, cx);
+            self.menu.update(cx, |menu, cx| menu.set_items(items, cx));
+            return;
+        }
         let Some(commit) = self.selected().cloned() else {
             self.menu
                 .update(cx, |menu, cx| menu.set_items(Vec::new(), cx));
