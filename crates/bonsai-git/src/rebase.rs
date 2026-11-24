@@ -181,6 +181,16 @@ impl Repository {
         base: Option<&str>,
         steps: &[RebaseStep],
     ) -> Result<Integration> {
+        self.rebase_interactive_as(base, steps, None)
+    }
+
+    /// [`Self::rebase_interactive`], naming `reflog_action` in the reflog.
+    fn rebase_interactive_as(
+        &self,
+        base: Option<&str>,
+        steps: &[RebaseStep],
+        reflog_action: Option<&str>,
+    ) -> Result<Integration> {
         if steps.iter().all(|s| s.action == RebaseAction::Drop) && base.is_none() {
             return Err(Error::Refused(
                 "A branch needs at least one commit; keep one.".to_owned(),
@@ -201,7 +211,81 @@ impl Repository {
             Some(base) => args.push(base.into()),
             None => args.push("--root".into()),
         }
-        self.integrate_with(args, &format!("cp {}", quote(&todo_file.to_string_lossy())))
+        self.integrate_with(
+            args,
+            &format!("cp {}", quote(&todo_file.to_string_lossy())),
+            reflog_action,
+        )
+    }
+
+    /// Folds the staged changes into `target`, an earlier commit on the
+    /// current branch, keeping its message: a fixup commit squashed in by an
+    /// interactive rebase. Unstaged changes are stashed and put back. A stop
+    /// with conflicts leaves the rebase in progress.
+    ///
+    /// # Errors
+    /// When nothing is staged, `target` isn't on the current branch, a merge
+    /// follows it, or Git fails.
+    pub fn amend_commit(&self, target: &str) -> Result<Integration> {
+        let run = |args: &[&str]| self.git().run(&self.git().command(args).cwd(self.root()));
+        let target = Oid::new(
+            run(&["rev-parse", "--verify", &format!("{target}^{{commit}}")])?
+                .stdout_lossy()
+                .trim(),
+        );
+        if run(&["diff", "--cached", "--quiet"]).is_ok() {
+            return Err(Error::Refused(
+                "Nothing is staged. Stage the changes to add to the commit first.".to_owned(),
+            ));
+        }
+        if run(&["merge-base", "--is-ancestor", target.as_str(), "HEAD"]).is_err() {
+            return Err(Error::Refused(
+                "That commit isn't on the current branch.".to_owned(),
+            ));
+        }
+        let parent = run(&["rev-parse", "--verify", "-q", &format!("{target}^")])
+            .ok()
+            .map(|output| output.stdout_lossy().trim().to_owned());
+        if target.as_str() == run(&["rev-parse", "HEAD"])?.stdout_lossy().trim() {
+            self.commit_with(&["commit", "--amend", "--no-edit", "-q"])?;
+            return Ok(Integration::Completed);
+        }
+        // Check before committing, so a refusal leaves nothing behind.
+        let mut steps = self.rebase_steps(parent.as_deref())?;
+        self.commit_with(&["commit", "-q", &format!("--fixup={target}")])?;
+        let fixup = run(&["rev-parse", "HEAD"])?
+            .stdout_lossy()
+            .trim()
+            .to_owned();
+        let position = steps
+            .iter()
+            .position(|step| step.oid == target)
+            .map_or(1, |index| index + 1);
+        steps.insert(
+            position,
+            RebaseStep {
+                action: RebaseAction::Fixup,
+                oid: Oid::new(&fixup),
+                message: format!("fixup! {target}"),
+                new_message: None,
+            },
+        );
+        // Named so undoing it is a soft reset that leaves the changes staged
+        // again, as undoing a commit does.
+        self.rebase_interactive_as(parent.as_deref(), &steps, Some(crate::undo::AMEND_ACTION))
+    }
+
+    /// Runs a commit that needs no message from an editor.
+    fn commit_with(&self, args: &[&str]) -> Result<()> {
+        self.git()
+            .run(
+                &self
+                    .git()
+                    .command(args)
+                    .cwd(self.root())
+                    .env("GIT_EDITOR", "true"),
+            )
+            .map(drop)
     }
 }
 

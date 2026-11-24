@@ -637,6 +637,18 @@ impl HistoryView {
         });
     }
 
+    /// Folds the staged changes into the commit, keeping its message.
+    pub fn amend(&mut self, oid: Oid, cx: &mut Context<Self>) {
+        let name = format!("Amend {}", short(&oid));
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.amend_commit(oid.as_str()).map(drop),
+                cx,
+            );
+        });
+    }
+
     /// Edit Commits and its shortcuts, for a commit that isn't a merge.
     fn edit_items(&self, commit: &CommitInfo, cx: &mut Context<Self>) -> Vec<MenuItem> {
         if commit.parents.len() > 1 {
@@ -676,6 +688,12 @@ impl HistoryView {
             MenuItem::new("history.reword", "Reword…")
                 .icon(LucideIcon::PencilLine)
                 .on_click(edit(preset(RebaseAction::Reword))),
+            MenuItem::new("history.amend", "Amend with Staged Changes")
+                .icon(LucideIcon::GitCommitVertical)
+                .on_click(with_this(&this, {
+                    let oid = commit.oid.clone();
+                    move |view, cx| view.amend(oid.clone(), cx)
+                })),
         ];
         if let Some(grandparent) = grandparent {
             items.push(
