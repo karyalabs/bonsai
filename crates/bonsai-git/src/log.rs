@@ -158,6 +158,23 @@ impl Repository {
         Ok(LogReader { stream })
     }
 
+    /// Whether `path` names a file, in the work tree or at HEAD (a deleted
+    /// file's history is still a file's).
+    fn is_file(&self, path: &std::path::Path) -> bool {
+        if self.root().join(path).is_file() {
+            return true;
+        }
+        let spec = format!("HEAD:{}", path.to_string_lossy());
+        self.git()
+            .run_unchecked(
+                &self
+                    .git()
+                    .command(["cat-file", "-t", spec.as_str()])
+                    .cwd(self.root()),
+            )
+            .is_ok_and(|output| output.status.success() && output.stdout_lossy().trim() == "blob")
+    }
+
     /// `git log` arguments, or `None` when there is no history to read.
     fn log_args(
         &self,
@@ -202,6 +219,15 @@ impl Repository {
             }
             LogScope::Head => args.push("HEAD".to_owned()),
             LogScope::Refs(refs) => args.extend(refs.iter().cloned()),
+        }
+        // A file's history goes on past its renames; Git can only follow
+        // a single file, not a folder.
+        if filter
+            .path
+            .as_deref()
+            .is_some_and(|path| self.is_file(path))
+        {
+            args.push("--follow".to_owned());
         }
         args.push("--".to_owned());
         let mut args: Vec<std::ffi::OsString> = args.into_iter().map(Into::into).collect();

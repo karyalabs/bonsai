@@ -270,3 +270,44 @@ fn a_reader_of_an_unborn_branch_is_empty() {
     assert_eq!(reader.next_page(10).unwrap(), Vec::new());
     assert!(reader.is_done());
 }
+
+#[test]
+fn a_file_history_follows_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repository = Repository::init(&git(), root, Some("main")).unwrap();
+    std::fs::write(
+        root.join("old.rs"),
+        "fn main() {}\n// a long enough file to be seen as renamed\n",
+    )
+    .unwrap();
+    run(root, &["add", "."]);
+    run(root, &["commit", "-qm", "Start"]);
+    run(root, &["mv", "old.rs", "new.rs"]);
+    run(root, &["commit", "-qm", "Rename"]);
+    std::fs::write(
+        root.join("new.rs"),
+        "fn main() {}\n// a long enough file to be seen as renamed\n// more\n",
+    )
+    .unwrap();
+    run(root, &["commit", "-qam", "Edit"]);
+    let summaries = |path: &str| -> Vec<String> {
+        repository
+            .log_filtered(
+                &LogScope::All,
+                &LogFilter {
+                    path: Some(path.into()),
+                    ..LogFilter::default()
+                },
+                0,
+                100,
+            )
+            .unwrap()
+            .into_iter()
+            .map(|c| c.summary)
+            .collect()
+    };
+    assert_eq!(summaries("new.rs"), ["Edit", "Rename", "Start"]);
+    // A deleted file's history still reads.
+    assert_eq!(summaries("old.rs"), ["Rename", "Start"]);
+}
