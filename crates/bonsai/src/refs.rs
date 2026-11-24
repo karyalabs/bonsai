@@ -90,6 +90,12 @@ pub enum RefDialog {
         oid: Oid,
         message: String,
     },
+    /// A new branch where a stash was made, with the stash applied.
+    StashBranch {
+        index: usize,
+        oid: Oid,
+        message: String,
+    },
     /// Check a branch out in a new folder; `branch` prefills the name.
     AddWorktree {
         branch: Option<String>,
@@ -486,6 +492,19 @@ impl RefsPanel {
             })),
             item("refs.stash.view", "View Changes", LucideIcon::FileDiff)
                 .on_click(with(&this, move |panel, _, cx| panel.view_stash(&view, cx))),
+            item(
+                "refs.stash.branch",
+                "New Branch from Stash…",
+                LucideIcon::GitBranchPlus,
+            )
+            .on_click(show(
+                &this,
+                RefDialog::StashBranch {
+                    index: stash.index,
+                    oid: stash.oid.clone(),
+                    message: stash.message.clone(),
+                },
+            )),
             MenuItem::separator(),
             item("refs.stash.drop", "Drop…", LucideIcon::Trash2).on_click(show(
                 &this,
@@ -652,9 +671,11 @@ impl RefsPanel {
                 let new = self.url_value(cx);
                 !new.is_empty() && new != *url
             }
-            Some(RefDialog::CreateBranch { .. } | RefDialog::CreateTag { .. }) => {
-                is_valid_ref_name(&self.name_value(cx))
-            }
+            Some(
+                RefDialog::CreateBranch { .. }
+                | RefDialog::CreateTag { .. }
+                | RefDialog::StashBranch { .. },
+            ) => is_valid_ref_name(&self.name_value(cx)),
             Some(RefDialog::RenameBranch { name } | RefDialog::RenameRemote { name }) => {
                 let new = self.name_value(cx);
                 is_valid_ref_name(&new) && new != *name
@@ -846,6 +867,11 @@ impl RefsPanel {
                     cx,
                 );
             }
+            RefDialog::StashBranch { index, oid, .. } => self.run(
+                format!("Create branch {value} from stash"),
+                move |repository| repository.stash_branch(&value, index, &oid),
+                cx,
+            ),
             RefDialog::RenameBranch { name } => self.run(
                 format!("Rename branch {name} to {value}"),
                 move |repository| repository.rename_branch(&name, &value),
@@ -1478,6 +1504,14 @@ impl RefsPanel {
                 "Create Branch",
                 false,
             ),
+            RefDialog::StashBranch { message, .. } => (
+                "New Branch from Stash".to_owned(),
+                format!(
+                    "“{message}” goes back onto the commit it was stashed from, on a new branch, so it applies cleanly. The stash is then dropped."
+                ),
+                "Create Branch",
+                false,
+            ),
             RefDialog::RenameBranch { name } => (
                 format!("Rename {name}"),
                 "The upstream and settings move with the branch.".to_owned(),
@@ -1641,6 +1675,7 @@ impl RefsPanel {
         let with_name = matches!(
             open,
             RefDialog::CreateBranch { .. }
+                | RefDialog::StashBranch { .. }
                 | RefDialog::RenameBranch { .. }
                 | RefDialog::CreateTag { .. }
                 | RefDialog::AddRemote
@@ -2691,7 +2726,7 @@ mod tests {
         let again = stashes(cx)[0].clone();
         panel.update(cx, |panel, cx| {
             let items = panel.stash_menu(&again, cx);
-            assert_eq!(items.len(), 5);
+            assert_eq!(items.len(), 6);
             panel.show(
                 RefDialog::DropStash {
                     index: again.index,
@@ -2704,6 +2739,49 @@ mod tests {
         cx.run_until_parked();
         panel.update_in(cx, RefsPanel::confirm);
         cx.run_until_parked();
+        assert_eq!(stashes(cx), [] as [bonsai_git::Stash; 0]);
+
+        // A stash made on an older commit becomes a branch there, applied
+        // even though the file has moved on since.
+        let out = |args: &[&str]| {
+            let g = Git::locate(None).unwrap();
+            g.run(&g.command(args.iter().copied()).cwd(root))
+                .unwrap()
+                .stdout_lossy()
+                .trim()
+                .to_owned()
+        };
+        let base = out(&["rev-parse", "HEAD"]);
+        std::fs::write(root.join("a.txt"), "stashed").unwrap();
+        git(root, &["stash", "push", "-qm", "old idea"]);
+        std::fs::write(root.join("a.txt"), "moved on").unwrap();
+        git(root, &["commit", "-qam", "moved on"]);
+        model.update(cx, RepositoryModel::refresh);
+        cx.run_until_parked();
+        let old = stashes(cx)[0].clone();
+        panel.update(cx, |panel, cx| {
+            panel.show(
+                RefDialog::StashBranch {
+                    index: old.index,
+                    oid: old.oid.clone(),
+                    message: old.message.clone(),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        let name = panel.read_with(cx, |panel, _| panel.inputs.as_ref().unwrap().name.clone());
+        name.update_in(cx, |input, window, cx| {
+            input.set_value("old-idea", window, cx);
+        });
+        panel.update_in(cx, RefsPanel::confirm);
+        cx.run_until_parked();
+        assert_eq!(out(&["branch", "--show-current"]), "old-idea");
+        assert_eq!(out(&["rev-parse", "HEAD"]), base);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "stashed"
+        );
         assert_eq!(stashes(cx), [] as [bonsai_git::Stash; 0]);
     }
 

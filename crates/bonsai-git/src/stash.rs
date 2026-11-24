@@ -99,6 +99,20 @@ impl Repository {
         }
     }
 
+    /// Starts branch `name` at the commit the stash was made on, applies
+    /// the stash there and drops it, as `git stash branch` does. A stash
+    /// that no longer applies where it was made never fails this way.
+    pub fn stash_branch(&self, name: &str, index: usize, oid: &Oid) -> Result<()> {
+        let stash = self.stash_ref(index, oid)?;
+        self.git().run(
+            &self
+                .git()
+                .command(["stash", "branch", name, &stash])
+                .cwd(self.root()),
+        )?;
+        Ok(())
+    }
+
     pub fn stash_drop(&self, index: usize, oid: &Oid) -> Result<()> {
         let name = self.stash_ref(index, oid)?;
         self.git().run(
