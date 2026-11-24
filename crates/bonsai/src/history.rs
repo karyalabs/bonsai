@@ -230,6 +230,10 @@ fn graph_row(commit: &CommitInfo, row: &Row, labels: &HashMap<Oid, Vec<GraphLabe
 type RefsAction = Box<dyn Fn(&mut RefsPanel, &mut Context<RefsPanel>)>;
 type ViewAction = Box<dyn Fn(&mut HistoryView, &mut Context<HistoryView>)>;
 
+/// The operation name for [`HistoryView::fetch_full_history`], which
+/// History and the diff pane watch for to reload.
+pub(crate) const FETCH_FULL_HISTORY: &str = "Fetch full history";
+
 /// Where paging through the history stands.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Paging {
@@ -256,6 +260,9 @@ pub struct HistoryView {
     labels: HashMap<Oid, Vec<GraphLabel>>,
     search: Search,
     paging: Paging,
+    /// Whether the repository is a shallow clone, so the history stops
+    /// short of its first commit.
+    shallow: bool,
     error: Option<SharedString>,
     /// Ignores pages for a search or refresh that has since changed.
     generation: u64,
@@ -359,8 +366,16 @@ impl HistoryView {
         let scope_menu = cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(240.)));
         let subscriptions = vec![
             cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
-                if matches!(event, RepositoryEvent::SnapshotChanged) && this.started {
-                    this.refresh_if_refs_moved(cx);
+                if !this.started {
+                    return;
+                }
+                match event {
+                    RepositoryEvent::SnapshotChanged => this.refresh_if_refs_moved(cx),
+                    // Unshallowing adds commits without moving a ref.
+                    RepositoryEvent::OperationFinished {
+                        name, error: None, ..
+                    } if name.as_ref() == FETCH_FULL_HISTORY => this.reload(cx),
+                    RepositoryEvent::OperationFinished { .. } => {}
                 }
             }),
         ];
@@ -376,6 +391,7 @@ impl HistoryView {
             labels: HashMap::new(),
             search: Search::default(),
             paging: Paging::More,
+            shallow: false,
             error: None,
             generation: 0,
             started: false,
@@ -403,6 +419,24 @@ impl HistoryView {
     #[must_use]
     pub fn is_loading(&self) -> bool {
         self.paging == Paging::Loading
+    }
+
+    /// Whether the history stops short because this is a shallow clone.
+    #[must_use]
+    pub fn is_shallow(&self) -> bool {
+        self.shallow
+    }
+
+    /// Fetches the commits a shallow clone left out; History reloads once
+    /// they arrive.
+    pub fn fetch_full_history(&mut self, cx: &mut Context<Self>) {
+        self.model.update(cx, |model, cx| {
+            model.run_network(
+                FETCH_FULL_HISTORY,
+                |repository, _, _| repository.fetch_full_history(),
+                cx,
+            );
+        });
     }
 
     #[must_use]
@@ -475,7 +509,8 @@ impl HistoryView {
                 None => repository.log_reader(&scope, &filter)?,
             };
             let page = reader.next_page(limit)?;
-            Ok::<_, bonsai_git::Error>((reader, page))
+            let shallow = (skip == 0).then(|| repository.is_shallow().unwrap_or(false));
+            Ok::<_, bonsai_git::Error>((reader, page, shallow))
         });
         self.tasks.retain(|task| !task.is_ready());
         self.tasks.push(cx.spawn(async move |this, cx| {
@@ -486,8 +521,11 @@ impl HistoryView {
                 }
                 this.paging = Paging::More;
                 match result {
-                    Ok((reader, page)) => {
+                    Ok((reader, page, shallow)) => {
                         this.error = None;
+                        if let Some(shallow) = shallow {
+                            this.shallow = shallow;
+                        }
                         if page.len() < limit || reader.is_done() {
                             this.paging = Paging::End;
                         } else {
@@ -1440,6 +1478,29 @@ impl Render for HistoryView {
                     .p(px(4.))
                     .child(context_menu(&self.menu, "Commit actions", graph).size_full()),
             )
+            .when(self.paging == Paging::End && self.shallow, |this| {
+                this.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .gap(px(8.))
+                        .py(px(6.))
+                        .border_t_1()
+                        .border_color(c.border)
+                        .text_xs()
+                        .text_color(c.muted_foreground)
+                        .child("This clone has only recent history.")
+                        .child(
+                            Button::new("history.unshallow")
+                                .variant(ButtonVariant::Ghost)
+                                .label("Fetch Full History")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.fetch_full_history(cx);
+                                })),
+                        ),
+                )
+            })
             .when(self.paging != Paging::End && len > 0, |this| {
                 this.child(
                     div()
@@ -1726,6 +1787,58 @@ mod tests {
                     view.selected().map(|c| c.summary.as_str()),
                     Some("commit 1")
                 );
+            });
+        }
+
+        #[gpui_kit::test]
+        fn a_shallow_clone_fetches_its_full_history(cx: &mut TestAppContext) {
+            cx.update(crate::ui::theme::init);
+            let dir = tempfile::tempdir().unwrap();
+            let git = Git::locate(None).unwrap();
+            let source = dir.path().join("source");
+            Repository::init(&git, &source, Some("main")).unwrap();
+            for n in 1..=3 {
+                run(
+                    &source,
+                    &[
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        &format!("commit {n}"),
+                    ],
+                );
+            }
+            let options = bonsai_git::CloneOptions {
+                shallow: true,
+                submodules: false,
+            };
+            let repository = Repository::clone_with(
+                &git,
+                &format!("file://{}", source.display()),
+                &dir.path().join("clone"),
+                options,
+                |_| {},
+                None,
+            )
+            .unwrap();
+
+            let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+            let refs = cx.new(|cx| RefsPanel::new(model.clone(), cx));
+            let history = cx.new(|cx| HistoryView::new(model.clone(), refs, cx));
+            cx.run_until_parked();
+            history.update(cx, HistoryView::start);
+            cx.run_until_parked();
+            history.read_with(cx, |view, _| {
+                assert!(view.is_shallow());
+                assert_eq!(view.commits().len(), 1);
+            });
+
+            history.update(cx, HistoryView::fetch_full_history);
+            cx.run_until_parked();
+            history.read_with(cx, |view, _| {
+                assert!(!view.is_shallow());
+                assert_eq!(view.commits().len(), 3);
             });
         }
     }

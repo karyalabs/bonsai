@@ -2,7 +2,9 @@
 
 use std::path::PathBuf;
 
-use bonsai_git::{CancelToken, CloneProgress, Git, Repository, clone_name, is_empty_or_missing};
+use bonsai_git::{
+    CancelToken, CloneOptions, CloneProgress, Git, Repository, clone_name, is_empty_or_missing,
+};
 use futures::{StreamExt as _, channel::mpsc};
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
@@ -12,6 +14,7 @@ use gpui_kit::{
 
 use crate::ui::{
     button::{Button, ButtonVariant},
+    checkbox::Checkbox,
     dialog::{dialog_description, dialog_footer, dialog_title},
     input::{Input, InputEvent, InputState},
     progress::Progress,
@@ -50,6 +53,7 @@ pub struct CloneDialog {
     parent: PathBuf,
     /// Set once the user types a name, so the URL stops overwriting it.
     name_edited: bool,
+    options: CloneOptions,
     phase: Phase,
     _subscriptions: Vec<Subscription>,
 }
@@ -94,6 +98,7 @@ impl CloneDialog {
             name,
             parent,
             name_edited: false,
+            options: CloneOptions::default(),
             phase: Phase::Editing,
             _subscriptions: subscriptions,
         }
@@ -119,6 +124,12 @@ impl CloneDialog {
             self.name
                 .update(cx, |name, cx| name.set_value(derived, window, cx));
         }
+        cx.notify();
+    }
+
+    /// Clone only recent history, and whether to bring submodules.
+    pub fn set_options(&mut self, options: CloneOptions, cx: &mut Context<Self>) {
+        self.options = options;
         cx.notify();
     }
 
@@ -169,12 +180,14 @@ impl CloneDialog {
 
         let (sender, mut receiver) = mpsc::unbounded();
         let git = self.git.clone();
+        let options = self.options;
         cx.background_spawn(async move {
             let progress = sender.clone();
-            let result = Repository::clone_from(
+            let result = Repository::clone_with(
                 &git,
                 &url,
                 &destination,
+                options,
                 move |update| {
                     let _ = progress.unbounded_send(Message::Progress(update));
                 },
@@ -343,6 +356,39 @@ impl Render for CloneDialog {
                     )
                     .child(Input::new(&self.name).aria_label("Folder name")),
             )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap(px(8.))
+                    .text_sm()
+                    .child(option_row(
+                        Checkbox::new("clone.shallow")
+                            .checked(self.options.shallow)
+                            .disabled(running)
+                            .aria_label("Recent history only")
+                            .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                this.options.shallow = *checked;
+                                cx.notify();
+                            })),
+                        "Recent history only",
+                        "Faster for big repositories. History can fetch the rest later.",
+                        c.muted_foreground,
+                    ))
+                    .child(option_row(
+                        Checkbox::new("clone.submodules")
+                            .checked(self.options.submodules)
+                            .disabled(running)
+                            .aria_label("Include submodules")
+                            .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                this.options.submodules = *checked;
+                                cx.notify();
+                            })),
+                        "Include submodules",
+                        "Clones the repositories this one depends on, too.",
+                        c.muted_foreground,
+                    )),
+            )
             .when_some(status, gpui_kit::ParentElement::child)
             .when(!running, |this| {
                 this.when_some(
@@ -382,4 +428,25 @@ impl Render for CloneDialog {
                     ),
             )
     }
+}
+
+/// A checkbox with a label and a quieter line explaining it.
+fn option_row(
+    checkbox: Checkbox,
+    label: &'static str,
+    detail: &'static str,
+    muted: gpui_kit::Rgba,
+) -> impl IntoElement {
+    div()
+        .flex()
+        .items_start()
+        .gap(px(8.))
+        .child(div().pt(px(2.)).child(checkbox))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .child(label)
+                .child(div().text_xs().text_color(muted).child(detail)),
+        )
 }

@@ -219,15 +219,21 @@ impl DiffPane {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let state = cx.new(|cx| DiffState::new(Vec::new(), cx));
         let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
-            // Work tree diffs follow the files; commit diffs never change.
-            if matches!(event, RepositoryEvent::SnapshotChanged)
-                && matches!(
+            // Work tree diffs follow the files; commit diffs change only
+            // when a shallow clone gains the parents they compare with.
+            let reload = match event {
+                RepositoryEvent::SnapshotChanged => matches!(
                     this.target,
                     Some(
                         DiffTarget::Unstaged(_) | DiffTarget::Staged(_) | DiffTarget::Untracked(_)
                     )
-                )
-            {
+                ),
+                RepositoryEvent::OperationFinished {
+                    name, error: None, ..
+                } => name.as_ref() == crate::history::FETCH_FULL_HISTORY && this.target.is_some(),
+                RepositoryEvent::OperationFinished { .. } => false,
+            };
+            if reload {
                 this.load(false, cx);
             }
         });
