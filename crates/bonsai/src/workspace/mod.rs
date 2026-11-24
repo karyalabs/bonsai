@@ -1181,6 +1181,24 @@ impl Workspace {
         }
     }
 
+    /// Opens the repository's page on GitHub, GitLab or Bitbucket.
+    fn on_open_web(&mut self, _: &commands::OpenOnWeb, _: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = self.active_model().filter(|_| !self.welcome) else {
+            return;
+        };
+        if let Some(web) = model
+            .read(cx)
+            .snapshot()
+            .and_then(crate::web::repository_web)
+        {
+            cx.open_url(&web.home);
+        } else {
+            self.message =
+                Some("This repository has no remote on GitHub, GitLab or Bitbucket.".into());
+            cx.notify();
+        }
+    }
+
     fn on_accounts(
         &mut self,
         _: &commands::ManageAccounts,
@@ -2936,6 +2954,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_accounts))
             .on_action(cx.listener(Self::on_settings))
             .on_action(cx.listener(Self::on_terminal))
+            .on_action(cx.listener(Self::on_open_web))
             .on_action(cx.listener(Self::on_publish))
             .on_action(cx.listener(Self::on_create_pull_request))
             .on_action(cx.listener(Self::on_new_issue))

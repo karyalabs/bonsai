@@ -806,6 +806,20 @@ impl FilesView {
                     .on_click(move |_, _, cx| cx.open_with_system(&absolute)),
             );
         }
+        let snapshot = self.model.read(cx).snapshot();
+        let web = snapshot.and_then(crate::web::repository_web);
+        let revision = match &self.revision {
+            Some(revision) => Some(revision.spec.clone()),
+            None => snapshot.and_then(crate::web::work_tree_revision),
+        };
+        if let (Some(web), Some(revision)) = (web, revision) {
+            let url = web.file(&revision, &path.to_string_lossy(), None);
+            items.push(
+                MenuItem::new("files.open-web", web.open_label())
+                    .icon(LucideIcon::Globe)
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
+        }
         items.push(
             MenuItem::new("files.purge", "Purge from History…")
                 .icon(LucideIcon::Eraser)

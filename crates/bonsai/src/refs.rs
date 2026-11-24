@@ -1276,6 +1276,17 @@ impl RefsPanel {
         ]);
         items.extend(integrate);
         items.push(MenuItem::separator());
+        if let Some(web) = self
+            .snapshot(cx)
+            .and_then(|s| crate::web::remote_web(s, remote))
+        {
+            let url = web.branch(branch);
+            items.push(
+                MenuItem::new("refs.remote.open-web", web.open_label())
+                    .icon(LucideIcon::ExternalLink)
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
+        }
         items.push(copy_item(full));
         items
     }
