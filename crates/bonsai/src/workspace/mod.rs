@@ -5,12 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock};
 
 mod branch_picker;
+mod clean_up;
 mod clone;
 mod new_repo;
 pub(crate) mod title_bar;
 
 use bonsai_git::{DiffTarget, Git, Oid, Repository, Snapshot};
 pub use branch_picker::{BranchChoice, branch_items, parse_choice};
+pub use clean_up::{CleanUpDialog, CleanUpEvent};
 pub use clone::{CloneDialog, CloneEvent};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
@@ -151,6 +153,8 @@ pub struct Workspace {
     settings_handle: DialogHandle,
     settings: Option<(Entity<SettingsSheet>, Subscription)>,
     repo_settings_handle: DialogHandle,
+    clean_up_handle: DialogHandle,
+    clean_up: Option<(Entity<CleanUpDialog>, Subscription)>,
     repo_settings: Option<(Entity<RepoSettingsSheet>, Subscription)>,
     /// Fetches open repositories every few minutes, as Settings says.
     auto_fetch: Option<Task<()>>,
@@ -229,6 +233,8 @@ impl Workspace {
             accounts_events: None,
             settings_handle: DialogHandle::new(false),
             repo_settings_handle: DialogHandle::new(false),
+            clean_up_handle: DialogHandle::new(false),
+            clean_up: None,
             repo_settings: None,
             settings: None,
             auto_fetch: None,
@@ -978,6 +984,70 @@ impl Workspace {
         self.repo_settings = Some((sheet, events));
         self.repo_settings_handle.open(window, cx);
         cx.notify();
+    }
+
+    /// Opens Clean Up Branches for the active repository.
+    pub fn show_clean_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = self.active_model().filter(|_| !self.welcome).cloned() else {
+            return;
+        };
+        let dialog = cx.new(|cx| CleanUpDialog::new(model, cx));
+        let events = cx.subscribe_in(
+            &dialog,
+            window,
+            |this, _, event: &CleanUpEvent, window, cx| match event {
+                CleanUpEvent::Done => {
+                    this.clean_up_handle.close(window, cx);
+                    this.clean_up = None;
+                    cx.notify();
+                }
+            },
+        );
+        self.clean_up = Some((dialog, events));
+        self.clean_up_handle.open(window, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn clean_up_dialog(&self) -> Option<&Entity<CleanUpDialog>> {
+        self.clean_up.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    fn on_clean_up(
+        &mut self,
+        _: &commands::CleanUpBranches,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_clean_up(window, cx);
+    }
+
+    fn render_clean_up(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement + use<> {
+        let popup = dialog_popup("workspace.clean-up.popup", "Clean Up Branches", cx)
+            .max_w(px(480.))
+            .when_some(
+                self.clean_up.as_ref().map(|(dialog, _)| dialog.clone()),
+                gpui_kit::ParentElement::child,
+            );
+        let this = cx.entity().downgrade();
+        dialog(
+            "workspace.clean-up",
+            &self.clean_up_handle,
+            popup,
+            window,
+            cx,
+        )
+        .on_cancel(move |_, _, cx| {
+            let _ = this.update(cx, |workspace, cx| {
+                workspace.clean_up = None;
+                cx.notify();
+            });
+            true
+        })
     }
 
     #[must_use]
@@ -2847,6 +2917,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::on_refresh))
             .on_action(cx.listener(Self::on_undo))
             .on_action(cx.listener(Self::on_repo_settings))
+            .on_action(cx.listener(Self::on_clean_up))
             .on_action(cx.listener(Self::on_apply_patch))
             .on_action(cx.listener(Self::on_redo))
             .on_action(cx.listener(Self::on_commit))
@@ -2888,6 +2959,7 @@ impl Render for Workspace {
             .child(self.render_accounts(window, cx))
             .child(self.render_settings(window, cx))
             .child(self.render_repo_settings(window, cx))
+            .child(self.render_clean_up(window, cx))
             .child(self.render_publish(window, cx))
             .child(self.render_create_pull(window, cx))
             .child(self.render_new_issue(window, cx))

@@ -4,6 +4,23 @@ use std::{ffi::OsString, path::PathBuf};
 
 use crate::{Error, Repository, Result};
 
+/// Why a branch looks ready to delete.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StaleReason {
+    /// Every commit on it is in the base branch.
+    Merged,
+    /// Its upstream branch was deleted on the remote, usually after its pull
+    /// request merged; its commits may not be in the base branch.
+    UpstreamGone,
+}
+
+/// A local branch that looks ready to delete.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StaleBranch {
+    pub name: String,
+    pub reason: StaleReason,
+}
+
 /// Whether `name` is a valid branch or tag name under Git's ref rules
 /// (`git check-ref-format`), so dialogs can validate as the user types.
 #[must_use]
@@ -118,6 +135,54 @@ impl Repository {
     /// commits are not merged; check [`Error::is_not_fully_merged`].
     pub fn delete_branch(&self, name: &str, force: bool) -> Result<()> {
         self.run_args(["branch", if force { "-D" } else { "-d" }, "--", name])
+    }
+
+    /// Local branches that can probably go: those whose commits are all in
+    /// `base`, and those whose upstream was deleted on the remote. The
+    /// current branch and `base` itself are left out.
+    pub fn stale_branches(&self, base: &str) -> Result<Vec<StaleBranch>> {
+        let output = self.git().run(
+            &self
+                .git()
+                .command([
+                    "for-each-ref",
+                    "--format=%(refname:short)%00%(upstream:track)%00%(HEAD)",
+                    "refs/heads",
+                ])
+                .cwd(self.root()),
+        )?;
+        let merged = self.git().run(
+            &self
+                .git()
+                .command(["branch", "--format=%(refname:short)", "--merged", base])
+                .cwd(self.root()),
+        )?;
+        let merged = merged.stdout_lossy();
+        let merged: Vec<&str> = merged.lines().map(str::trim).collect();
+        let mut stale = Vec::new();
+        for line in output.stdout_lossy().lines() {
+            let mut fields = line.split('\0');
+            let (Some(name), Some(track), Some(head)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            if name == base || head == "*" {
+                continue;
+            }
+            let reason = if merged.contains(&name) {
+                StaleReason::Merged
+            } else if track == "[gone]" {
+                StaleReason::UpstreamGone
+            } else {
+                continue;
+            };
+            stale.push(StaleBranch {
+                name: name.to_owned(),
+                reason,
+            });
+        }
+        Ok(stale)
     }
 
     /// Switches to a local branch. Check [`Error::checkout_blocker`] when

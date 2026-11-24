@@ -270,6 +270,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "repository.scan-history",
         "edit.undo",
         "repository.settings",
+        "repository.clean-up-branches",
         "repository.apply-patch",
         "edit.redo",
         "repository.bisect",
@@ -372,6 +373,59 @@ fn clones_from_a_url_and_opens_the_result(cx: &mut TestAppContext) {
         assert!(workspace.clone_dialog().is_none());
     });
     assert!(parent.join("source/README.md").exists());
+}
+
+#[gpui_kit::test]
+fn cleans_up_merged_branches_in_one_undoable_step(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = repository(dir.path(), "mill");
+    let git = Git::locate(None).unwrap();
+    for args in [
+        vec!["commit", "-q", "--allow-empty", "-m", "first"],
+        vec!["branch", "done"],
+        vec!["branch", "also-done"],
+    ] {
+        let mut full = vec![
+            "-c",
+            "user.name=Ada Lovelace",
+            "-c",
+            "user.email=ada@example.com",
+            "-c",
+            "commit.gpgsign=false",
+        ];
+        full.extend(args);
+        git.run(&git.command(full).cwd(&root)).unwrap();
+    }
+    let (workspace, cx) = setup(cx, Session::default(), None);
+    workspace.update(cx, |workspace, cx| {
+        workspace.open_paths(std::slice::from_ref(&root), cx);
+    });
+    cx.run_until_parked();
+
+    cx.dispatch_action(commands::CleanUpBranches);
+    cx.run_until_parked();
+    let dialog = workspace.read_with(cx, |workspace, _| {
+        workspace.clean_up_dialog().cloned().unwrap()
+    });
+    dialog.read_with(cx, |dialog, _| {
+        let names: Vec<&str> = dialog.branches().iter().map(|b| b.name.as_str()).collect();
+        assert_eq!(names, ["also-done", "done"]);
+        assert_eq!(dialog.selected().len(), 2);
+    });
+    dialog.update(cx, |dialog, cx| dialog.toggle("done", cx));
+    dialog.update(cx, super::clean_up::CleanUpDialog::delete);
+    cx.run_until_parked();
+    workspace.read_with(cx, |workspace, _| {
+        assert!(workspace.clean_up_dialog().is_none());
+    });
+    let branches = git
+        .run(
+            &git.command(["branch", "--format=%(refname:short)"])
+                .cwd(&root),
+        )
+        .unwrap()
+        .stdout_lossy();
+    assert_eq!(branches, "done\nmain\n");
 }
 
 #[gpui_kit::test]

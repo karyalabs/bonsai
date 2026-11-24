@@ -89,6 +89,13 @@ trailer at the end of its message, which GitHub and GitLab show beside the
 author. Bonsai offers the people who recently committed to the repository.
 _Avoid_: Pair, contributor
 
+**Stale branch**:
+A local branch Clean Up Branches offers to delete: one merged into the main
+branch (`main`, `master`, `trunk` or `develop`), or one whose upstream was
+deleted on the remote ("gone"). Merged ones are ticked by default; gone ones
+may hold unmerged commits, so they aren't. Deleting is local and undoable.
+_Avoid_: Dead branch, old branch
+
 **Bisect**:
 A binary search through history for the first commit with a problem. The
 person marks one bad and one good commit, then each commit Git checks out as
