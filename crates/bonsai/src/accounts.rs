@@ -166,6 +166,16 @@ fn read(path: &Path) -> Vec<Connected> {
         .unwrap_or_default()
 }
 
+/// Each signed-in account's web host and provider, from the accounts file,
+/// so links to a self-hosted server know which site it is.
+#[must_use]
+pub fn account_hosts(path: &Path) -> Vec<(String, bonsai_providers::ProviderKind)> {
+    read(path)
+        .into_iter()
+        .map(|c| (c.account.host.to_ascii_lowercase(), c.account.kind))
+        .collect()
+}
+
 /// What askpass may answer for, from the accounts file.
 #[must_use]
 pub fn askpass_accounts(path: &Path) -> Vec<AccountRef> {

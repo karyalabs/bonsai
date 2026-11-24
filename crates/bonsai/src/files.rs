@@ -807,7 +807,7 @@ impl FilesView {
             );
         }
         let snapshot = self.model.read(cx).snapshot();
-        let web = snapshot.and_then(crate::web::repository_web);
+        let web = snapshot.and_then(|s| crate::web::repository_web(s, cx));
         let revision = match &self.revision {
             Some(revision) => Some(revision.spec.clone()),
             None => snapshot.and_then(crate::web::work_tree_revision),
