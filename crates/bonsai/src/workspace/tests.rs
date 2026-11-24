@@ -219,6 +219,17 @@ fn files_browses_a_commit_from_history(cx: &mut TestAppContext) {
         _ => panic!("shows the committed text, not the work tree"),
     });
 
+    // Restore This Version brings the deleted file back into the work tree.
+    files.update(cx, |files, cx| {
+        files.restore(first.clone(), "notes.md".into(), cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        std::fs::read_to_string(path.join("notes.md")).unwrap(),
+        "first\n"
+    );
+    std::fs::remove_file(path.join("notes.md")).unwrap();
+
     files.update(cx, |files, cx| files.set_revision(None, cx));
     cx.run_until_parked();
     files.read_with(cx, |files, _| {

@@ -163,3 +163,38 @@ fn ten_thousand_changes_stage_in_one_call() {
     assert!(snapshot.changes.iter().all(bonsai_git::Change::is_staged));
     assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
 }
+
+#[test]
+fn restores_a_file_as_an_earlier_commit_had_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
+    let file = dir.path().join("notes.txt");
+    std::fs::write(&file, "first\n").unwrap();
+    commit_all(dir.path(), "first");
+    std::fs::write(&file, "second\n").unwrap();
+    commit_all(dir.path(), "second");
+    std::fs::remove_file(&file).unwrap();
+    commit_all(dir.path(), "remove");
+
+    // A file the work tree no longer has comes back as untracked.
+    repository
+        .restore_from("HEAD~2", &[PathBuf::from("notes.txt")])
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "first\n");
+    assert_eq!(
+        kinds(&repository),
+        [("notes.txt".to_owned(), ChangeKind::Untracked)]
+    );
+
+    // A tracked file changes in the work tree only.
+    std::fs::write(dir.path().join("other.txt"), "now\n").unwrap();
+    commit_all(dir.path(), "other");
+    std::fs::write(dir.path().join("other.txt"), "edited\n").unwrap();
+    repository
+        .restore_from("HEAD", &[PathBuf::from("other.txt")])
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("other.txt")).unwrap(),
+        "now\n"
+    );
+}
