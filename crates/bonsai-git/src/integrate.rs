@@ -159,6 +159,14 @@ impl Repository {
         self.integrate(vec!["revert".into(), "--no-edit".into(), commit.into()])
     }
 
+    /// Creates a commit undoing each of `commits`, in the order given:
+    /// newest first, so each revert applies cleanly on top of the last.
+    pub fn revert_commits(&self, commits: &[&str]) -> Result<Integration> {
+        let mut args: Vec<OsString> = vec!["revert".into(), "--no-edit".into()];
+        args.extend(commits.iter().map(OsString::from));
+        self.integrate(args)
+    }
+
     /// Moves the current branch to `revision`.
     pub fn reset(&self, revision: &str, mode: ResetMode) -> Result<()> {
         let mode = match mode {

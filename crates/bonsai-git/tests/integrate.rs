@@ -205,3 +205,36 @@ fn cherry_picks_reverts_and_resets() {
     assert_eq!(repository.in_progress(), None);
     assert_eq!(subjects(root)[0], "main again");
 }
+
+#[test]
+fn cherry_picks_and_reverts_several_commits() {
+    let (dir, repository) = repo();
+    let root = dir.path();
+    run(root, &["switch", "-qc", "topic"]);
+    commit(root, "b.txt", "b\n", "add b");
+    commit(root, "b.txt", "b2\n", "edit b");
+    let picks: Vec<String> = run(root, &["rev-list", "--reverse", "main..topic"])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    run(root, &["switch", "-q", "main"]);
+    let oldest_first: Vec<&str> = picks.iter().map(String::as_str).collect();
+    assert_eq!(
+        repository.cherry_pick(&oldest_first).unwrap(),
+        Integration::Completed
+    );
+    assert_eq!(subjects(root), ["edit b", "add b", "base"]);
+
+    // Newest first, so the second revert applies on top of the first.
+    let newest_first: Vec<String> = run(root, &["rev-list", "-2", "HEAD"])
+        .lines()
+        .map(str::to_owned)
+        .collect();
+    let newest_first: Vec<&str> = newest_first.iter().map(String::as_str).collect();
+    assert_eq!(
+        repository.revert_commits(&newest_first).unwrap(),
+        Integration::Completed
+    );
+    assert!(!root.join("b.txt").exists());
+    assert_eq!(subjects(root).len(), 5);
+}
