@@ -132,9 +132,15 @@ pub struct Undo {
     pub steps: Vec<UndoStep>,
 }
 
+/// The reflog action of amending an earlier commit, which undoes like a
+/// commit.
+pub(crate) const AMEND_ACTION: &str = "amend earlier commit";
+
 fn is_commit(reflog: Option<&str>) -> bool {
     reflog.is_some_and(|message| {
-        message.starts_with("commit: ") || message.starts_with("commit (amend): ")
+        message.starts_with("commit: ")
+            || message.starts_with("commit (amend): ")
+            || message.starts_with(AMEND_ACTION)
     })
 }
 

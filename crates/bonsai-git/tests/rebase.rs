@@ -136,3 +136,58 @@ fn edits_from_the_first_commit() {
     f.repository.rebase_interactive(None, &steps).unwrap();
     assert_eq!(f.subjects(), ["base"]);
 }
+
+#[test]
+fn amends_an_earlier_commit_with_the_staged_changes() {
+    let f = Fixture::new();
+    let two = f.run(&["rev-parse", "HEAD~3"]).trim().to_owned();
+    std::fs::write(f.root.join("two.txt"), "two, amended").unwrap();
+    std::fs::write(f.root.join("five.txt"), "five, not staged").unwrap();
+    f.run(&["add", "two.txt"]);
+
+    let result = f.repository.amend_commit(&two).unwrap();
+
+    assert_eq!(result, Integration::Completed);
+    assert_eq!(
+        f.subjects(),
+        ["base", "one", "two", "three", "four", "five"]
+    );
+    assert_eq!(f.run(&["show", "HEAD~3:two.txt"]), "two, amended");
+    // Unstaged work is put back as it was.
+    assert_eq!(
+        std::fs::read_to_string(f.root.join("five.txt")).unwrap(),
+        "five, not staged"
+    );
+    assert_eq!(f.run(&["diff", "--cached", "--name-only"]), "");
+}
+
+#[test]
+fn amends_the_last_commit_and_the_first() {
+    let f = Fixture::new();
+    std::fs::write(f.root.join("five.txt"), "five, amended").unwrap();
+    f.run(&["add", "."]);
+    f.repository.amend_commit("HEAD").unwrap();
+    assert_eq!(f.run(&["show", "HEAD:five.txt"]), "five, amended");
+    assert_eq!(f.subjects().len(), 6);
+
+    let root = f
+        .run(&["rev-list", "--max-parents=0", "HEAD"])
+        .trim()
+        .to_owned();
+    std::fs::write(f.root.join("base.txt"), "base, amended").unwrap();
+    f.run(&["add", "."]);
+    f.repository.amend_commit(&root).unwrap();
+    assert_eq!(f.run(&["show", "HEAD~5:base.txt"]), "base, amended");
+    assert_eq!(
+        f.subjects(),
+        ["base", "one", "two", "three", "four", "five"]
+    );
+}
+
+#[test]
+fn refuses_to_amend_with_nothing_staged() {
+    let f = Fixture::new();
+    let error = f.repository.amend_commit("HEAD~2").unwrap_err();
+    assert!(error.to_string().contains("Nothing is staged"), "{error}");
+    assert_eq!(f.subjects().len(), 6);
+}

@@ -164,3 +164,26 @@ fn refuses_once_the_branch_has_moved() {
     assert!(error.contains("has changed since"), "{error}");
     assert!(root.join("c.txt").exists());
 }
+
+#[test]
+fn undoes_amending_an_earlier_commit_keeping_the_changes_staged() {
+    let (dir, repository) = repo();
+    let root = dir.path();
+    commit(root, "b.txt", "b\n", "Add b");
+    commit(root, "c.txt", "c\n", "Add c");
+    let before = run(root, &["rev-parse", "HEAD"]);
+    std::fs::write(root.join("b.txt"), "b, amended\n").unwrap();
+    run(root, &["add", "b.txt"]);
+    let undo = undoable(&repository, |r| {
+        r.amend_commit("HEAD~1").unwrap();
+    });
+    assert_eq!(run(root, &["show", "HEAD~1:b.txt"]), "b, amended\n");
+
+    repository.apply_undo(&undo).unwrap().expect("redoable");
+    assert_eq!(run(root, &["rev-parse", "HEAD"]), before);
+    assert_eq!(status(root), "M  b.txt\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("b.txt")).unwrap(),
+        "b, amended\n"
+    );
+}

@@ -89,6 +89,14 @@ trailer at the end of its message, which GitHub and GitLab show beside the
 author. Bonsai offers the people who recently committed to the repository.
 _Avoid_: Pair, contributor
 
+**Amend**:
+Folding the staged changes into a commit, keeping its message. For the last
+commit that is `git commit --amend`; for an earlier one on the current branch
+(History > Amend with Staged Changes), a fixup commit squashed in by an
+interactive rebase, which rewrites the commits after it. Undoing it leaves
+the changes staged again.
+_Avoid_: Fixup (Git's word for the mechanism)
+
 **Stale branch**:
 A local branch Clean Up Branches offers to delete: one merged into the main
 branch (`main`, `master`, `trunk` or `develop`), or one whose upstream was
