@@ -2452,6 +2452,18 @@ impl Render for RefsPanel {
                 );
             }
         }
+        // Rows set the menu's entries as a right press bubbles up from them.
+        // Clearing them first, as the press comes down, keeps a heading or
+        // gap from reopening the last row's menu.
+        let list = div()
+            .capture_any_mouse_down(
+                cx.listener(|this, event: &gpui_kit::MouseDownEvent, _, cx| {
+                    if event.button == MouseButton::Right {
+                        this.set_menu(Vec::new(), cx);
+                    }
+                }),
+            )
+            .child(list);
         div()
             .child(context_menu(&self.menu, "Branch actions", list))
             .child(self.render_dialog(window, cx))
