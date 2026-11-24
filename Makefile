@@ -13,6 +13,7 @@ test:
 	cargo test --workspace --locked --features bonsai/runtime_shaders
 
 check:
+	./script/release_notes.sh --check
 	cargo fmt --all -- --check
 	cargo clippy --workspace --all-targets --locked --features bonsai/runtime_shaders -- -D warnings
 	cargo test --workspace --locked --features bonsai/runtime_shaders

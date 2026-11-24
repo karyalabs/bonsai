@@ -57,4 +57,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # The version in Cargo.toml must have release notes in CHANGELOG.md,
+      # so a version bump can't merge without them.
+      - run: ./script/release_notes.sh --check
       - run: cargo test --locked -p bonsai-git -p bonsai-graph -p bonsai-providers -p bonsai-keychain

@@ -29,17 +29,31 @@ repository-level secrets.
 `make release-github-doctor` checks the environment, its reviewers and the
 secrets' names, without showing their values.
 
+## Release notes
+
+Every release's notes come from its section of `CHANGELOG.md`, a
+`## <version> (date)` heading with what's new and fixed, grouped by feature,
+written for people using Bonsai and naming the pull requests.
+`script/release_notes.sh <version>` prints them as they will appear.
+
+CI fails while the version in `Cargo.toml` has no section, so a version bump
+can't merge without notes. Editing a released version's section on `main`
+updates its release page too: the **Release notes** workflow
+(`.github/workflows/release-notes.yml`) copies each section to its release.
+
 ## Steps
 
 Bumping the version is the release, as in gpuicn and Matty:
 
-1. Bump `version` in `Cargo.toml` in a pull request, and merge it.
+1. Bump `version` in `Cargo.toml` and add its section to `CHANGELOG.md` in a
+   pull request, and merge it.
 2. When CI passes on that commit on `main`, **Release** runs by itself:
    - karya-karta, the Karya bot app, tags the commit `v<version>`;
    - the self-hosted Mac imports the certificate into a temporary keychain,
      builds, signs and notarizes the app and then the DMG, staples both and
      checks them with `spctl`;
-   - it publishes the GitHub release with `Bonsai.dmg` and its manifest.
+   - it publishes the GitHub release with `Bonsai.dmg`, its manifest and the
+     notes from `CHANGELOG.md`.
      Versions before 1.0 are marked as prereleases.
 
 A commit whose version is already released does nothing. If a run fails,

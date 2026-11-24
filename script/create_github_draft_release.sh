@@ -206,14 +206,10 @@ jq -r --arg tag "$RELEASE_TAG" '.[]? | select(.draft and .tag_name == $tag) | .i
     curl -sS -X DELETE "${api_headers[@]}" "$API_BASE/releases/$stale_id" >/dev/null
   done
 
+# The notes are the version's section of CHANGELOG.md; a release without
+# them doesn't go out.
 notes_path="$TEMP_ROOT/bonsai-release-notes.md"
-cat >"$notes_path" <<NOTES
-Bonsai $VERSION ($BUILD_NUMBER), a native Git client for macOS 14 and later.
-
-Download Bonsai.dmg, open it and drag Bonsai to Applications. It is signed
-with Developer ID and notarized by Apple. Bonsai.release.plist records the
-build's version, signature and checksums.
-NOTES
+"$ROOT_DIR/script/release_notes.sh" "$VERSION" >"$notes_path"
 
 create_payload="$TEMP_ROOT/bonsai-release-payload.json"
 create_response="$TEMP_ROOT/bonsai-release-response.json"
