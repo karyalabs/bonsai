@@ -22,17 +22,18 @@ use crate::{
     refs::{Checkout, RefDialog, RefsPanel},
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
-        button::{Button, ButtonVariant},
+        button::{Button, ButtonSize, ButtonVariant},
         commit_graph::{
             CommitGraph, CommitGraphState, GraphEdge, GraphLabel, GraphLabelKind, GraphNodeKind,
             GraphRow,
         },
         context_menu::context_menu,
         input::{Input, InputEvent, InputState},
-        menu::{MenuItem, MenuState},
+        menu::{Menu, MenuItem, MenuState},
         theme::UiTheme,
         virtual_list::{ListRow, ListSelectionMode, VirtualListEvent},
     },
+    workspace::title_bar::ghost_trigger,
 };
 
 /// Commits loaded per page.
@@ -65,6 +66,54 @@ pub enum HistoryEvent {
 pub struct EditCommits {
     pub base: Option<Oid>,
     pub preset: Vec<(Oid, RebaseAction)>,
+}
+
+/// Which commits History shows.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum HistoryScope {
+    /// Every branch, remote branch and tag.
+    #[default]
+    All,
+    /// The current branch, and its upstream so incoming commits show too.
+    Current,
+    /// One local branch, and its upstream.
+    Branch(String),
+}
+
+impl HistoryScope {
+    /// The refs `git log` reads for this scope.
+    #[must_use]
+    pub fn log_scope(&self, snapshot: Option<&Snapshot>) -> LogScope {
+        let with_upstream = |name: &str, start: &str| {
+            let mut refs = vec![start.to_owned()];
+            if let Some(upstream) = snapshot
+                .and_then(|s| s.branches.iter().find(|b| b.name == name))
+                .and_then(|b| b.upstream.as_ref())
+                .filter(|u| !u.gone)
+            {
+                refs.push(format!("refs/remotes/{}", upstream.name));
+            }
+            LogScope::Refs(refs)
+        };
+        match self {
+            Self::All => LogScope::All,
+            Self::Current => match snapshot.map(|s| &s.head) {
+                Some(Head::Branch { name, oid: Some(_) }) => with_upstream(name, "HEAD"),
+                _ => LogScope::Head,
+            },
+            Self::Branch(name) => with_upstream(name, &format!("refs/heads/{name}")),
+        }
+    }
+
+    /// What the picker shows.
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::All => "All Branches".to_owned(),
+            Self::Current => "Current Branch".to_owned(),
+            Self::Branch(name) => name.clone(),
+        }
+    }
 }
 
 /// What the search field asks for.
@@ -218,6 +267,8 @@ pub struct HistoryView {
     /// window.
     search_field_text: Option<String>,
     menu: Entity<MenuState>,
+    scope: HistoryScope,
+    scope_menu: Entity<MenuState>,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -303,6 +354,7 @@ impl HistoryView {
         let graph = CommitGraphState::new(Vec::new()).expect("an empty graph has no duplicates");
         graph.set_selection_mode(ListSelectionMode::Multiple);
         let menu = cx.new(|cx| MenuState::new(Vec::new(), cx));
+        let scope_menu = cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(240.)));
         let subscriptions = vec![
             cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
                 if matches!(event, RepositoryEvent::SnapshotChanged) && this.started {
@@ -329,6 +381,8 @@ impl HistoryView {
             search_input: None,
             search_field_text: None,
             menu,
+            scope: HistoryScope::All,
+            scope_menu,
             tasks: Vec::new(),
             subscriptions,
         }
@@ -394,6 +448,9 @@ impl HistoryView {
         self.generation += 1;
         let generation = self.generation;
         self.paging = Paging::Loading;
+        if skip == 0 {
+            self.rebuild_scope_menu(cx);
+        }
         let snapshot = self.model.read(cx).snapshot();
         self.refs_key = snapshot.map(refs_key);
         if skip == 0 {
@@ -401,6 +458,7 @@ impl HistoryView {
         }
         let repository = self.model.read(cx).repository().clone();
         let filter = self.search.filter.clone();
+        let scope = self.scope.log_scope(snapshot);
         // A new read for the first page; otherwise the next page of the
         // current one.
         let reader = if skip == 0 { None } else { self.reader.take() };
@@ -412,7 +470,7 @@ impl HistoryView {
         let work = cx.background_spawn(async move {
             let mut reader = match reader {
                 Some(reader) => reader,
-                None => repository.log_reader(&LogScope::All, &filter)?,
+                None => repository.log_reader(&scope, &filter)?,
             };
             let page = reader.next_page(limit)?;
             Ok::<_, bonsai_git::Error>((reader, page))
@@ -527,7 +585,9 @@ impl HistoryView {
     pub fn reveal(&mut self, oid: &Oid, cx: &mut Context<Self>) {
         self.started = true;
         self.search_field_text = Some(String::new());
-        let had_filter = !self.search.filter.is_empty();
+        // A commit outside the chosen branch would never page in.
+        let had_filter = !self.search.filter.is_empty() || self.scope != HistoryScope::All;
+        self.scope = HistoryScope::All;
         self.search = Search {
             filter: LogFilter::default(),
             hash: Some(oid.as_str().to_owned()),
@@ -538,6 +598,70 @@ impl HistoryView {
         } else if !self.reveal_hash(oid.as_str(), cx) && self.paging != Paging::End {
             self.load(self.commits.len(), PAGE, cx);
         }
+    }
+
+    /// Shows the commits of `scope` only.
+    pub fn set_scope(&mut self, scope: HistoryScope, cx: &mut Context<Self>) {
+        if scope == self.scope {
+            return;
+        }
+        self.scope = scope;
+        self.started = true;
+        self.paging = Paging::More;
+        self.load(0, PAGE, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn scope(&self) -> &HistoryScope {
+        &self.scope
+    }
+
+    /// The scope picker: every branch, the current one, or a local branch.
+    fn rebuild_scope_menu(&mut self, cx: &mut Context<Self>) {
+        let this = cx.entity().downgrade();
+        let pick = |scope: HistoryScope| {
+            let this = this.clone();
+            move |_: &gpui_kit::ClickEvent, _: &mut Window, cx: &mut gpui_kit::App| {
+                let scope = scope.clone();
+                let _ = this.update(cx, |view, cx| view.set_scope(scope, cx));
+            }
+        };
+        let current = self.scope.clone();
+        let mut items = vec![
+            MenuItem::new("history.scope.all", "All Branches")
+                .icon(LucideIcon::GitFork)
+                .checked(current == HistoryScope::All)
+                .on_click(pick(HistoryScope::All)),
+            MenuItem::new("history.scope.current", "Current Branch")
+                .icon(LucideIcon::GitBranch)
+                .checked(current == HistoryScope::Current)
+                .on_click(pick(HistoryScope::Current)),
+        ];
+        let branches: Vec<String> = self
+            .model
+            .read(cx)
+            .snapshot()
+            .map(|s| s.branches.iter().map(|b| b.name.clone()).collect())
+            .unwrap_or_default();
+        if !branches.is_empty() {
+            items.push(MenuItem::separator());
+            items.push(MenuItem::label("history.scope.branches", "Branches"));
+        }
+        for name in branches {
+            let scope = HistoryScope::Branch(name.clone());
+            items.push(
+                MenuItem::new(
+                    SharedString::from(format!("history.scope.branch.{name}")),
+                    name,
+                )
+                .icon(LucideIcon::GitBranch)
+                .checked(current == scope)
+                .on_click(pick(scope)),
+            );
+        }
+        self.scope_menu
+            .update(cx, |menu, cx| menu.set_items(items, cx));
     }
 
     /// Searches for `text` and shows it in the search field.
@@ -1233,6 +1357,34 @@ impl Render for HistoryView {
                     .border_b_1()
                     .border_color(c.border)
                     .child(
+                        Menu::new(&self.scope_menu, "Show commits from")
+                            .trigger_style_with(ghost_trigger(&theme, ButtonSize::Sm))
+                            .trigger(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .max_w(px(180.))
+                                    .child(
+                                        gpui_icons::lucide(if self.scope == HistoryScope::All {
+                                            LucideIcon::GitFork
+                                        } else {
+                                            LucideIcon::GitBranch
+                                        })
+                                        .size(px(14.))
+                                        .flex_none()
+                                        .text_color(c.foreground),
+                                    )
+                                    .child(div().min_w_0().truncate().child(self.scope.label()))
+                                    .child(
+                                        gpui_icons::lucide(LucideIcon::ChevronDown)
+                                            .size(px(12.))
+                                            .flex_none()
+                                            .text_color(c.muted_foreground),
+                                    ),
+                            ),
+                    )
+                    .child(
                         div()
                             .flex_1()
                             .child(Input::new(&search).aria_label("Search history")),
@@ -1311,6 +1463,51 @@ mod tests {
             author_time: 0,
             summary: oid.into(),
         }
+    }
+
+    #[test]
+    fn a_branch_scope_reads_the_branch_and_its_upstream() {
+        use bonsai_git::{Branch, Tracking};
+        let branch = |name: &str, upstream: Option<&str>, is_head: bool| Branch {
+            name: name.into(),
+            oid: Oid::new("a".repeat(40)),
+            is_head,
+            upstream: upstream.map(|u| Tracking {
+                name: u.into(),
+                gone: false,
+                ahead: 0,
+                behind: 0,
+            }),
+        };
+        let snapshot = Snapshot {
+            head: Head::Branch {
+                name: "main".into(),
+                oid: Some(Oid::new("a".repeat(40))),
+            },
+            changes: Vec::new(),
+            branches: vec![
+                branch("main", Some("origin/main"), true),
+                branch("topic", None, false),
+            ],
+            remote_branches: Vec::new(),
+            tags: Vec::new(),
+            remotes: Vec::new(),
+            stashes: Vec::new(),
+            worktrees: Vec::new(),
+            submodules: Vec::new(),
+            operation: None,
+        };
+        let refs = |list: &[&str]| LogScope::Refs(list.iter().map(|r| (*r).to_owned()).collect());
+        assert_eq!(HistoryScope::All.log_scope(Some(&snapshot)), LogScope::All);
+        assert_eq!(
+            HistoryScope::Current.log_scope(Some(&snapshot)),
+            refs(&["HEAD", "refs/remotes/origin/main"])
+        );
+        assert_eq!(
+            HistoryScope::Branch("topic".into()).log_scope(Some(&snapshot)),
+            refs(&["refs/heads/topic"])
+        );
+        assert_eq!(HistoryScope::Current.log_scope(None), LogScope::Head);
     }
 
     #[test]
