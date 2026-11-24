@@ -858,6 +858,11 @@ impl HistoryView {
             }
         };
         let browse = oid.clone();
+        let web = self
+            .model
+            .read(cx)
+            .snapshot()
+            .and_then(crate::web::repository_web);
         let mut items = vec![
             MenuItem::new("history.browse", "Browse Files")
                 .icon(LucideIcon::FolderTree)
@@ -1011,6 +1016,15 @@ impl HistoryView {
                 .icon(LucideIcon::RotateCcw),
             ]);
             items.extend(self.edit_items(&commit, cx));
+        }
+        if let Some(web) = web {
+            let url = web.commit(&hash);
+            items.insert(
+                2,
+                MenuItem::new("history.open-web", web.open_label())
+                    .icon(LucideIcon::ExternalLink)
+                    .on_click(move |_, _, cx| cx.open_url(&url)),
+            );
         }
         self.menu.update(cx, |menu, cx| menu.set_items(items, cx));
     }

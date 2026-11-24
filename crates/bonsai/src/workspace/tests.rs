@@ -245,6 +245,7 @@ fn every_palette_command_is_handled_by_the_workspace() {
         "app.accounts",
         "app.settings",
         "repository.terminal",
+        "repository.open-web",
         "file.clone",
         "file.new-tab",
         "file.close-tab",

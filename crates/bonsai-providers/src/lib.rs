@@ -9,6 +9,7 @@ mod http;
 mod oauth;
 mod remote_url;
 mod types;
+mod web_links;
 
 pub use bitbucket::{Bitbucket, BitbucketCredential};
 pub use github::{DeviceCode, DevicePoll, GitHub};
@@ -22,3 +23,4 @@ pub use types::{
     NewIssue, NewPullRequest, NewRepository, Page, Person, Provider, ProviderKind, PullRequest,
     RemoteRepository, RepositoryQuery, Result, StateFilter, Verdict, count_lines,
 };
+pub use web_links::WebRepository;
