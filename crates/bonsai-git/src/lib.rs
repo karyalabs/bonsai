@@ -40,7 +40,7 @@ mod worktrees;
 
 pub use bisect::{BisectCommit, BisectState, BisectVerdict};
 pub use blame::{Blame, BlameCommit, BlameLine, parse_porcelain};
-pub use branch::{CheckoutBlocker, is_valid_ref_name};
+pub use branch::{CheckoutBlocker, StaleBranch, StaleReason, is_valid_ref_name};
 pub use clone::{CloneProgress, clone_name};
 pub use commit::Signing;
 pub use compare::Comparison;

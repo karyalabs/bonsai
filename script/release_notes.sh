@@ -15,6 +15,23 @@ cargo_version() {
   awk -F'"' '/^\[workspace.package\]/ { s = 1; next } /^\[/ { s = 0 } s && /^version *=/ { print $2; exit }' "$ROOT_DIR/Cargo.toml"
 }
 
+# Joins hard-wrapped lines, as GitHub shows every line break in release
+# notes: a line that continues a paragraph or a list item goes onto the line
+# before it.
+unwrap() {
+  awk '
+    function flush() { if (held != "") print held; held = "" }
+    /^[[:space:]]*$/ { flush(); print; next }
+    /^(#|- |\* |[0-9]+\. |---)/ { flush(); held = $0; next }
+    {
+      text = $0
+      sub(/^[[:space:]]+/, "", text)
+      if (held == "") held = text; else held = held " " text
+    }
+    END { flush() }
+  '
+}
+
 # The lines under "## <version> …", up to the next "## " heading, with
 # leading and trailing blank lines removed.
 section() {
@@ -22,7 +39,7 @@ section() {
     /^## / { inside = ($2 == version); next }
     inside { line[++n] = $0; if (NF) { if (!first) first = n; last = n } }
     END { for (i = first; first && i <= last; i++) print line[i] }
-  ' "$CHANGELOG"
+  ' "$CHANGELOG" | unwrap
 }
 
 case "${1:-}" in

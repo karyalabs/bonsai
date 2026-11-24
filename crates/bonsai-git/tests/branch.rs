@@ -197,3 +197,40 @@ fn tracks_remote_branches_and_pushes_tags() {
     repository.delete_tag("light").unwrap();
     assert_eq!(repository.snapshot().unwrap().tags.len(), 1);
 }
+
+#[test]
+fn finds_merged_branches_and_ones_whose_upstream_is_gone() {
+    use bonsai_git::{StaleBranch, StaleReason};
+    let (dir, repository) = repo();
+    let root = dir.path();
+    let remote = tempfile::tempdir().unwrap();
+    run(remote.path(), &["init", "-q", "--bare"]);
+    run(
+        root,
+        &["remote", "add", "origin", &remote.path().to_string_lossy()],
+    );
+
+    run(root, &["branch", "done"]);
+    run(root, &["switch", "-q", "-c", "gone"]);
+    commit(root, "b.txt", "b\n", "gone work");
+    run(root, &["push", "-q", "-u", "origin", "gone"]);
+    run(root, &["switch", "-q", "-c", "wip", "main"]);
+    commit(root, "c.txt", "c\n", "wip work");
+    run(root, &["switch", "-q", "main"]);
+    run(remote.path(), &["branch", "-D", "gone"]);
+    run(root, &["fetch", "-q", "--prune", "origin"]);
+
+    assert_eq!(
+        repository.stale_branches("main").unwrap(),
+        [
+            StaleBranch {
+                name: "done".into(),
+                reason: StaleReason::Merged,
+            },
+            StaleBranch {
+                name: "gone".into(),
+                reason: StaleReason::UpstreamGone,
+            },
+        ]
+    );
+}
