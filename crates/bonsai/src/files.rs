@@ -21,7 +21,7 @@ use gpui_kit::{
 use crate::{
     blame_view::{BlameEvent, BlameView},
     file_icon::file_icon,
-    repository::{RepositoryEvent, RepositoryModel},
+    repository::{RepositoryEvent, RepositoryModel, UndoHints},
     ui::{
         button::{Button, ButtonSize, ButtonVariant},
         context_menu::context_menu,
@@ -806,6 +806,21 @@ impl FilesView {
                     .on_click(move |_, _, cx| cx.open_with_system(&absolute)),
             );
         }
+        if let Some(revision) = &self.revision {
+            let spec = revision.spec.clone();
+            let restore = path.clone();
+            items.push(
+                MenuItem::new("files.restore", "Restore This Version")
+                    .icon(LucideIcon::ArchiveRestore)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let (spec, path) = (spec.clone(), restore.clone());
+                            let _ = this.update(cx, |view, cx| view.restore(spec, path, cx));
+                        }
+                    }),
+            );
+        }
         let snapshot = self.model.read(cx).snapshot();
         let web = snapshot.and_then(|s| crate::web::repository_web(s, cx));
         let revision = match &self.revision {
@@ -836,6 +851,24 @@ impl FilesView {
             model.run(
                 name,
                 move |repository| repository.stop_tracking(&[path]),
+                cx,
+            );
+        });
+    }
+
+    /// Puts `path` in the work tree back to how `revision` has it. The
+    /// current file is saved first, so ⌘Z brings it back.
+    pub fn restore(&mut self, revision: String, path: PathBuf, cx: &mut Context<Self>) {
+        let name = format!("Restore {}", path.to_string_lossy());
+        let hints = UndoHints {
+            backup: vec![path.clone()],
+            reset: None,
+        };
+        self.model.update(cx, |model, cx| {
+            model.run_with(
+                name,
+                hints,
+                move |repository| repository.restore_from(&revision, &[path]),
                 cx,
             );
         });

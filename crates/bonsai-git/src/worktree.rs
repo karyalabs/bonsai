@@ -135,6 +135,14 @@ impl Repository {
         self.run_with_paths(&["restore", "--worktree"], paths)
     }
 
+    /// Puts these paths in the work tree back to how `revision` has them,
+    /// leaving the index alone, so Changes shows the difference as
+    /// unstaged edits.
+    pub fn restore_from(&self, revision: &str, paths: &[PathBuf]) -> Result<()> {
+        let source = format!("--source={revision}");
+        self.run_with_paths(&["restore", source.as_str(), "--worktree"], paths)
+    }
+
     /// Deletes these untracked files from disk.
     pub fn delete_untracked(&self, paths: &[PathBuf]) -> Result<()> {
         if paths.is_empty() {
