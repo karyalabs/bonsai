@@ -1,0 +1,44 @@
+name: Release notes
+
+# Keeps every published release's notes the same as its section of
+# CHANGELOG.md, so fixing or filling in notes there updates the release page.
+# A new release takes its notes from CHANGELOG.md as it is published (see
+# script/create_github_draft_release.sh); this covers edits afterwards.
+on:
+  push:
+    branches: [main]
+    paths: [CHANGELOG.md, script/release_notes.sh]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-notes
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    # A few API calls with gh, as in Release's plan job.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Update release notes from CHANGELOG.md
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          notes="$RUNNER_TEMP/notes.md"
+          for version in $(./script/release_notes.sh --versions); do
+            tag="v$version"
+            current="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json body,isDraft --jq 'select(.isDraft | not) | .body' 2>/dev/null)" || {
+              echo "$tag: not released"
+              continue
+            }
+            ./script/release_notes.sh "$version" >"$notes"
+            if [[ "$current" == "$(cat "$notes")" ]]; then
+              echo "$tag: up to date"
+            else
+              gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --notes-file "$notes"
+              echo "$tag: updated"
+            fi
+          done
