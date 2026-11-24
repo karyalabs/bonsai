@@ -58,6 +58,8 @@ pub enum HistoryEvent {
     BrowseFiles(Oid),
     /// Mark this commit good or bad in a bisect, starting one if needed.
     Bisect(Oid, BisectVerdict),
+    /// Open Compare with the newer commit (second) against the older.
+    Compare(Oid, Oid),
 }
 
 /// An interactive rebase to plan: the commits after `base` (`None`: every
@@ -801,6 +803,23 @@ impl HistoryView {
                     cx.write_to_clipboard(ClipboardItem::new_string(hashes.clone()));
                 }),
         ];
+        // History lists newest first, so the second is the older one.
+        if let [newer, older] = &oids[..] {
+            let (base, head) = (older.clone(), newer.clone());
+            items.push(
+                MenuItem::new("history.compare", "Compare These Commits")
+                    .icon(LucideIcon::GitCompareArrows)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let (base, head) = (base.clone(), head.clone());
+                            let _ = this.update(cx, |_, cx| {
+                                cx.emit(HistoryEvent::Compare(base, head));
+                            });
+                        }
+                    }),
+            );
+        }
         if let Some(current) = self.current_branch(cx) {
             items.extend([
                 MenuItem::separator(),

@@ -410,6 +410,10 @@ impl Workspace {
                             this.browse_files(oid, cx);
                             return;
                         }
+                        HistoryEvent::Compare(base, head) => {
+                            this.compare(base.short().to_owned(), head.short().to_owned(), cx);
+                            return;
+                        }
                         HistoryEvent::Bisect(oid, verdict) => {
                             if let Some(tab) = this.tabs.iter().find(|t| t.model == history_model) {
                                 tab.bisect.update(cx, |bar, cx| {
@@ -1800,6 +1804,12 @@ impl Workspace {
     #[must_use]
     pub fn files_view(&self) -> Option<Entity<FilesView>> {
         self.tabs.get(self.active).map(|tab| tab.files.clone())
+    }
+
+    /// The active tab's History view.
+    #[must_use]
+    pub fn history_view(&self) -> Option<Entity<HistoryView>> {
+        self.tabs.get(self.active).map(|tab| tab.history.clone())
     }
 
     /// The active tab's view for the current section, if it is built.

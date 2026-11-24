@@ -239,6 +239,54 @@ fn files_browses_a_commit_from_history(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn history_compares_two_chosen_commits(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_owned()
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    git(&["commit", "-q", "--allow-empty", "-m", "older"]);
+    let older = bonsai_git::Oid::new(git(&["rev-parse", "HEAD"]));
+    git(&["commit", "-q", "--allow-empty", "-m", "newer"]);
+    let newer = bonsai_git::Oid::new(git(&["rev-parse", "HEAD"]));
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    cx.run_until_parked();
+
+    let history = workspace.read_with(cx, |w, _| w.history_view().unwrap());
+    history.update(cx, |_, cx| {
+        cx.emit(crate::history::HistoryEvent::Compare(
+            older.clone(),
+            newer.clone(),
+        ));
+    });
+    cx.run_until_parked();
+    let compare = workspace.read_with(cx, |w, _| {
+        assert_eq!(w.section(), Section::Compare);
+        w.compare_view().unwrap()
+    });
+    compare.read_with(cx, |compare, _| {
+        assert_eq!(compare.base(), Some(older.short()));
+        assert_eq!(compare.head(), Some(newer.short()));
+    });
+}
+
+#[gpui_kit::test]
 fn the_command_palette_opens(cx: &mut TestAppContext) {
     let (workspace, cx) = setup(cx, Session::default(), None);
     cx.dispatch_action(commands::ShowCommandPalette);
