@@ -78,6 +78,11 @@ fn image_format(path: &std::path::Path) -> Option<ImageFormat> {
     })
 }
 
+/// Why a commit's lines could not be reverted: the file no longer has them
+/// as that commit left them.
+const REVERT_CONFLICT: &str =
+    "These lines have changed since that commit, so they can't be reverted on their own.";
+
 /// The one file `target` shows, when it shows one.
 fn single_path(target: &DiffTarget) -> Option<PathBuf> {
     match target {
@@ -529,6 +534,9 @@ impl DiffPane {
             Some(DiffTarget::Staged(_)) => {
                 vec![DiffAction::new("unstage", "Unstage Lines").icon(LucideIcon::Minus)]
             }
+            Some(DiffTarget::Commit(_)) => {
+                vec![DiffAction::new("revert", "Revert Lines").icon(LucideIcon::Undo2)]
+            }
             _ => Vec::new(),
         };
         if self.target.is_some() {
@@ -553,7 +561,7 @@ impl DiffPane {
     }
 
     /// The gutter button beside each hunk: Stage for unstaged changes,
-    /// Unstage for staged ones.
+    /// Unstage for staged ones, Revert for a commit's.
     fn hunk_action(&self) -> Option<DiffAction> {
         if self.whitespace != Whitespace::Show {
             return None;
@@ -564,6 +572,9 @@ impl DiffPane {
             }
             Some(DiffTarget::Staged(_)) => {
                 Some(DiffAction::new("unstage", "Unstage Hunk").icon(LucideIcon::Minus))
+            }
+            Some(DiffTarget::Commit(_)) => {
+                Some(DiffAction::new("revert", "Revert Hunk").icon(LucideIcon::Undo2))
             }
             _ => None,
         }
@@ -588,7 +599,7 @@ impl DiffPane {
         let mode = match intent.action.as_ref() {
             "stage" => ApplyMode::Stage,
             "unstage" => ApplyMode::Unstage,
-            "discard" => ApplyMode::Discard,
+            "discard" | "revert" => ApplyMode::Discard,
             _ => return,
         };
         let Some(partial) = self.partial(range, mode) else {
@@ -597,6 +608,10 @@ impl DiffPane {
             return;
         };
         self.error = None;
+        if intent.action.as_ref() == "revert" {
+            self.revert(partial, PathBuf::from(range.path().as_ref()), cx);
+            return;
+        }
         if mode == ApplyMode::Discard {
             self.pending_discard = Some(partial);
             self.discard.open(window, cx);
@@ -640,6 +655,33 @@ impl DiffPane {
                 name,
                 hints,
                 move |repository| repository.apply_patch(&partial, mode),
+                cx,
+            );
+        });
+    }
+
+    /// Takes a commit's selected changes back out of the work tree, as a
+    /// revert of just those lines would. The file is saved first, so ⌘Z
+    /// puts it back.
+    fn revert(&mut self, partial: String, path: PathBuf, cx: &mut Context<Self>) {
+        let hints = UndoHints {
+            backup: vec![path],
+            reset: None,
+        };
+        self.model.update(cx, |model, cx| {
+            model.run_with(
+                "Revert lines",
+                hints,
+                move |repository| {
+                    repository
+                        .apply_patch(&partial, ApplyMode::Discard)
+                        .map_err(|error| match error {
+                            bonsai_git::Error::Failed { .. } => {
+                                bonsai_git::Error::Refused(REVERT_CONFLICT.into())
+                            }
+                            other => other,
+                        })
+                },
                 cx,
             );
         });
@@ -1909,6 +1951,85 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(run(&["show", ":f.txt"]), "a\nb\nc\n");
+    }
+
+    #[gpui_kit::test]
+    fn reverts_chosen_lines_of_a_commit(cx: &mut TestAppContext) {
+        use crate::ui::diff::DiffIntent;
+        use gpui_kit::component::diff::{DiffLineRange, DiffSide};
+
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::locate(None).unwrap();
+        let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+        let run = |args: &[&str]| {
+            git.run(&git.command(args.iter().copied()).cwd(dir.path()))
+                .unwrap()
+                .stdout_lossy()
+        };
+        run(&["config", "user.name", "Ada"]);
+        run(&["config", "user.email", "ada@example.com"]);
+        let file = dir.path().join("f.txt");
+        std::fs::write(&file, "a\nb\nc\n").unwrap();
+        run(&["add", "."]);
+        run(&["-c", "commit.gpgsign=false", "commit", "-qm", "base"]);
+        std::fs::write(&file, "a\nX\nb\nY\nc\n").unwrap();
+        run(&[
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qam",
+            "add X and Y",
+        ]);
+        let added = Oid::new(run(&["rev-parse", "HEAD"]).trim());
+        // A later commit, so the revert lands on a file that moved on.
+        std::fs::write(&file, "a\nX\nb\nY\nc\nd\n").unwrap();
+        run(&["-c", "commit.gpgsign=false", "commit", "-qam", "add d"]);
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (pane, cx) = cx.add_window_view(|_, cx| DiffPane::new(model.clone(), cx));
+        cx.run_until_parked();
+        pane.update(cx, |pane, cx| {
+            pane.show(Some(DiffTarget::Commit(added)), "add X and Y".into(), cx);
+        });
+        cx.run_until_parked();
+        let intent = |line: usize| DiffIntent {
+            action: "revert".into(),
+            path: "f.txt".into(),
+            range: Some(DiffLineRange::new("f.txt", DiffSide::Modified, line, line)),
+        };
+        pane.update_in(cx, |pane, window, cx| {
+            assert_eq!(pane.line_actions().len(), 2, "Revert Lines and Find");
+            assert!(pane.hunk_action().is_some());
+            pane.act(&intent(4), window, cx);
+        });
+        cx.run_until_parked();
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "a\nX\nb\nc\nd\n",
+            "only Y goes, and the later d stays"
+        );
+        assert_eq!(
+            run(&["show", ":f.txt"]),
+            "a\nX\nb\nY\nc\nd\n",
+            "the index is untouched"
+        );
+
+        // Y is gone now, so reverting it again explains why it can't.
+        let error = std::rc::Rc::new(std::cell::RefCell::new(None));
+        let _events = cx.update({
+            let error = error.clone();
+            |_, cx| {
+                cx.subscribe(&model, move |_, event: &RepositoryEvent, _| {
+                    if let RepositoryEvent::OperationFinished { error: Some(e), .. } = event {
+                        *error.borrow_mut() = Some(e.to_string());
+                    }
+                })
+            }
+        });
+        pane.update_in(cx, |pane, window, cx| pane.act(&intent(4), window, cx));
+        cx.run_until_parked();
+        assert_eq!(error.borrow().as_deref(), Some(REVERT_CONFLICT));
     }
 
     #[gpui_kit::test]
