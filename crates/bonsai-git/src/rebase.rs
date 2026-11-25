@@ -330,6 +330,23 @@ impl Repository {
     }
 
     /// Runs a commit that needs no message from an editor.
+    /// Commits the staged changes as a `fixup!` of `target`, without
+    /// rewriting anything yet: Edit Commits lines it up under `target`
+    /// later, so a branch can collect fixes until it is ready to tidy.
+    ///
+    /// # Errors
+    /// When nothing is staged or Git fails.
+    pub fn fixup_commit(&self, target: &str) -> Result<Oid> {
+        let run = |args: &[&str]| self.git().run(&self.git().command(args).cwd(self.root()));
+        if run(&["diff", "--cached", "--quiet"]).is_ok() {
+            return Err(Error::Refused(
+                "Nothing is staged. Stage the changes for the fixup first.".to_owned(),
+            ));
+        }
+        self.commit_with(&["commit", "-q", &format!("--fixup={target}")])?;
+        Ok(Oid::new(run(&["rev-parse", "HEAD"])?.stdout_lossy().trim()))
+    }
+
     fn commit_with(&self, args: &[&str]) -> Result<()> {
         self.git()
             .run(
