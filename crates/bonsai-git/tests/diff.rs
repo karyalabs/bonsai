@@ -101,11 +101,23 @@ fn untracked_commit_and_range_diffs() {
     let range = patch(
         &repository,
         &DiffTarget::Range {
-            from: first,
+            from: first.clone(),
             to: second,
         },
     );
     assert_eq!(range, commit);
+
+    // The work tree against an older commit, for one file.
+    std::fs::write(root.join("keep.txt"), "uno\ndos\nthree\n").unwrap();
+    let since = patch(
+        &repository,
+        &DiffTarget::WorkTreeSince {
+            from: first,
+            paths: vec![PathBuf::from("keep.txt")],
+        },
+    );
+    assert!(since.contains("-one\n-two\n+uno\n+dos"), "{since}");
+    assert_eq!(since.matches("diff --git").count(), 1);
 }
 
 #[test]
