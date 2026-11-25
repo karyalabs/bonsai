@@ -287,6 +287,57 @@ fn history_compares_two_chosen_commits(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn history_follows_only_first_parents_when_asked(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap();
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    git(&["switch", "-qc", "feature"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "feature work"]);
+    git(&["switch", "-q", "main"]);
+    git(&["merge", "-q", "--no-ff", "-m", "Merge feature", "feature"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    let history = workspace.read_with(cx, |w, _| w.history_view().unwrap());
+    let summaries = |cx: &mut VisualTestContext| {
+        history.read_with(cx, |history, _| {
+            history
+                .commits()
+                .iter()
+                .map(|c| c.summary.clone())
+                .collect::<Vec<_>>()
+        })
+    };
+    // Every branch still lists the feature branch's own tip.
+    history.update(cx, |history, cx| history.set_first_parent(true, cx));
+    cx.run_until_parked();
+    assert_eq!(summaries(cx), ["Merge feature", "feature work", "base"]);
+    history.update(cx, |history, cx| {
+        history.set_scope(crate::history::HistoryScope::Current, cx);
+    });
+    cx.run_until_parked();
+    assert_eq!(summaries(cx), ["Merge feature", "base"]);
+
+    history.update(cx, |history, cx| history.set_first_parent(false, cx));
+    cx.run_until_parked();
+    assert_eq!(summaries(cx).len(), 3);
+}
+
+#[gpui_kit::test]
 fn the_command_palette_opens(cx: &mut TestAppContext) {
     let (workspace, cx) = setup(cx, Session::default(), None);
     cx.dispatch_action(commands::ShowCommandPalette);

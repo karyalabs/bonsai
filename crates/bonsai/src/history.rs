@@ -314,6 +314,8 @@ pub struct HistoryView {
     search_field_text: Option<String>,
     menu: Entity<MenuState>,
     scope: HistoryScope,
+    /// Follow only each merge's first parent.
+    first_parent: bool,
     scope_menu: Entity<MenuState>,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
@@ -437,6 +439,7 @@ impl HistoryView {
             search_field_text: None,
             menu,
             scope: HistoryScope::All,
+            first_parent: false,
             scope_menu,
             tasks: Vec::new(),
             subscriptions,
@@ -530,7 +533,8 @@ impl HistoryView {
             self.labels = snapshot.map(labels).unwrap_or_default();
         }
         let repository = self.model.read(cx).repository().clone();
-        let filter = self.search.filter.clone();
+        let mut filter = self.search.filter.clone();
+        filter.first_parent = self.first_parent;
         let scope = self.scope.log_scope(snapshot);
         // A new read for the first page; otherwise the next page of the
         // current one.
@@ -587,7 +591,13 @@ impl HistoryView {
             .iter()
             .map(|c| Commit {
                 id: c.oid.clone(),
-                parents: c.parents.clone(),
+                // A merged branch's commits aren't listed, so its line
+                // would never end.
+                parents: if self.first_parent {
+                    c.parents.iter().take(1).cloned().collect()
+                } else {
+                    c.parents.clone()
+                },
             })
             .collect();
         let laid = self.layout.extend(&commits);
@@ -663,8 +673,10 @@ impl HistoryView {
         self.started = true;
         self.search_field_text = Some(String::new());
         // A commit outside the chosen branch would never page in.
-        let had_filter = !self.search.filter.is_empty() || self.scope != HistoryScope::All;
+        let had_filter =
+            !self.search.filter.is_empty() || self.scope != HistoryScope::All || self.first_parent;
         self.scope = HistoryScope::All;
+        self.first_parent = false;
         self.search = Search {
             filter: LogFilter::default(),
             hash: Some(oid.as_str().to_owned()),
@@ -687,6 +699,24 @@ impl HistoryView {
         self.paging = Paging::More;
         self.load(0, PAGE, cx);
         cx.notify();
+    }
+
+    /// Follows only each merge's first parent, or every parent.
+    pub fn set_first_parent(&mut self, on: bool, cx: &mut Context<Self>) {
+        if on == self.first_parent {
+            return;
+        }
+        self.first_parent = on;
+        self.started = true;
+        self.paging = Paging::More;
+        self.rebuild_scope_menu(cx);
+        self.load(0, PAGE, cx);
+        cx.notify();
+    }
+
+    #[must_use]
+    pub fn first_parent(&self) -> bool {
+        self.first_parent
     }
 
     #[must_use]
@@ -737,6 +767,20 @@ impl HistoryView {
                 .on_click(pick(scope)),
             );
         }
+        let first_parent = self.first_parent;
+        items.push(MenuItem::separator());
+        items.push(
+            MenuItem::new("history.first-parent", "First Parent Only")
+                .icon(LucideIcon::GitCommitVertical)
+                .checked(first_parent)
+                .on_click({
+                    let this = this.clone();
+                    move |_, _, cx| {
+                        let _ =
+                            this.update(cx, |view, cx| view.set_first_parent(!first_parent, cx));
+                    }
+                }),
+        );
         self.scope_menu
             .update(cx, |menu, cx| menu.set_items(items, cx));
     }
@@ -1477,7 +1521,7 @@ impl Render for HistoryView {
                                     .flex()
                                     .items_center()
                                     .gap(px(6.))
-                                    .max_w(px(180.))
+                                    .max_w(px(if self.first_parent { 240. } else { 180. }))
                                     .child(
                                         gpui_icons::lucide(if self.scope == HistoryScope::All {
                                             LucideIcon::GitFork
@@ -1488,7 +1532,11 @@ impl Render for HistoryView {
                                         .flex_none()
                                         .text_color(c.foreground),
                                     )
-                                    .child(div().min_w_0().truncate().child(self.scope.label()))
+                                    .child(div().min_w_0().truncate().child(if self.first_parent {
+                                        format!("{}, first parent", self.scope.label())
+                                    } else {
+                                        self.scope.label()
+                                    }))
                                     .child(
                                         gpui_icons::lucide(LucideIcon::ChevronDown)
                                             .size(px(12.))
