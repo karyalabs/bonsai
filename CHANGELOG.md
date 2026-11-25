@@ -5,6 +5,46 @@ notes come from its section here, so a version bump must add one (see
 docs/releasing.md). Write for people using Bonsai: what they can do now and
 what got fixed, grouped by feature, with the pull requests in brackets.
 
+## 0.24.0 (2026-11-25)
+
+### Rewriting commits
+
+- **Split Commit.** Right-click a commit in History to break it into
+  smaller ones. Bonsai pauses the rebase with that commit's changes
+  unstaged in Changes. Commit them in as many parts as you like, then press
+  Continue. (#124)
+- **Squash Merge.** Right-click a branch to bring all its changes in as
+  staged changes, with no merge commit. Changes fills in a message listing
+  the squashed commits, ready to edit and commit. (#123)
+
+### Commit message
+
+- **Prepared messages.** After a merge or squash merge that stops for
+  conflicts, or one that waits for you to commit, the message box starts
+  with the message Git prepared, not your template. (#123)
+
+### History
+
+- **Combine search filters.** Mix free text with `author:`, `path:` and the
+  new `since:` and `until:`, as in `since:2w author:ada login`. Dates take
+  Git's forms, like `2026-11-01` or `yesterday`, and short forms like `3d`
+  and `2w`. Quote a path with spaces. (#122)
+- **Compare with Work Tree.** Right-click a commit to see everything that
+  differs between it and the files on disk, including changes you haven't
+  committed yet. (#126)
+
+### Files
+
+- **Compare with Work Tree.** While browsing a branch, tag or commit,
+  right-click a file to see how your copy differs from that version, for
+  example what has changed in README.md since `main`. (#125)
+
+### Stashes
+
+- **Keep staged changes.** The new stash sheet has a "Keep staged changes"
+  option. It stashes everything but leaves what you staged in place, so you
+  can test or commit just that. (#121)
+
 ## 0.23.0 (2026-11-25)
 
 ### History
