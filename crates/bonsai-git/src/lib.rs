@@ -59,7 +59,7 @@ pub use purge::{
     HistoryScan, PurgeBlocker, PurgeReport, PurgeScan, PurgeStep, PurgeTarget, RefChange,
     ScanFinding, ScanOptions, ScanReason, credentials_in, format_bytes, sensitive_name,
 };
-pub use rebase::{RebaseAction, RebaseStep, rebase_todo};
+pub use rebase::{RebaseAction, RebaseStep, autosquash, rebase_todo};
 pub use reflog::{ReflogAction, ReflogEntry};
 pub use remote::RemoteFailure;
 pub use repo_settings::{ConfigValue, Hook, RepoSettings, RepoSettingsEdit, SigningChoice};
