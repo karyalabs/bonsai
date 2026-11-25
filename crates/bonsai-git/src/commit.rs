@@ -130,6 +130,24 @@ impl Repository {
             .filter(|text| !text.is_empty()))
     }
 
+    /// The message Git prepared for the next commit: a merge's (`MERGE_MSG`,
+    /// with its conflict notes as comments) or a squash merge's
+    /// (`SQUASH_MSG`). `None` when there is none.
+    #[must_use]
+    pub fn prepared_message(&self) -> Option<String> {
+        ["MERGE_MSG", "SQUASH_MSG"].iter().find_map(|name| {
+            std::fs::read_to_string(self.git_dir().join(name))
+                .ok()
+                .map(|text| text.trim_end().to_owned())
+                // A squash merge's conflicts leave a MERGE_MSG of comments
+                // only; its message is in SQUASH_MSG.
+                .filter(|text| {
+                    text.lines()
+                        .any(|line| !line.starts_with('#') && !line.trim().is_empty())
+                })
+        })
+    }
+
     /// Messages of up to `count` recent commits on HEAD, newest first,
     /// without duplicates.
     pub fn recent_messages(&self, count: usize) -> Result<Vec<String>> {

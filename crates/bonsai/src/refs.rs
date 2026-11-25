@@ -538,6 +538,17 @@ impl RefsPanel {
         );
     }
 
+    /// Stages everything `revision` would merge in as one change, ready to
+    /// commit, without recording a merge.
+    pub fn squash_merge(&mut self, revision: String, cx: &mut Context<Self>) {
+        let name = format!("Squash merge {revision}");
+        self.run(
+            name,
+            move |repository| repository.merge(&revision, MergeMode::Squash).map(|_| ()),
+            cx,
+        );
+    }
+
     pub fn rebase(&mut self, onto: String, cx: &mut Context<Self>) {
         let name = format!("Rebase onto {onto}");
         self.run(
@@ -631,6 +642,15 @@ impl RefsPanel {
                     let rev = rev.clone();
                     move |view, _, cx| view.merge(rev.clone(), cx)
                 })),
+            MenuItem::new(
+                "refs.squash-merge",
+                format!("Squash Merge {rev} into {current}"),
+            )
+            .icon(LucideIcon::Combine)
+            .on_click(with(&this, {
+                let rev = rev.clone();
+                move |view, _, cx| view.squash_merge(rev.clone(), cx)
+            })),
             MenuItem::new("refs.rebase", format!("Rebase {current} onto {rev}"))
                 .icon(LucideIcon::GitPullRequestArrow)
                 .on_click(with(&this, {

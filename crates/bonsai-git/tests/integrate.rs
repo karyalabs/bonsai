@@ -98,6 +98,48 @@ fn merges_fast_forward_and_with_a_merge_commit() {
 }
 
 #[test]
+fn squash_merges_stage_the_changes_with_a_prepared_message() {
+    let (dir, repository) = repo();
+    let root = dir.path();
+    run(root, &["switch", "-qc", "topic"]);
+    commit(root, "b.txt", "b\n", "topic work");
+    commit(root, "c.txt", "c\n", "more topic work");
+    run(root, &["switch", "-q", "main"]);
+    assert_eq!(repository.prepared_message(), None);
+
+    assert_eq!(
+        repository.merge("topic", MergeMode::Squash).unwrap(),
+        Integration::Completed
+    );
+    // Nothing is committed or recorded as a merge; the changes are staged.
+    assert_eq!(subjects(root), ["base"]);
+    assert_eq!(repository.in_progress(), None);
+    assert_eq!(
+        run(root, &["diff", "--cached", "--name-only"]),
+        "b.txt\nc.txt\n"
+    );
+    let message = repository.prepared_message().unwrap();
+    assert!(message.contains("topic work") && message.contains("more topic work"));
+    repository.commit("Add the topic", false).unwrap();
+    assert_eq!(subjects(root), ["Add the topic", "base"]);
+    assert_eq!(repository.prepared_message(), None);
+
+    // A conflict leaves markers to resolve, though no merge is in progress.
+    let (dir, repository) = diverged();
+    assert_eq!(
+        repository.merge("topic", MergeMode::Squash).unwrap(),
+        Integration::Conflicts
+    );
+    assert_eq!(conflicted(&repository), [PathBuf::from("a.txt")]);
+    assert!(
+        repository
+            .prepared_message()
+            .is_some_and(|m| m.contains("topic edit"))
+    );
+    let _ = dir;
+}
+
+#[test]
 fn a_conflicted_merge_resolves_with_a_side_and_continues() {
     let (dir, repository) = diverged();
     let root = dir.path();

@@ -92,6 +92,9 @@ pub struct CommitComposer {
     recent_menu: Entity<MenuState>,
     /// The `commit.template` text each new message starts from.
     template: Option<String>,
+    /// The message Git prepared after a merge or squash merge, which a new
+    /// message starts from instead.
+    prepared: Option<String>,
     /// People who recently committed here, offered as co-authors.
     authors: Vec<(String, String)>,
     authors_menu: Entity<MenuState>,
@@ -193,6 +196,11 @@ impl CommitComposer {
                     }
                 }
                 RepositoryEvent::SnapshotChanged => cx.notify(),
+                // A merge, squash merge or stopped cherry-pick leaves a
+                // message ready for the commit that finishes it.
+                RepositoryEvent::OperationFinished { error: None, .. } => {
+                    this.load_prepared(window, cx);
+                }
                 RepositoryEvent::OperationFinished { .. } => {}
             }),
         ];
@@ -205,6 +213,7 @@ impl CommitComposer {
             recent: Vec::new(),
             recent_menu,
             template: None,
+            prepared: None,
             authors: Vec::new(),
             authors_menu,
             commit_menu,
@@ -241,20 +250,54 @@ impl CommitComposer {
         cx.notify();
     }
 
-    /// Whether the message is empty, or the template as it was filled in.
+    /// Whether the message is empty, or the template or Git's prepared
+    /// message as it was filled in.
     fn is_untouched(&self, cx: &gpui_kit::App) -> bool {
-        let message = self.message(cx);
-        message.trim().is_empty()
+        let message = strip_comments(&self.message(cx));
+        message.is_empty()
+            || self.is_template(cx)
             || self
-                .template
+                .prepared
                 .as_deref()
-                .is_some_and(|template| strip_comments(&message) == strip_comments(template))
+                .is_some_and(|prepared| message == strip_comments(prepared))
     }
 
-    /// Empties the message, or fills it with the commit template.
+    /// Whether the message is the commit template, not yet filled in.
+    fn is_template(&self, cx: &gpui_kit::App) -> bool {
+        self.template
+            .as_deref()
+            .is_some_and(|template| strip_comments(&self.message(cx)) == strip_comments(template))
+    }
+
+    /// Empties the message, or fills it with Git's prepared message or the
+    /// commit template.
     fn reset_message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let template = self.template.clone().unwrap_or_default();
-        self.set_message(&template, window, cx);
+        let start = match &self.prepared {
+            Some(prepared) => strip_comments(prepared),
+            None => self.template.clone().unwrap_or_default(),
+        };
+        self.set_message(&start, window, cx);
+    }
+
+    /// Picks up the message Git prepares after a merge, a squash merge or
+    /// a conflict, while the message box is untouched.
+    fn load_prepared(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let repository = self.model.read(cx).repository().clone();
+        let task = cx.background_spawn(async move { repository.prepared_message() });
+        cx.spawn_in(window, async move |this, cx| {
+            let prepared = task.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if prepared == this.prepared {
+                    return;
+                }
+                let untouched = this.is_untouched(cx);
+                this.prepared = prepared;
+                if untouched && !this.amend {
+                    this.reset_message(window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// Reads signing settings and recent messages in the background.
@@ -270,10 +313,11 @@ impl CommitComposer {
                     .recent_authors(RECENT_AUTHORS)
                     .unwrap_or_default(),
                 repository.commit_template().ok().flatten(),
+                repository.prepared_message(),
             )
         });
         cx.spawn_in(window, async move |this, cx| {
-            let (signing, recent, authors, template) = task.await;
+            let (signing, recent, authors, template, prepared) = task.await;
             let _ = this.update_in(cx, |this, window, cx| {
                 this.signing = signing;
                 this.recent = recent;
@@ -281,6 +325,7 @@ impl CommitComposer {
                 // A new template fills an untouched message box.
                 let untouched = this.is_untouched(cx);
                 this.template = template;
+                this.prepared = prepared;
                 if untouched && !this.amend {
                     this.reset_message(window, cx);
                 }
@@ -358,7 +403,7 @@ impl CommitComposer {
             Some("Committing…")
         } else if self.summary.read(cx).value().trim().is_empty() {
             Some("Write a summary to commit.")
-        } else if self.template.is_some() && self.is_untouched(cx) {
+        } else if self.is_template(cx) {
             Some("Fill in the commit template to commit.")
         } else if !self.amend && self.staged_count(cx) == 0 {
             Some("Stage changes to commit them.")
@@ -696,6 +741,51 @@ mod tests {
         composer.read_with(cx, |composer, cx| {
             assert_eq!(composer.message(cx), "Change a\n\nTo b.");
         });
+    }
+
+    #[gpui_kit::test]
+    fn a_squash_merge_fills_in_its_message(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let repository =
+            Repository::init(&Git::locate(None).unwrap(), dir.path(), Some("main")).unwrap();
+        git(dir.path(), &["config", "user.name", "Ada Lovelace"]);
+        git(dir.path(), &["config", "user.email", "ada@example.com"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        git(
+            dir.path(),
+            &["commit", "-q", "--allow-empty", "-m", "Start"],
+        );
+        git(dir.path(), &["switch", "-qc", "topic"]);
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Add b"]);
+        git(dir.path(), &["switch", "-q", "main"]);
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| CommitComposer::new(model.clone(), window, cx));
+        cx.run_until_parked();
+        model.update(cx, |model, cx| {
+            model.run(
+                "Squash merge topic",
+                |repository| {
+                    repository
+                        .merge("topic", bonsai_git::MergeMode::Squash)
+                        .map(drop)
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        composer.read_with(cx, |composer, cx| {
+            let message = composer.message(cx);
+            assert!(message.starts_with("Squashed commit"), "{message}");
+            assert!(message.contains("Add b"));
+            assert!(composer.blocker(cx).is_none());
+        });
+        composer.update(cx, super::CommitComposer::commit);
+        cx.run_until_parked();
+        composer.read_with(cx, |composer, cx| assert_eq!(composer.message(cx), ""));
     }
 
     #[gpui_kit::test]
