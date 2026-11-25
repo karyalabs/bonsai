@@ -483,6 +483,7 @@ impl Workspace {
             });
             let files = cx.new(|cx| FilesView::new(model.clone(), cx));
             let files_history = history.downgrade();
+            let files_diff = diff.downgrade();
             let files_events = cx.subscribe(&files, move |this, _, event: &FilesEvent, cx| {
                 match event {
                     FilesEvent::Purge(path) => this.purge_requested = Some(path.clone()),
@@ -491,6 +492,12 @@ impl Workspace {
                         let _ =
                             files_history.update(cx, |history, cx| history.search_for(&search, cx));
                         this.set_section(Section::History, cx);
+                    }
+                    FilesEvent::ShowDiff(target, title) => {
+                        this.section = Section::Changes;
+                        let _ = files_diff.update(cx, |diff, cx| {
+                            diff.show(Some(target.clone()), title.clone(), cx);
+                        });
                     }
                     FilesEvent::SearchHistory(search) => {
                         let _ =

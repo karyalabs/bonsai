@@ -17,6 +17,9 @@ pub enum DiffTarget {
     Commit(Oid),
     /// Everything between two commits, as `git diff from to`.
     Range { from: Oid, to: Oid },
+    /// The work tree against a commit for these paths (all when empty), as
+    /// `git diff from -- paths`.
+    WorkTreeSince { from: Oid, paths: Vec<PathBuf> },
 }
 
 /// How whitespace changes are shown.
@@ -155,6 +158,12 @@ impl Repository {
                 common(&mut args);
                 args.push(from.as_str().into());
                 args.push(to.as_str().into());
+            }
+            DiffTarget::WorkTreeSince { from, paths: list } => {
+                push(&mut args, &["diff"]);
+                common(&mut args);
+                args.push(from.as_str().into());
+                paths(&mut args, list);
             }
         }
         let output = self

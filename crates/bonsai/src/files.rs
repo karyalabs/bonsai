@@ -108,6 +108,8 @@ pub enum FilesEvent {
     ShowCommit(Oid),
     /// Blame asked History to search for this text.
     SearchHistory(String),
+    /// Show this diff, titled, in the diff pane.
+    ShowDiff(bonsai_git::DiffTarget, SharedString),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -810,6 +812,28 @@ impl FilesView {
             );
         }
         if let Some(revision) = &self.revision {
+            let (spec, label) = (revision.spec.clone(), revision.label.clone());
+            let compared = path.clone();
+            items.push(
+                MenuItem::new("files.compare-work-tree", "Compare with Work Tree")
+                    .icon(LucideIcon::GitCompareArrows)
+                    .on_click({
+                        let this = this.clone();
+                        move |_, _, cx| {
+                            let target = bonsai_git::DiffTarget::WorkTreeSince {
+                                from: Oid::new(spec.clone()),
+                                paths: vec![compared.clone()],
+                            };
+                            let title = SharedString::from(format!(
+                                "{} since {label}",
+                                compared.to_string_lossy()
+                            ));
+                            let _ = this.update(cx, |_, cx| {
+                                cx.emit(FilesEvent::ShowDiff(target, title));
+                            });
+                        }
+                    }),
+            );
             let spec = revision.spec.clone();
             let restore = path.clone();
             items.push(

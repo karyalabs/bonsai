@@ -108,6 +108,10 @@ fn versions(target: &DiffTarget) -> (Option<FileVersion>, FileVersion) {
             Some(FileVersion::Commit(from.as_str().to_owned())),
             FileVersion::Commit(to.as_str().to_owned()),
         ),
+        DiffTarget::WorkTreeSince { from, .. } => (
+            Some(FileVersion::Commit(from.as_str().to_owned())),
+            FileVersion::WorkTree,
+        ),
     }
 }
 
