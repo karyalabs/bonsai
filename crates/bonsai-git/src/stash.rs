@@ -5,6 +5,16 @@ use std::path::PathBuf;
 
 use crate::{DiffTarget, Error, Integration, Oid, Repository, Result};
 
+/// How [`Repository::stash_with`] stashes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct StashOptions {
+    /// Stash untracked files too, and remove them.
+    pub include_untracked: bool,
+    /// Leave the staged changes in place as well as in the stash, so what
+    /// is about to be committed can be built and tested on its own.
+    pub keep_staged: bool,
+}
+
 /// The files a stash holds.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StashContents {
@@ -56,9 +66,29 @@ impl Repository {
         include_untracked: bool,
         paths: &[PathBuf],
     ) -> Result<()> {
+        self.stash_with(
+            message,
+            StashOptions {
+                include_untracked,
+                keep_staged: false,
+            },
+            paths,
+        )
+    }
+
+    /// [`Self::stash_paths`] with every option.
+    pub fn stash_with(
+        &self,
+        message: &str,
+        options: StashOptions,
+        paths: &[PathBuf],
+    ) -> Result<()> {
         let mut args = vec!["stash", "push"];
-        if include_untracked {
+        if options.include_untracked {
             args.push("--include-untracked");
+        }
+        if options.keep_staged {
+            args.push("--keep-index");
         }
         if !message.trim().is_empty() {
             args.extend(["-m", message.trim()]);
