@@ -14,6 +14,9 @@ pub enum MergeMode {
     FastForwardOnly,
     /// Always create a merge commit.
     NoFastForward,
+    /// Stage the combined changes as one new commit's, without committing
+    /// or recording the merge.
+    Squash,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -137,9 +140,21 @@ impl Repository {
             MergeMode::Default => {}
             MergeMode::FastForwardOnly => args.push("--ff-only".into()),
             MergeMode::NoFastForward => args.push("--no-ff".into()),
+            MergeMode::Squash => args.push("--squash".into()),
         }
         args.push(revision.into());
-        self.integrate(args)
+        match self.integrate(args) {
+            // A squash merge records no merge in progress, so its conflicts
+            // are only in the work tree.
+            Err(error @ Error::Failed { .. }) if mode == MergeMode::Squash => {
+                if self.has_conflicts()? {
+                    Ok(Integration::Conflicts)
+                } else {
+                    Err(error)
+                }
+            }
+            other => other,
+        }
     }
 
     /// Replays the current branch's own commits on top of `onto`.
