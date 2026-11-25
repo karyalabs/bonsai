@@ -162,6 +162,33 @@ fn amends_an_earlier_commit_with_the_staged_changes() {
 }
 
 #[test]
+fn commits_staged_changes_as_a_fixup_that_autosquash_lines_up() {
+    let f = Fixture::new();
+    let two = f.run(&["rev-parse", "HEAD~3"]).trim().to_owned();
+    assert!(f.repository.fixup_commit(&two).is_err());
+    std::fs::write(f.root.join("two.txt"), "two, fixed").unwrap();
+    f.run(&["add", "two.txt"]);
+
+    f.repository.fixup_commit(&two).unwrap();
+
+    assert_eq!(
+        f.subjects(),
+        ["base", "one", "two", "three", "four", "five", "fixup! two"]
+    );
+    let base = f.run(&["rev-parse", "HEAD~6"]).trim().to_owned();
+    let mut steps = f.repository.rebase_steps(Some(&base)).unwrap();
+    assert_eq!(bonsai_git::autosquash(&mut steps), 1);
+    f.repository
+        .rebase_interactive(Some(&base), &steps)
+        .unwrap();
+    assert_eq!(
+        f.subjects(),
+        ["base", "one", "two", "three", "four", "five"]
+    );
+    assert_eq!(f.run(&["show", "HEAD~3:two.txt"]), "two, fixed");
+}
+
+#[test]
 fn amends_the_last_commit_and_the_first() {
     let f = Fixture::new();
     std::fs::write(f.root.join("five.txt"), "five, amended").unwrap();

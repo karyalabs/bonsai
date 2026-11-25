@@ -952,6 +952,19 @@ impl HistoryView {
         });
     }
 
+    /// Commits the staged changes as a `fixup!` of the commit, to be
+    /// folded in later by Edit Commits.
+    pub fn fixup(&mut self, oid: Oid, cx: &mut Context<Self>) {
+        let name = format!("Commit fixup for {}", short(&oid));
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.fixup_commit(oid.as_str()).map(drop),
+                cx,
+            );
+        });
+    }
+
     /// Edit Commits and its shortcuts, for a commit that isn't a merge.
     fn edit_items(&self, commit: &CommitInfo, cx: &mut Context<Self>) -> Vec<MenuItem> {
         if commit.parents.len() > 1 {
@@ -996,6 +1009,12 @@ impl HistoryView {
                 .on_click(with_this(&this, {
                     let oid = commit.oid.clone();
                     move |view, cx| view.amend(oid.clone(), cx)
+                })),
+            MenuItem::new("history.fixup", "Commit Staged as Fixup")
+                .icon(LucideIcon::Bandage)
+                .on_click(with_this(&this, {
+                    let oid = commit.oid.clone();
+                    move |view, cx| view.fixup(oid.clone(), cx)
                 })),
         ];
         if let Some(grandparent) = grandparent {
