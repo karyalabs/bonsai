@@ -418,6 +418,14 @@ impl Workspace {
                             this.set_section(Section::Changes, cx);
                             return;
                         }
+                        HistoryEvent::ShowDiff(target, title) => {
+                            this.section = Section::Changes;
+                            let _ = diff_target.update(cx, |diff, cx| {
+                                diff.show(Some(target.clone()), title.clone(), cx);
+                            });
+                            cx.notify();
+                            return;
+                        }
                         HistoryEvent::Bisect(oid, verdict) => {
                             if let Some(tab) = this.tabs.iter().find(|t| t.model == history_model) {
                                 tab.bisect.update(cx, |bar, cx| {
