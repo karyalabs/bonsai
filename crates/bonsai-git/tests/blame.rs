@@ -58,4 +58,18 @@ fn blames_each_line_on_the_commit_that_last_changed_it() {
             .blame(Path::new("missing.txt"), Some("HEAD"))
             .is_err()
     );
+
+    // A line's commit knows where to look next: its parent, under the
+    // path the file had there.
+    let shout = at_head.commit_of(1).unwrap();
+    let (before, path) = shout.previous.clone().expect("Shout two has a parent");
+    assert_eq!(path, Path::new("notes.txt"));
+    let earlier = repository.blame(&path, Some(before.as_str())).unwrap();
+    assert_eq!(earlier.lines[1].text, "two");
+    assert_eq!(earlier.commit_of(1).unwrap().summary, "Start the notes");
+    assert_eq!(
+        earlier.commit_of(1).unwrap().previous,
+        None,
+        "it added the file"
+    );
 }

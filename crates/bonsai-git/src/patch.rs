@@ -78,7 +78,7 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Undoes Git's C-style quoting of a path in a patch header.
-fn unquote(path: &str) -> String {
+pub(crate) fn unquote(path: &str) -> String {
     let Some(inner) = path.strip_prefix('"').and_then(|p| p.strip_suffix('"')) else {
         return path.to_owned();
     };
