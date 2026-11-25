@@ -414,6 +414,10 @@ impl Workspace {
                             this.compare(base.short().to_owned(), head.short().to_owned(), cx);
                             return;
                         }
+                        HistoryEvent::ShowChanges => {
+                            this.set_section(Section::Changes, cx);
+                            return;
+                        }
                         HistoryEvent::Bisect(oid, verdict) => {
                             if let Some(tab) = this.tabs.iter().find(|t| t.model == history_model) {
                                 tab.bisect.update(cx, |bar, cx| {

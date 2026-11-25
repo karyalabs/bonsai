@@ -1,4 +1,4 @@
-use bonsai_git::{Git, InProgress, Integration, RebaseAction, Repository};
+use bonsai_git::{Git, InProgress, Integration, OperationAction, RebaseAction, Repository};
 
 fn git() -> Git {
     Git::locate(None).expect("git is installed")
@@ -217,4 +217,39 @@ fn refuses_to_amend_with_nothing_staged() {
     let error = f.repository.amend_commit("HEAD~2").unwrap_err();
     assert!(error.to_string().contains("Nothing is staged"), "{error}");
     assert_eq!(f.subjects().len(), 6);
+}
+
+#[test]
+fn splits_a_commit_into_parts_and_continues() {
+    let f = Fixture::new();
+    let two = f.run(&["rev-parse", "HEAD~3"]).trim().to_owned();
+    let root_commit = f
+        .run(&["rev-list", "--max-parents=0", "HEAD"])
+        .trim()
+        .to_owned();
+    assert!(f.repository.split_commit(&root_commit).is_err());
+
+    assert_eq!(
+        f.repository.split_commit(&two).unwrap(),
+        Integration::Completed
+    );
+    assert_eq!(f.repository.in_progress(), Some(InProgress::Rebase));
+    assert!(f.repository.rebase_stopped_to_edit());
+    assert_eq!(f.run(&["log", "-1", "--format=%s"]).trim(), "one");
+    // The commit's changes wait in the work tree.
+    assert_eq!(f.run(&["status", "--porcelain"]), "?? two.txt\n");
+
+    f.run(&["add", "two.txt"]);
+    f.run(&["commit", "-qm", "two, part one"]);
+    assert_eq!(
+        f.repository
+            .resolve_operation(OperationAction::Continue)
+            .unwrap(),
+        Integration::Completed
+    );
+    assert_eq!(f.repository.in_progress(), None);
+    assert_eq!(
+        f.subjects(),
+        ["base", "one", "two, part one", "three", "four", "five"]
+    );
 }

@@ -822,6 +822,10 @@ impl ChangesView {
             )
         } else if operation == InProgress::Bisect {
             "Bisect in progress.".to_owned()
+        } else if operation == InProgress::Rebase
+            && self.model.read(cx).repository().rebase_stopped_to_edit()
+        {
+            "Rebase paused. Commit the parts, then continue.".to_owned()
         } else {
             format!("{name} in progress. Every conflict is resolved.")
         };
@@ -858,8 +862,9 @@ impl ChangesView {
             .bg(c.muted)
             .border_b_1()
             .border_color(c.border)
-            .child(div().text_sm().child(detail))
-            .child(buttons)
+            // The text wraps, so the buttons always fit.
+            .child(div().flex_1().min_w_0().text_sm().child(detail))
+            .child(buttons.flex_none())
     }
 
     fn absolute(&self, path: &Path, cx: &gpui_kit::App) -> PathBuf {
