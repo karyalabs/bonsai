@@ -338,6 +338,45 @@ fn history_follows_only_first_parents_when_asked(cx: &mut TestAppContext) {
 }
 
 #[gpui_kit::test]
+fn splitting_a_commit_shows_its_changes(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let git = |args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(&path))
+            .unwrap()
+            .stdout_lossy()
+            .trim()
+            .to_owned()
+    };
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&["config", key, value]);
+    }
+    git(&["commit", "-q", "--allow-empty", "-m", "base"]);
+    std::fs::write(path.join("a.txt"), "a\n").unwrap();
+    std::fs::write(path.join("b.txt"), "b\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "a and b"]);
+    let both = bonsai_git::Oid::new(git(&["rev-parse", "HEAD"]));
+    git(&["commit", "-q", "--allow-empty", "-m", "later"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    let history = workspace.read_with(cx, |w, _| w.history_view().unwrap());
+    history.update(cx, |history, cx| history.split(both, cx));
+    cx.run_until_parked();
+    workspace.read_with(cx, |w, _| assert_eq!(w.section(), Section::Changes));
+    assert_eq!(git(&["log", "-1", "--format=%s"]), "base");
+    assert_eq!(git(&["status", "--porcelain"]), "?? a.txt\n?? b.txt");
+}
+
+#[gpui_kit::test]
 fn the_command_palette_opens(cx: &mut TestAppContext) {
     let (workspace, cx) = setup(cx, Session::default(), None);
     cx.dispatch_action(commands::ShowCommandPalette);

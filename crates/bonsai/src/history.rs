@@ -60,6 +60,8 @@ pub enum HistoryEvent {
     Bisect(Oid, BisectVerdict),
     /// Open Compare with the newer commit (second) against the older.
     Compare(Oid, Oid),
+    /// Show Changes: a split commit's changes wait there.
+    ShowChanges,
 }
 
 /// An interactive rebase to plan: the commits after `base` (`None`: every
@@ -1118,6 +1120,20 @@ impl HistoryView {
         });
     }
 
+    /// Undoes the commit in the middle of a rebase, leaving its changes in
+    /// the work tree to commit again in parts, and shows them.
+    pub fn split(&mut self, oid: Oid, cx: &mut Context<Self>) {
+        let name = format!("Split {}", short(&oid));
+        self.model.update(cx, |model, cx| {
+            model.run(
+                name,
+                move |repository| repository.split_commit(oid.as_str()).map(drop),
+                cx,
+            );
+        });
+        cx.emit(HistoryEvent::ShowChanges);
+    }
+
     /// Commits the staged changes as a `fixup!` of the commit, to be
     /// folded in later by Edit Commits.
     pub fn fixup(&mut self, oid: Oid, cx: &mut Context<Self>) {
@@ -1183,6 +1199,16 @@ impl HistoryView {
                     move |view, cx| view.fixup(oid.clone(), cx)
                 })),
         ];
+        if base.is_some() {
+            items.push(
+                MenuItem::new("history.split", "Split Commit")
+                    .icon(LucideIcon::Split)
+                    .on_click(with_this(&this, {
+                        let oid = commit.oid.clone();
+                        move |view, cx| view.split(oid.clone(), cx)
+                    })),
+            );
+        }
         if let Some(grandparent) = grandparent {
             items.push(
                 MenuItem::new("history.squash", "Squash into Parent…")

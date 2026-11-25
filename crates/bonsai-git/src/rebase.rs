@@ -18,6 +18,9 @@ pub enum RebaseAction {
     Fixup,
     /// Leave it out.
     Drop,
+    /// Stop after applying it, with the rebase in progress, to change it
+    /// by hand (Split Commit uses this).
+    Edit,
 }
 
 impl RebaseAction {
@@ -35,6 +38,7 @@ impl RebaseAction {
             Self::Squash => "Squash",
             Self::Fixup => "Fixup",
             Self::Drop => "Drop",
+            Self::Edit => "Edit",
         }
     }
 }
@@ -164,6 +168,8 @@ pub fn rebase_todo(git: &Path, steps: &[RebaseStep], dir: &Path) -> Result<Strin
             } else {
                 "fixup"
             }
+        } else if step.action == RebaseAction::Edit {
+            "edit"
         } else {
             "pick"
         };
@@ -270,6 +276,51 @@ impl Repository {
             &format!("cp {}", quote(&todo_file.to_string_lossy())),
             reflog_action,
         )
+    }
+
+    /// Splits `target`, a commit on the current branch: an interactive
+    /// rebase stops there and undoes the commit, leaving its changes in
+    /// the work tree to commit again in parts. Continuing the rebase
+    /// replays the commits after it.
+    ///
+    /// # Errors
+    /// When `target` is the first commit, isn't on the current branch, a
+    /// merge follows it, or Git fails.
+    pub fn split_commit(&self, target: &str) -> Result<Integration> {
+        let run = |args: &[&str]| self.git().run(&self.git().command(args).cwd(self.root()));
+        let target = Oid::new(
+            run(&["rev-parse", "--verify", &format!("{target}^{{commit}}")])?
+                .stdout_lossy()
+                .trim(),
+        );
+        if run(&["merge-base", "--is-ancestor", target.as_str(), "HEAD"]).is_err() {
+            return Err(Error::Refused(
+                "That commit isn't on the current branch.".to_owned(),
+            ));
+        }
+        let Ok(parent) = run(&["rev-parse", "--verify", "-q", &format!("{target}^")]) else {
+            return Err(Error::Refused(
+                "The first commit can't be split.".to_owned(),
+            ));
+        };
+        let parent = parent.stdout_lossy().trim().to_owned();
+        let mut steps = self.rebase_steps(Some(&parent))?;
+        if let Some(step) = steps.iter_mut().find(|step| step.oid == target) {
+            step.action = RebaseAction::Edit;
+        }
+        let result = self.rebase_interactive_as(Some(&parent), &steps, None)?;
+        if result == Integration::Completed && self.in_progress() == Some(crate::InProgress::Rebase)
+        {
+            run(&["reset", "-q", "HEAD^"])?;
+        }
+        Ok(result)
+    }
+
+    /// Whether a rebase stopped to change a commit by hand, as Split Commit
+    /// does, rather than at a conflict.
+    #[must_use]
+    pub fn rebase_stopped_to_edit(&self) -> bool {
+        self.git_dir().join("rebase-merge").join("amend").exists()
     }
 
     /// Folds the staged changes into `target`, an earlier commit on the
