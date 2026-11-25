@@ -62,6 +62,8 @@ pub enum HistoryEvent {
     Compare(Oid, Oid),
     /// Show Changes: a split commit's changes wait there.
     ShowChanges,
+    /// Show this diff in Changes, with this title.
+    ShowDiff(bonsai_git::DiffTarget, SharedString),
 }
 
 /// An interactive rebase to plan: the commits after `base` (`None`: every
@@ -1263,6 +1265,21 @@ impl HistoryView {
                     move |_, _, cx| {
                         let _ = this.update(cx, |_, cx| {
                             cx.emit(HistoryEvent::BrowseFiles(browse.clone()));
+                        });
+                    }
+                }),
+            MenuItem::new("history.compare-work-tree", "Compare with Work Tree")
+                .icon(LucideIcon::GitCompareArrows)
+                .on_click({
+                    let this = this.clone();
+                    let target = bonsai_git::DiffTarget::WorkTreeSince {
+                        from: oid.clone(),
+                        paths: Vec::new(),
+                    };
+                    let title: SharedString = format!("Work tree since {}", oid.short()).into();
+                    move |_, _, cx| {
+                        let _ = this.update(cx, |_, cx| {
+                            cx.emit(HistoryEvent::ShowDiff(target.clone(), title.clone()));
                         });
                     }
                 }),
