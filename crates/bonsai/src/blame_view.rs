@@ -44,6 +44,7 @@ pub enum BlameStatus {
 }
 
 pub struct BlameView {
+    model: Entity<RepositoryModel>,
     path: PathBuf,
     /// The commit blamed at, or `None` for the work tree.
     rev: Option<Oid>,
@@ -54,6 +55,10 @@ pub struct BlameView {
     scroll: UniformListScrollHandle,
     /// The header button that closes Blame.
     close_label: &'static str,
+    /// Where Back returns to: each blame stepped back from, newest last.
+    trail: Vec<(PathBuf, Option<Oid>)>,
+    /// Counts loads, so a slow one can't replace a newer one.
+    generation: u64,
 }
 
 impl EventEmitter<BlameEvent> for BlameView {}
@@ -65,16 +70,41 @@ impl BlameView {
         rev: Option<Oid>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let repository = model.read(cx).repository().clone();
-        let (task_path, task_rev) = (path.clone(), rev.clone());
+        let mut view = Self {
+            model: model.clone(),
+            path,
+            rev,
+            status: BlameStatus::Loading,
+            blame: Arc::default(),
+            hovered: None,
+            scroll: UniformListScrollHandle::new(),
+            close_label: "Show Diff",
+            trail: Vec::new(),
+            generation: 0,
+        };
+        view.load(cx);
+        view
+    }
+
+    /// Reads the blame for the current path and revision.
+    fn load(&mut self, cx: &mut Context<Self>) {
+        self.generation += 1;
+        let generation = self.generation;
+        self.status = BlameStatus::Loading;
+        self.hovered = None;
+        let repository = self.model.read(cx).repository().clone();
+        let (path, rev) = (self.path.clone(), self.rev.clone());
         let task = cx.background_spawn(async move {
             repository
-                .blame(&task_path, task_rev.as_ref().map(Oid::as_str))
+                .blame(&path, rev.as_ref().map(Oid::as_str))
                 .map_err(|e| e.to_string())
         });
         cx.spawn(async move |this, cx| {
             let result = task.await;
             let _ = this.update(cx, |this, cx| {
+                if this.generation != generation {
+                    return;
+                }
                 match result {
                     Ok(blame) => {
                         this.blame = Arc::new(blame);
@@ -86,15 +116,36 @@ impl BlameView {
             });
         })
         .detach();
-        Self {
-            path,
-            rev,
-            status: BlameStatus::Loading,
-            blame: Arc::default(),
-            hovered: None,
-            scroll: UniformListScrollHandle::new(),
-            close_label: "Show Diff",
-        }
+        cx.notify();
+    }
+
+    /// Blames the file as it was just before commit `index` (into the
+    /// blame's commits) changed it, to see who wrote those lines before.
+    pub fn blame_before(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some((oid, path)) = self
+            .blame
+            .commits
+            .get(index)
+            .and_then(|commit| commit.previous.clone())
+        else {
+            return;
+        };
+        let here = (
+            std::mem::replace(&mut self.path, path),
+            self.rev.replace(oid),
+        );
+        self.trail.push(here);
+        self.load(cx);
+    }
+
+    /// Returns to the blame before the last step back.
+    pub fn back(&mut self, cx: &mut Context<Self>) {
+        let Some((path, rev)) = self.trail.pop() else {
+            return;
+        };
+        self.path = path;
+        self.rev = rev;
+        self.load(cx);
     }
 
     /// Names the header button that closes Blame, "Show Diff" by default.
@@ -188,6 +239,15 @@ impl BlameView {
                 )
             })
             .child(div().flex_1())
+            .when(!self.trail.is_empty(), |this| {
+                this.child(
+                    Button::new("blame.back")
+                        .variant(ButtonVariant::Ghost)
+                        .size(ButtonSize::Sm)
+                        .label("Back")
+                        .on_click(cx.listener(|this, _, _, cx| this.back(cx))),
+                )
+            })
             .child(
                 Button::new("blame.close")
                     .variant(ButtonVariant::Ghost)
@@ -257,7 +317,7 @@ impl BlameView {
                                 this.border_t_1().border_color(c.border)
                             })
                             .when(first, |this| {
-                                this.child(Self::annotation(commit, dark, &theme, cx))
+                                this.child(Self::annotation(commit, commit_index, dark, &theme, cx))
                             }),
                     )
                     .child(div().w(px(3.)).h_full().flex_none().bg(bar))
@@ -291,6 +351,7 @@ impl BlameView {
     /// The first row of a run: who, when and why, linking to the commit.
     fn annotation(
         commit: &BlameCommit,
+        index: usize,
         dark: bool,
         theme: &UiTheme,
         cx: &mut Context<Self>,
@@ -360,6 +421,31 @@ impl BlameView {
                     .text_color(c.muted_foreground)
                     .child(short_ago(&when)),
             )
+            .when(commit.previous.is_some(), |this| {
+                this.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "blame.before.{}",
+                            commit.oid.as_str()
+                        )))
+                        .flex_none()
+                        .p(px(2.))
+                        .rounded(px(4.))
+                        .hover(|style| style.bg(c.muted))
+                        .tooltip(|_, cx| {
+                            text_tooltip("Blame the version before this commit".into(), cx)
+                        })
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.blame_before(index, cx);
+                        }))
+                        .child(
+                            lucide(LucideIcon::SkipBack)
+                                .size(px(12.))
+                                .text_color(c.muted_foreground),
+                        ),
+                )
+            })
             .into_any_element()
     }
 }
@@ -454,5 +540,54 @@ mod tests {
         assert_eq!(short_ago("2 months ago"), "2mo");
         assert_eq!(short_ago("a year ago"), "1y");
         assert_eq!(short_ago("4 years ago"), "4y");
+    }
+}
+
+#[cfg(test)]
+mod view_tests {
+    use bonsai_git::{Git, Repository};
+    use gpui_kit::TestAppContext;
+
+    use super::*;
+
+    #[gpui_kit::test]
+    fn steps_back_past_a_lines_commit_and_returns(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let git = Git::locate(None).unwrap();
+        let repository = Repository::init(&git, dir.path(), Some("main")).unwrap();
+        let run = |args: &[&str]| {
+            let mut full = vec!["-c", "user.name=Ada", "-c", "user.email=ada@example.com"];
+            full.extend_from_slice(args);
+            git.run(&git.command(full).cwd(dir.path())).unwrap();
+        };
+        std::fs::write(dir.path().join("notes.txt"), "one\ntwo\n").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-qm", "Start"]);
+        std::fs::write(dir.path().join("notes.txt"), "one\nTWO\n").unwrap();
+        run(&["commit", "-qam", "Shout"]);
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let view = cx.new(|cx| BlameView::new(&model, "notes.txt".into(), None, cx));
+        cx.run_until_parked();
+        let shout = view.read_with(cx, |view, _| {
+            assert_eq!(view.blame().commit_of(1).unwrap().summary, "Shout");
+            view.blame().lines[1].commit
+        });
+
+        view.update(cx, |view, cx| view.blame_before(shout, cx));
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert!(view.rev().is_some());
+            assert_eq!(view.blame().lines[1].text, "two");
+            assert_eq!(view.blame().commit_of(1).unwrap().summary, "Start");
+        });
+
+        view.update(cx, BlameView::back);
+        cx.run_until_parked();
+        view.read_with(cx, |view, _| {
+            assert_eq!(view.rev(), None);
+            assert_eq!(view.blame().lines[1].text, "TWO");
+        });
     }
 }

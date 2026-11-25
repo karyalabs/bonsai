@@ -16,6 +16,10 @@ pub struct BlameCommit {
     /// The line is older than the history Git looked at (a shallow clone's
     /// boundary).
     pub boundary: bool,
+    /// The commit before this one and the file's path there, which is
+    /// where to blame next to see what the lines were before this commit.
+    /// `None` for a commit that added the file, or a boundary.
+    pub previous: Option<(Oid, std::path::PathBuf)>,
 }
 
 impl BlameCommit {
@@ -111,6 +115,7 @@ pub fn parse_porcelain(text: &str) -> std::result::Result<Blame, String> {
                     author_time: 0,
                     summary: String::new(),
                     boundary: false,
+                    previous: None,
                 });
                 blame.commits.len() - 1
             });
@@ -130,6 +135,11 @@ pub fn parse_porcelain(text: &str) -> std::result::Result<Blame, String> {
             "author-time" => commit.author_time = value.parse().unwrap_or(0),
             "summary" => value.clone_into(&mut commit.summary),
             "boundary" => commit.boundary = true,
+            "previous" => {
+                commit.previous = value
+                    .split_once(' ')
+                    .map(|(oid, path)| (Oid::new(oid), crate::patch::unquote(path).into()));
+            }
             _ => {}
         }
     }
