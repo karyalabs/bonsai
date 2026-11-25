@@ -483,7 +483,7 @@ impl Workspace {
                 match event {
                     FilesEvent::Purge(path) => this.purge_requested = Some(path.clone()),
                     FilesEvent::History(path) => {
-                        let search = format!("path:{}", path.to_string_lossy());
+                        let search = crate::history::path_search(path);
                         let _ =
                             files_history.update(cx, |history, cx| history.search_for(&search, cx));
                         this.set_section(Section::History, cx);

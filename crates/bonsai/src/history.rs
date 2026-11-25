@@ -126,11 +126,13 @@ pub struct Search {
     pub hash: Option<String>,
 }
 
-/// Reads the search field: `author:` and `path:` narrow by author or path,
-/// `code:` finds commits that add or remove that text,
-/// `lines:path:10-20` (or `lines:path:10-20@revision`) follows those lines,
-/// a hexadecimal word of 7 or more characters jumps to that commit, and any
-/// other text searches commit messages.
+/// Reads the search field. `code:` finds commits that add or remove the
+/// rest of the text, and `lines:path:10-20` (or `lines:path:10-20@revision`)
+/// follows those lines. Otherwise these narrow the search and combine:
+/// `author:`, `path:`, `since:` (or `after:`) and `until:` (or `before:`),
+/// taking a word or a "quoted phrase", and dates such as `2w` or
+/// `2026-01-31`. A hexadecimal word of 7 or more characters jumps to that
+/// commit, and any other words search commit messages.
 #[must_use]
 pub fn parse_search(text: &str) -> Search {
     let text = text.trim();
@@ -138,20 +140,103 @@ pub fn parse_search(text: &str) -> Search {
     if text.is_empty() {
         return search;
     }
-    if let Some(author) = text.strip_prefix("author:") {
-        search.filter.author = Some(author.trim().to_owned()).filter(|a| !a.is_empty());
-    } else if let Some(code) = text.strip_prefix("code:") {
+    if let Some(code) = text.strip_prefix("code:") {
         search.filter.code = Some(code.trim().to_owned()).filter(|c| !c.is_empty());
-    } else if let Some(lines) = text.strip_prefix("lines:") {
+        return search;
+    }
+    if let Some(lines) = text.strip_prefix("lines:") {
         search.filter.lines = parse_lines(lines.trim());
-    } else if let Some(path) = text.strip_prefix("path:") {
-        search.filter.path = Some(PathBuf::from(path.trim())).filter(|p| !p.as_os_str().is_empty());
-    } else if text.len() >= 7 && text.len() <= 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
+        return search;
+    }
+    if text.len() >= 7 && text.len() <= 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
         search.hash = Some(text.to_ascii_lowercase());
-    } else {
-        search.filter.message = Some(text.to_owned());
+        return search;
+    }
+    let mut words = Vec::new();
+    let mut tokens = search_tokens(text).into_iter();
+    while let Some(token) = tokens.next() {
+        let Some((key, value)) = token.split_once(':').filter(|(key, _)| {
+            matches!(
+                *key,
+                "author" | "path" | "since" | "after" | "until" | "before"
+            )
+        }) else {
+            words.push(token);
+            continue;
+        };
+        // `author: Grace` reads the next word.
+        let value = if value.is_empty() {
+            tokens.next().unwrap_or_default()
+        } else {
+            value.to_owned()
+        };
+        if value.is_empty() {
+            continue;
+        }
+        match key {
+            "author" => search.filter.author = Some(value),
+            "path" => search.filter.path = Some(PathBuf::from(value)),
+            "since" | "after" => search.filter.since = Some(git_date(&value)),
+            _ => search.filter.until = Some(git_date(&value)),
+        }
+    }
+    if !words.is_empty() {
+        search.filter.message = Some(words.join(" "));
     }
     search
+}
+
+/// The `path:` search for `path`, quoted when it has spaces.
+#[must_use]
+pub fn path_search(path: &std::path::Path) -> String {
+    let path = path.to_string_lossy();
+    if path.contains(char::is_whitespace) {
+        format!("path:\"{path}\"")
+    } else {
+        format!("path:{path}")
+    }
+}
+
+/// Splits on spaces, keeping a "quoted phrase" (or `key:"quoted phrase"`)
+/// as one token without its quotes.
+fn search_tokens(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut token = String::new();
+    let mut quoted = false;
+    for c in text.chars() {
+        match c {
+            '"' => quoted = !quoted,
+            c if c.is_whitespace() && !quoted => {
+                if !token.is_empty() {
+                    tokens.push(std::mem::take(&mut token));
+                }
+            }
+            c => token.push(c),
+        }
+    }
+    if !token.is_empty() {
+        tokens.push(token);
+    }
+    tokens
+}
+
+/// `3d`, `2w`, `6m` or `1y` as Git reads it (`3 days ago`); anything else
+/// as written, for Git to read.
+fn git_date(text: &str) -> String {
+    let unit = match text.chars().last() {
+        Some('h') => "hours",
+        Some('d') => "days",
+        Some('w') => "weeks",
+        Some('m') => "months",
+        Some('y') => "years",
+        _ => return text.to_owned(),
+    };
+    let count = &text[..text.len() - 1];
+    if !count.is_empty() && count.chars().all(|c| c.is_ascii_digit()) {
+        format!("{count} {unit} ago")
+    } else {
+        text.to_owned()
+    }
 }
 
 /// `path:10-20`, `path:10` or `path:10-20@revision`.
@@ -1316,7 +1401,7 @@ impl HistoryView {
         }
         let input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("Search messages, author:, path:, code: or a hash")
+                .placeholder("Search messages, author:, path:, since:, code: or a hash")
         });
         self.subscriptions
             .push(cx.subscribe(&input, |this, input, event: &InputEvent, cx| {
@@ -1766,6 +1851,27 @@ mod tests {
         );
         assert_eq!(parse_search("lines:src/a.rs").filter.lines, None);
         assert_eq!(parse_search("lines:src/a.rs:9-3").filter.lines, None);
+        let combined =
+            parse_search(r#"author:"Grace Hopper" since:2w fix crash before:2026-01-31"#);
+        assert_eq!(combined.filter.author.as_deref(), Some("Grace Hopper"));
+        assert_eq!(combined.filter.since.as_deref(), Some("2 weeks ago"));
+        assert_eq!(combined.filter.until.as_deref(), Some("2026-01-31"));
+        assert_eq!(combined.filter.message.as_deref(), Some("fix crash"));
+        assert_eq!(
+            parse_search(&path_search(std::path::Path::new("docs/read me.md")))
+                .filter
+                .path,
+            Some(PathBuf::from("docs/read me.md"))
+        );
+        assert_eq!(
+            parse_search("after:yesterday").filter.since.as_deref(),
+            Some("yesterday")
+        );
+        // A colon in ordinary words is just text.
+        assert_eq!(
+            parse_search("fix: crash").filter.message.as_deref(),
+            Some("fix: crash")
+        );
         let hash = parse_search("ABCDEF1");
         assert_eq!(hash.hash.as_deref(), Some("abcdef1"));
         assert!(hash.filter.is_empty());

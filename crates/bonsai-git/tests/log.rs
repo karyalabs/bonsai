@@ -258,6 +258,55 @@ fn follows_a_range_of_lines_back_through_renames() {
 }
 
 #[test]
+fn narrows_by_commit_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repository = Repository::init(&git(), root, Some("main")).unwrap();
+    for (date, message) in [
+        ("2026-01-10T12:00:00Z", "January"),
+        ("2026-02-10T12:00:00Z", "February"),
+        ("2026-03-10T12:00:00Z", "March"),
+    ] {
+        let g = git();
+        g.run(
+            &g.command([
+                "-c",
+                "user.name=Ada",
+                "-c",
+                "user.email=ada@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                message,
+            ])
+            .cwd(root)
+            .env("GIT_AUTHOR_DATE", date)
+            .env("GIT_COMMITTER_DATE", date),
+        )
+        .unwrap();
+    }
+    let summaries = |since: Option<&str>, until: Option<&str>| -> Vec<String> {
+        let filter = LogFilter {
+            since: since.map(str::to_owned),
+            until: until.map(str::to_owned),
+            ..LogFilter::default()
+        };
+        repository
+            .log_filtered(&LogScope::All, &filter, 0, 100)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.summary)
+            .collect()
+    };
+    assert_eq!(summaries(Some("2026-02-01"), None), ["March", "February"]);
+    assert_eq!(summaries(None, Some("2026-02-01")), ["January"]);
+    assert_eq!(
+        summaries(Some("2026-02-01"), Some("2026-03-01")),
+        ["February"]
+    );
+}
+
+#[test]
 fn reads_a_commits_details() {
     let dir = tempfile::tempdir().unwrap();
     let repository = Repository::init(&git(), dir.path(), Some("main")).unwrap();
