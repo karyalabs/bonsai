@@ -6,7 +6,7 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
-use bonsai_git::{Blame, BlameCommit, Oid};
+use bonsai_git::{Blame, BlameCommit, LineRange, Oid};
 use gpui_icons::{LucideIcon, lucide};
 use gpui_kit::{
     AppContext as _, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
@@ -33,6 +33,8 @@ const ANNOTATION: f32 = 280.;
 pub enum BlameEvent {
     /// Show this commit in History.
     ShowCommit(Oid),
+    /// Search History for this text: the history of a run of lines.
+    SearchHistory(String),
     Close,
 }
 
@@ -117,6 +119,30 @@ impl BlameView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// The lines of the run starting at line `index`, as the commit that
+    /// last changed them has them, so their history can start there.
+    #[must_use]
+    pub fn run_lines(&self, index: usize) -> Option<LineRange> {
+        let first = self.blame.lines.get(index)?;
+        let commit = &self.blame.commits[first.commit];
+        if commit.is_uncommitted() || commit.path.as_os_str().is_empty() {
+            return None;
+        }
+        let run = self.blame.lines[index..]
+            .iter()
+            .take_while(|line| line.commit == first.commit);
+        let (start, end) = run.fold((u32::MAX, 0), |(lo, hi), line| {
+            (lo.min(line.original_line), hi.max(line.original_line))
+        });
+        Some(LineRange {
+            path: commit.path.clone(),
+            start,
+            end,
+            // Short, as it shows in History's search field.
+            revision: Some(commit.oid.as_str().chars().take(12).collect()),
+        })
     }
 
     /// Blames the file as it was just before commit `index` (into the
@@ -317,7 +343,14 @@ impl BlameView {
                                 this.border_t_1().border_color(c.border)
                             })
                             .when(first, |this| {
-                                this.child(Self::annotation(commit, commit_index, dark, &theme, cx))
+                                this.child(Self::annotation(
+                                    commit,
+                                    commit_index,
+                                    index,
+                                    dark,
+                                    &theme,
+                                    cx,
+                                ))
                             }),
                     )
                     .child(div().w(px(3.)).h_full().flex_none().bg(bar))
@@ -352,6 +385,7 @@ impl BlameView {
     fn annotation(
         commit: &BlameCommit,
         index: usize,
+        line: usize,
         dark: bool,
         theme: &UiTheme,
         cx: &mut Context<Self>,
@@ -420,6 +454,31 @@ impl BlameView {
                     .text_xs()
                     .text_color(c.muted_foreground)
                     .child(short_ago(&when)),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!(
+                        "blame.lines.{}.{line}",
+                        commit.oid.as_str()
+                    )))
+                    .flex_none()
+                    .p(px(2.))
+                    .rounded(px(4.))
+                    .hover(|style| style.bg(c.muted))
+                    .tooltip(|_, cx| text_tooltip("Show the history of these lines".into(), cx))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        cx.stop_propagation();
+                        if let Some(range) = this.run_lines(line) {
+                            cx.emit(BlameEvent::SearchHistory(crate::history::lines_search(
+                                &range,
+                            )));
+                        }
+                    }))
+                    .child(
+                        lucide(LucideIcon::ListTree)
+                            .size(px(12.))
+                            .text_color(c.muted_foreground),
+                    ),
             )
             .when(commit.previous.is_some(), |this| {
                 this.child(
@@ -572,6 +631,14 @@ mod view_tests {
         cx.run_until_parked();
         let shout = view.read_with(cx, |view, _| {
             assert_eq!(view.blame().commit_of(1).unwrap().summary, "Shout");
+            // A run's history starts at its commit, with its lines there.
+            let range = view.run_lines(1).unwrap();
+            assert_eq!((range.start, range.end), (2, 2));
+            assert_eq!(range.path, std::path::Path::new("notes.txt"));
+            assert_eq!(
+                range.revision.as_deref(),
+                Some(&view.blame().commit_of(1).unwrap().oid.as_str()[..12])
+            );
             view.blame().lines[1].commit
         });
 

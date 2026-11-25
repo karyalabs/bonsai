@@ -106,6 +106,8 @@ pub enum FilesEvent {
     History(PathBuf),
     /// Blame asked to show this commit in History.
     ShowCommit(Oid),
+    /// Blame asked History to search for this text.
+    SearchHistory(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -743,6 +745,7 @@ impl FilesView {
                 cx.notify();
             }
             BlameEvent::ShowCommit(oid) => cx.emit(FilesEvent::ShowCommit(oid.clone())),
+            BlameEvent::SearchHistory(text) => cx.emit(FilesEvent::SearchHistory(text.clone())),
         });
         self.blame = Some((view, events));
         cx.notify();

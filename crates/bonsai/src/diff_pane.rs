@@ -481,6 +481,7 @@ impl DiffPane {
         let events = cx.subscribe(&view, |this, _, event: &BlameEvent, cx| match event {
             BlameEvent::Close => this.close_blame(cx),
             BlameEvent::ShowCommit(oid) => cx.emit(DiffPaneEvent::ShowInHistory(oid.clone())),
+            BlameEvent::SearchHistory(text) => cx.emit(DiffPaneEvent::SearchHistory(text.clone())),
         });
         self.blame = Some((view, events));
         cx.notify();
@@ -593,7 +594,7 @@ impl DiffPane {
             match self.selected_code(range) {
                 Some(code) => {
                     self.error = None;
-                    cx.emit(DiffPaneEvent::SearchHistory(code));
+                    cx.emit(DiffPaneEvent::SearchHistory(format!("code:{code}")));
                 }
                 None => {
                     self.error = Some("Select an added or removed line to search for.".into());
@@ -1697,7 +1698,8 @@ impl DiffPane {
 pub enum DiffPaneEvent {
     /// Blame asked to show this commit in History.
     ShowInHistory(Oid),
-    /// Find the commits that added or removed this code.
+    /// Search History for this text, such as `code:` and the selected
+    /// line, or `lines:` and a run of blamed lines.
     SearchHistory(String),
 }
 
@@ -1921,7 +1923,7 @@ mod tests {
         pane.update_in(cx, |pane, window, cx| {
             pane.act(&intent("history", 4), window, cx);
         });
-        assert_eq!(searched.borrow().as_deref(), Some("Y"));
+        assert_eq!(searched.borrow().as_deref(), Some("code:Y"));
 
         pane.update_in(cx, |pane, window, cx| {
             assert_eq!(pane.line_actions().len(), 3);

@@ -62,6 +62,7 @@ fn blames_each_line_on_the_commit_that_last_changed_it() {
     // A line's commit knows where to look next: its parent, under the
     // path the file had there.
     let shout = at_head.commit_of(1).unwrap();
+    assert_eq!(shout.path, Path::new("notes.txt"));
     let (before, path) = shout.previous.clone().expect("Shout two has a parent");
     assert_eq!(path, Path::new("notes.txt"));
     let earlier = repository.blame(&path, Some(before.as_str())).unwrap();
