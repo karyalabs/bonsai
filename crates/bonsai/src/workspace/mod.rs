@@ -470,10 +470,9 @@ impl Workspace {
                     DiffPaneEvent::ShowInHistory(oid) => {
                         let _ = history_target.update(cx, |history, cx| history.reveal(oid, cx));
                     }
-                    DiffPaneEvent::SearchHistory(code) => {
-                        let search = format!("code:{code}");
-                        let _ = history_target
-                            .update(cx, |history, cx| history.search_for(&search, cx));
+                    DiffPaneEvent::SearchHistory(search) => {
+                        let _ =
+                            history_target.update(cx, |history, cx| history.search_for(search, cx));
                     }
                 }
                 this.set_section(Section::History, cx);
@@ -487,6 +486,11 @@ impl Workspace {
                         let search = format!("path:{}", path.to_string_lossy());
                         let _ =
                             files_history.update(cx, |history, cx| history.search_for(&search, cx));
+                        this.set_section(Section::History, cx);
+                    }
+                    FilesEvent::SearchHistory(search) => {
+                        let _ =
+                            files_history.update(cx, |history, cx| history.search_for(search, cx));
                         this.set_section(Section::History, cx);
                     }
                     FilesEvent::ShowCommit(oid) => {

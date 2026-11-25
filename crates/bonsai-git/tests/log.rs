@@ -1,6 +1,6 @@
 use std::{fmt::Write as _, path::Path, time::Instant};
 
-use bonsai_git::{Git, LogFilter, LogScope, Repository, SignatureStatus};
+use bonsai_git::{Git, LineRange, LogFilter, LogScope, Repository, SignatureStatus};
 
 fn git() -> Git {
     Git::locate(None).expect("git is installed")
@@ -196,6 +196,49 @@ fn finds_commits_that_add_or_remove_code() {
     // Literal text, not a pattern; the commit that only moved lines around
     // it doesn't count.
     assert_eq!(summaries, ["Stop retrying", "Retry three times"]);
+}
+
+#[test]
+fn follows_a_range_of_lines_back_through_renames() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let repository = Repository::init(&git(), root, Some("main")).unwrap();
+    for (file, contents, message) in [
+        ("a.txt", "one\ntwo\nthree\n", "Start"),
+        ("a.txt", "one\nTWO\nthree\n", "Shout two"),
+        ("a.txt", "zero\none\nTWO\nthree\n", "Add zero"),
+        ("b.txt", "zero\none\nTWO\nthree\n", "Rename"),
+        ("b.txt", "zero\none\nTWO\nTHREE\n", "Shout three"),
+    ] {
+        if file == "b.txt" && !root.join("b.txt").exists() {
+            run(root, &["mv", "a.txt", "b.txt"]);
+        }
+        std::fs::write(root.join(file), contents).unwrap();
+        run(root, &["add", "."]);
+        run(root, &["commit", "-qm", message]);
+    }
+    let history = |start, end, revision: Option<&str>| -> Vec<String> {
+        let filter = LogFilter {
+            lines: Some(LineRange {
+                path: "b.txt".into(),
+                start,
+                end,
+                revision: revision.map(str::to_owned),
+            }),
+            ..LogFilter::default()
+        };
+        let mut reader = repository.log_reader(&LogScope::All, &filter).unwrap();
+        reader
+            .next_page(100)
+            .unwrap()
+            .into_iter()
+            .map(|c| c.summary)
+            .collect()
+    };
+    // Line 3, "TWO": unchanged by the shift down or the rename.
+    assert_eq!(history(3, 3, None), ["Shout two", "Start"]);
+    assert_eq!(history(3, 4, None), ["Shout three", "Shout two", "Start"]);
+    assert_eq!(history(3, 3, Some("HEAD~1")), ["Shout two", "Start"]);
 }
 
 #[test]

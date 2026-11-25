@@ -5,8 +5,8 @@
 use std::{collections::HashMap, path::PathBuf, rc::Rc, time::Duration};
 
 use bonsai_git::{
-    BisectVerdict, CommitInfo, Head, LogFilter, LogReader, LogScope, Oid, RebaseAction, ResetMode,
-    Snapshot,
+    BisectVerdict, CommitInfo, Head, LineRange, LogFilter, LogReader, LogScope, Oid, RebaseAction,
+    ResetMode, Snapshot,
 };
 use bonsai_graph::{Commit, Layout, Row};
 use gpui_icons::LucideIcon;
@@ -128,6 +128,7 @@ pub struct Search {
 
 /// Reads the search field: `author:` and `path:` narrow by author or path,
 /// `code:` finds commits that add or remove that text,
+/// `lines:path:10-20` (or `lines:path:10-20@revision`) follows those lines,
 /// a hexadecimal word of 7 or more characters jumps to that commit, and any
 /// other text searches commit messages.
 #[must_use]
@@ -141,6 +142,8 @@ pub fn parse_search(text: &str) -> Search {
         search.filter.author = Some(author.trim().to_owned()).filter(|a| !a.is_empty());
     } else if let Some(code) = text.strip_prefix("code:") {
         search.filter.code = Some(code.trim().to_owned()).filter(|c| !c.is_empty());
+    } else if let Some(lines) = text.strip_prefix("lines:") {
+        search.filter.lines = parse_lines(lines.trim());
     } else if let Some(path) = text.strip_prefix("path:") {
         search.filter.path = Some(PathBuf::from(path.trim())).filter(|p| !p.as_os_str().is_empty());
     } else if text.len() >= 7 && text.len() <= 40 && text.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -149,6 +152,40 @@ pub fn parse_search(text: &str) -> Search {
         search.filter.message = Some(text.to_owned());
     }
     search
+}
+
+/// `path:10-20`, `path:10` or `path:10-20@revision`.
+fn parse_lines(text: &str) -> Option<LineRange> {
+    let (text, revision) = match text.rsplit_once('@') {
+        Some((text, revision)) if !revision.is_empty() && !revision.contains(['/', ':']) => {
+            (text, Some(revision.to_owned()))
+        }
+        _ => (text, None),
+    };
+    let (path, range) = text.rsplit_once(':')?;
+    let (start, end) = range.split_once('-').unwrap_or((range, range));
+    let (start, end): (u32, u32) = (start.trim().parse().ok()?, end.trim().parse().ok()?);
+    (!path.is_empty() && start > 0 && end >= start).then(|| LineRange {
+        path: PathBuf::from(path),
+        start,
+        end,
+        revision,
+    })
+}
+
+/// The `lines:` search that follows `range`, for [`parse_search`].
+#[must_use]
+pub fn lines_search(range: &LineRange) -> String {
+    let mut text = format!("lines:{}:{}", range.path.to_string_lossy(), range.start);
+    if range.end != range.start {
+        text.push('-');
+        text.push_str(&range.end.to_string());
+    }
+    if let Some(revision) = &range.revision {
+        text.push('@');
+        text.push_str(revision);
+    }
+    text
 }
 
 /// Ref labels by the commit they point at.
@@ -1662,6 +1699,25 @@ mod tests {
             parse_search("code: retry(3) ").filter.code.as_deref(),
             Some("retry(3)")
         );
+        let range = LineRange {
+            path: "src/a b.rs".into(),
+            start: 10,
+            end: 20,
+            revision: Some("8e07f0d".into()),
+        };
+        assert_eq!(
+            parse_search(&lines_search(&range)).filter.lines,
+            Some(range)
+        );
+        assert_eq!(
+            parse_search("lines:src/a.rs:7")
+                .filter
+                .lines
+                .map(|r| (r.start, r.end, r.revision)),
+            Some((7, 7, None))
+        );
+        assert_eq!(parse_search("lines:src/a.rs").filter.lines, None);
+        assert_eq!(parse_search("lines:src/a.rs:9-3").filter.lines, None);
         let hash = parse_search("ABCDEF1");
         assert_eq!(hash.hash.as_deref(), Some("abcdef1"));
         assert!(hash.filter.is_empty());

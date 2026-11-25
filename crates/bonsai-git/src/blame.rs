@@ -20,6 +20,9 @@ pub struct BlameCommit {
     /// where to blame next to see what the lines were before this commit.
     /// `None` for a commit that added the file, or a boundary.
     pub previous: Option<(Oid, std::path::PathBuf)>,
+    /// The file's path in this commit, which differs from the blamed path
+    /// when the file was renamed since.
+    pub path: std::path::PathBuf,
 }
 
 impl BlameCommit {
@@ -116,6 +119,7 @@ pub fn parse_porcelain(text: &str) -> std::result::Result<Blame, String> {
                     summary: String::new(),
                     boundary: false,
                     previous: None,
+                    path: std::path::PathBuf::new(),
                 });
                 blame.commits.len() - 1
             });
@@ -135,6 +139,9 @@ pub fn parse_porcelain(text: &str) -> std::result::Result<Blame, String> {
             "author-time" => commit.author_time = value.parse().unwrap_or(0),
             "summary" => value.clone_into(&mut commit.summary),
             "boundary" => commit.boundary = true,
+            "filename" if commit.path.as_os_str().is_empty() => {
+                commit.path = crate::patch::unquote(value).into();
+            }
             "previous" => {
                 commit.previous = value
                     .split_once(' ')

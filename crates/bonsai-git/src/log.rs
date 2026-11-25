@@ -25,6 +25,19 @@ pub struct LogFilter {
     /// Commits that add or remove this exact text in a file (Git's
     /// pickaxe, `-S`): where a line of code came from or went.
     pub code: Option<String>,
+    /// Commits that changed these lines of a file, following them back
+    /// through edits and moves (`git log -L`).
+    pub lines: Option<LineRange>,
+}
+
+/// Lines `start` to `end` (from 1, inclusive) of `path` as `revision` has
+/// them, or as HEAD has them when `revision` is `None`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LineRange {
+    pub path: std::path::PathBuf,
+    pub start: u32,
+    pub end: u32,
+    pub revision: Option<String>,
 }
 
 impl LogFilter {
@@ -34,6 +47,7 @@ impl LogFilter {
             && self.author.is_none()
             && self.path.is_none()
             && self.code.is_none()
+            && self.lines.is_none()
     }
 }
 
@@ -209,6 +223,23 @@ impl Repository {
         }
         if let Some(code) = &filter.code {
             args.push(format!("-S{code}"));
+        }
+        // Git follows lines from one revision only, so a line range sets
+        // where the history starts, and needs no paths.
+        if let Some(lines) = &filter.lines {
+            if unborn && lines.revision.is_none() {
+                return Ok(None);
+            }
+            args.push("-s".to_owned());
+            args.push(format!(
+                "-L{},{}:{}",
+                lines.start,
+                lines.end.max(lines.start),
+                lines.path.to_string_lossy()
+            ));
+            args.push(lines.revision.clone().unwrap_or_else(|| "HEAD".to_owned()));
+            args.push("--".to_owned());
+            return Ok(Some(args.into_iter().map(Into::into).collect()));
         }
         match scope {
             LogScope::All => {
