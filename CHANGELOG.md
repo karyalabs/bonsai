@@ -5,6 +5,35 @@ notes come from its section here, so a version bump must add one (see
 docs/releasing.md). Write for people using Bonsai: what they can do now and
 what got fixed, grouped by feature, with the pull requests in brackets.
 
+## 0.23.0 (2026-11-25)
+
+### History
+
+- **First Parent Only.** In the menu beside the search field, follow just
+  each merge's first parent: a branch reads as one straight line, with
+  every merged branch shown as its single merge commit. (#119)
+- **Commit Staged as Fixup.** Right-click a commit to commit what you've
+  staged as a `fixup!` of it, without rewriting anything yet. Fold the
+  fixes in later with Edit Commits. (#117)
+- **Search the history of some lines.** `lines:src/app.rs:10-20` lists the
+  commits that changed those lines, following them as they move and as the
+  file is renamed. (#118)
+
+### Blame
+
+- **History of these lines.** Each run of lines in Blame has a button that
+  shows every commit that changed those lines in History. (#118)
+- **Step back past a commit.** Each run of lines also has a button that
+  blames the file as it was just before that commit, to see who wrote
+  those lines before. Back returns. (#115)
+
+### Edit Commits
+
+- **Fixups line up on their own.** `fixup!` and `squash!` commits move under
+  the commits they name and are set to Fixup or Squash when Edit Commits
+  opens, just as `git rebase --autosquash` does. You can still change
+  anything before rewriting. (#116)
+
 ## 0.22.0 (2026-11-24)
 
 ### History
