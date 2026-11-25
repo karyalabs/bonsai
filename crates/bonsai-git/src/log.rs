@@ -31,6 +31,11 @@ pub struct LogFilter {
     /// Follow only each merge's first parent: the branch's own line, with
     /// each merged branch as its one merge commit.
     pub first_parent: bool,
+    /// Commits made on or after this date, in any form Git reads, such as
+    /// `2026-01-31` or `2 weeks ago`.
+    pub since: Option<String>,
+    /// Commits made on or before this date.
+    pub until: Option<String>,
 }
 
 /// Lines `start` to `end` (from 1, inclusive) of `path` as `revision` has
@@ -52,6 +57,8 @@ impl LogFilter {
             && self.code.is_none()
             && self.lines.is_none()
             && !self.first_parent
+            && self.since.is_none()
+            && self.until.is_none()
     }
 }
 
@@ -230,6 +237,12 @@ impl Repository {
         }
         if filter.first_parent {
             args.push("--first-parent".to_owned());
+        }
+        if let Some(since) = &filter.since {
+            args.push(format!("--since={since}"));
+        }
+        if let Some(until) = &filter.until {
+            args.push(format!("--until={until}"));
         }
         // Git follows lines from one revision only, so a line range sets
         // where the history starts, and needs no paths.
