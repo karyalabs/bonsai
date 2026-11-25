@@ -74,7 +74,7 @@ pub use snapshot::{
     Branch, Change, ChangeKind, ConflictKind, EntryStatus, Head, InProgress, Oid, Remote,
     RemoteBranch, Snapshot, Stash, Tag, Tracking,
 };
-pub use stash::{StashContents, stash_diff};
+pub use stash::{StashContents, StashOptions, stash_diff};
 pub use submodules::{
     Submodule, SubmoduleCommit, SubmoduleMove, SubmoduleState, parse_submodule_patch,
     parse_submodule_status,

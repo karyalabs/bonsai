@@ -183,7 +183,8 @@ pub struct RefsPanel {
     open_after: Arc<Mutex<Option<PathBuf>>>,
     inputs: Option<Inputs>,
     checkout_new: bool,
-    stash_untracked: bool,
+    /// How Stash Changes stashes.
+    stash_options: bonsai_git::StashOptions,
     /// The files Stash Changes stashes; all changes when empty.
     stash_paths: Vec<PathBuf>,
     collapsed_remotes: BTreeSet<String>,
@@ -217,7 +218,10 @@ impl RefsPanel {
             open_after: Arc::new(Mutex::new(None)),
             inputs: None,
             checkout_new: true,
-            stash_untracked: true,
+            stash_options: bonsai_git::StashOptions {
+                include_untracked: true,
+                keep_staged: false,
+            },
             stash_paths: Vec::new(),
             collapsed_remotes: BTreeSet::new(),
             _events: events,
@@ -904,7 +908,7 @@ impl RefsPanel {
                     .as_ref()
                     .map(|i| i.stash_message.read(cx).value().trim().to_owned())
                     .unwrap_or_default();
-                let untracked = self.stash_untracked;
+                let options = self.stash_options;
                 let paths = std::mem::take(&mut self.stash_paths);
                 let name = match paths.as_slice() {
                     [] => "Stash changes".to_owned(),
@@ -913,7 +917,7 @@ impl RefsPanel {
                 };
                 self.run(
                     name,
-                    move |repository| repository.stash_paths(&message, untracked, &paths),
+                    move |repository| repository.stash_with(&message, options, &paths),
                     cx,
                 );
             }
@@ -1614,6 +1618,8 @@ impl RefsPanel {
             RefDialog::StashChanges => (
                 "Stash Changes".to_owned(),
                 match self.stash_paths.as_slice() {
+                    [] if self.stash_options.keep_staged => "Puts your uncommitted changes aside, then leaves the staged ones in place to try on their own. Apply the stash to bring the rest back."
+                        .to_owned(),
                     [] => "Puts your uncommitted changes aside and cleans the working tree. Apply the stash to bring them back."
                         .to_owned(),
                     [path] => format!(
@@ -1797,14 +1803,37 @@ impl RefsPanel {
                                 .text_sm()
                                 .child(
                                     Checkbox::new("refs.dialog.untracked")
-                                        .checked(self.stash_untracked)
+                                        .checked(self.stash_options.include_untracked)
                                         .aria_label("Include untracked files")
                                         .on_change(cx.listener(|this, checked: &bool, _, cx| {
-                                            this.stash_untracked = *checked;
+                                            this.stash_options.include_untracked = *checked;
                                             cx.notify();
                                         })),
                                 )
                                 .child("Include untracked files"),
+                        )
+                        .child(
+                            div()
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .text_sm()
+                                .child(
+                                    Checkbox::new("refs.dialog.keep-staged")
+                                        .checked(self.stash_options.keep_staged)
+                                        .aria_label("Keep staged changes")
+                                        .on_change(cx.listener(|this, checked: &bool, _, cx| {
+                                            this.stash_options.keep_staged = *checked;
+                                            cx.notify();
+                                        })),
+                                )
+                                .child("Keep staged changes")
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(UiTheme::read(cx).colors.muted_foreground)
+                                        .child("to try them on their own"),
+                                ),
                         ),
                 )
             })

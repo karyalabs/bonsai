@@ -148,3 +148,37 @@ fn stashes_only_the_chosen_files() {
     assert_eq!(contents.tracked, [PathBuf::from("a.txt")]);
     assert_eq!(contents.untracked, [PathBuf::from("new.txt")]);
 }
+
+#[test]
+fn keeps_staged_changes_in_place_when_asked() {
+    let (dir, repository) = repo();
+    let root = dir.path();
+    commit(root, "b.txt", "base\n", "add b");
+    std::fs::write(root.join("a.txt"), "staged\n").unwrap();
+    run(root, &["add", "a.txt"]);
+    std::fs::write(root.join("b.txt"), "unstaged\n").unwrap();
+    repository
+        .stash_with(
+            "try the staged part",
+            bonsai_git::StashOptions {
+                include_untracked: false,
+                keep_staged: true,
+            },
+            &[],
+        )
+        .unwrap();
+    // Only what is staged is left, and still staged.
+    assert_eq!(status(root), "M  a.txt\n");
+    assert_eq!(
+        std::fs::read_to_string(root.join("a.txt")).unwrap(),
+        "staged\n"
+    );
+    // The stash has both, so applying it later brings back the rest.
+    run(root, &["reset", "-q", "--hard"]);
+    let stash = &repository.snapshot().unwrap().stashes[0];
+    let contents = repository.stash_contents(&stash.oid).unwrap();
+    assert_eq!(
+        contents.tracked,
+        [PathBuf::from("a.txt"), PathBuf::from("b.txt")]
+    );
+}
