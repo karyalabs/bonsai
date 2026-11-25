@@ -58,6 +58,60 @@ impl RebaseStep {
     }
 }
 
+/// Lines up `fixup! …` and `squash! …` commits under the commits they
+/// name, as `git rebase --autosquash` does: each moves to just after its
+/// target (after any earlier ones for the same target) and becomes a Fixup
+/// or a Squash. A target is named by its summary or a hash prefix. Returns
+/// how many commits were lined up.
+pub fn autosquash(steps: &mut Vec<RebaseStep>) -> usize {
+    /// The action and the target text of a `fixup!` or `squash!` summary,
+    /// looking through repeats such as `fixup! fixup! x`.
+    fn parse(summary: &str) -> Option<(RebaseAction, &str)> {
+        let (action, mut rest) = if let Some(rest) = summary.strip_prefix("fixup! ") {
+            (RebaseAction::Fixup, rest)
+        } else {
+            (RebaseAction::Squash, summary.strip_prefix("squash! ")?)
+        };
+        while let Some(inner) = rest
+            .strip_prefix("fixup! ")
+            .or_else(|| rest.strip_prefix("squash! "))
+        {
+            rest = inner;
+        }
+        Some((action, rest))
+    }
+    let mut moved = 0;
+    let mut index = 0;
+    while index < steps.len() {
+        let Some((action, target)) = parse(steps[index].summary()) else {
+            index += 1;
+            continue;
+        };
+        let found = steps[..index].iter().position(|step| {
+            parse(step.summary()).is_none()
+                && (step.summary() == target
+                    || (target.len() >= 4 && step.oid.as_str().starts_with(target)))
+        });
+        let Some(found) = found else {
+            index += 1;
+            continue;
+        };
+        // After the target and the fixups already lined up under it.
+        let mut place = found + 1;
+        while place < index && steps[place].action.joins() {
+            place += 1;
+        }
+        if place != index || steps[index].action != action {
+            moved += 1;
+        }
+        let mut step = steps.remove(index);
+        step.action = action;
+        steps.insert(place, step);
+        index += 1;
+    }
+    moved
+}
+
 /// Single-quotes `value` for the shell Git runs `exec` lines and editors in.
 fn quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', r"'\''"))
@@ -292,6 +346,42 @@ impl Repository {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn titled(oid: &str, summary: &str) -> RebaseStep {
+        RebaseStep {
+            action: RebaseAction::Pick,
+            oid: Oid::new(oid),
+            message: summary.to_owned(),
+            new_message: None,
+        }
+    }
+
+    #[test]
+    fn autosquash_lines_fixups_up_under_their_targets() {
+        let mut steps = vec![
+            titled("aaaa1111", "Add login"),
+            titled("bbbb2222", "Add logout"),
+            titled("cccc3333", "fixup! Add login"),
+            titled("dddd4444", "squash! aaaa1111"),
+            titled("eeee5555", "fixup! fixup! Add logout"),
+            titled("ffff6666", "fixup! Something not here"),
+        ];
+        assert_eq!(autosquash(&mut steps), 3);
+        let order: Vec<(&str, RebaseAction)> =
+            steps.iter().map(|s| (s.oid.as_str(), s.action)).collect();
+        assert_eq!(
+            order,
+            [
+                ("aaaa1111", RebaseAction::Pick),
+                ("cccc3333", RebaseAction::Fixup),
+                ("dddd4444", RebaseAction::Squash),
+                ("bbbb2222", RebaseAction::Pick),
+                ("eeee5555", RebaseAction::Fixup),
+                ("ffff6666", RebaseAction::Pick),
+            ]
+        );
+        assert_eq!(autosquash(&mut steps), 0, "already lined up stays put");
+    }
 
     fn step(action: RebaseAction, oid: &str, new_message: Option<&str>) -> RebaseStep {
         RebaseStep {

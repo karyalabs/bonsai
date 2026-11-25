@@ -56,6 +56,9 @@ pub struct RebaseSheet {
     message: Entity<TextareaState>,
     /// Applied to commits once the steps load, from a History shortcut.
     preset: Vec<(Oid, RebaseAction)>,
+    /// How many `fixup!` and `squash!` commits were lined up under their
+    /// targets on load.
+    lined_up: usize,
 }
 
 impl EventEmitter<RebaseEvent> for RebaseSheet {}
@@ -84,8 +87,9 @@ impl RebaseSheet {
                         this.status =
                             Status::Failed("There are no commits to edit after this one.".into());
                     }
-                    Ok(steps) => {
+                    Ok(mut steps) => {
                         this.original = steps.iter().map(|s| s.oid.clone()).collect();
+                        this.lined_up = bonsai_git::autosquash(&mut steps);
                         this.steps = steps;
                         this.status = Status::Ready;
                         for (oid, action) in std::mem::take(&mut this.preset) {
@@ -121,6 +125,7 @@ impl RebaseSheet {
             editing: None,
             message,
             preset,
+            lined_up: 0,
         }
     }
 
@@ -469,6 +474,23 @@ impl Render for RebaseSheet {
                         .text_color(c.muted_foreground)
                         .child(counts.join(" · ")),
                 );
+                if self.lined_up > 0 {
+                    let line = if self.lined_up == 1 {
+                        "A fixup! or squash! commit is already lined up under the commit it names."
+                            .to_owned()
+                    } else {
+                        format!(
+                            "{} fixup! and squash! commits are already lined up under the commits they name.",
+                            self.lined_up
+                        )
+                    };
+                    body = body.child(callout(
+                        LucideIcon::Combine,
+                        c.primary,
+                        &[line.as_str()],
+                        &theme,
+                    ));
+                }
                 if let Some(problem) = self.problem() {
                     body = body.child(div().text_xs().text_color(c.destructive).child(problem));
                 }
@@ -608,5 +630,64 @@ mod tests {
             ["Two, with one folded in", "base"]
         );
         assert!(root.join("one").exists() && !root.join("three").exists());
+    }
+
+    #[gpui_kit::test]
+    fn lines_up_fixup_commits_on_open(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let repository = Repository::init(&Git::locate(None).unwrap(), root, Some("main")).unwrap();
+        for (key, value) in [
+            ("user.name", "Ada Lovelace"),
+            ("user.email", "ada@example.com"),
+            ("commit.gpgsign", "false"),
+        ] {
+            git(root, &["config", key, value]);
+        }
+        for (file, message) in [
+            ("base", "base"),
+            ("login", "Add login"),
+            ("logout", "Add logout"),
+            ("login-fix", "fixup! Add login"),
+        ] {
+            std::fs::write(root.join(file), file).unwrap();
+            git(root, &["add", "."]);
+            git(root, &["commit", "-qm", message]);
+        }
+        let base = Oid::new(git(root, &["rev-parse", "HEAD~3"]).trim());
+
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        cx.run_until_parked();
+        let (sheet, cx) = cx.add_window_view(|window, cx| {
+            RebaseSheet::new(model.clone(), Some(base), Vec::new(), window, cx)
+        });
+        cx.run_until_parked();
+        sheet.read_with(cx, |sheet, _| {
+            let plan: Vec<(&str, RebaseAction)> = sheet
+                .steps()
+                .iter()
+                .map(|s| (s.summary(), s.action))
+                .collect();
+            assert_eq!(
+                plan,
+                [
+                    ("Add login", RebaseAction::Pick),
+                    ("fixup! Add login", RebaseAction::Fixup),
+                    ("Add logout", RebaseAction::Pick),
+                ]
+            );
+            assert_eq!(sheet.lined_up, 1);
+            assert!(sheet.can_confirm(), "lining up is a change to apply");
+        });
+        sheet.update_in(cx, RebaseSheet::confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            git(root, &["log", "--format=%s"])
+                .lines()
+                .collect::<Vec<_>>(),
+            ["Add logout", "Add login", "base"]
+        );
+        assert!(root.join("login-fix").exists());
     }
 }
