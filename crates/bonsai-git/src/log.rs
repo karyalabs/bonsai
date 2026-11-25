@@ -28,6 +28,9 @@ pub struct LogFilter {
     /// Commits that changed these lines of a file, following them back
     /// through edits and moves (`git log -L`).
     pub lines: Option<LineRange>,
+    /// Follow only each merge's first parent: the branch's own line, with
+    /// each merged branch as its one merge commit.
+    pub first_parent: bool,
 }
 
 /// Lines `start` to `end` (from 1, inclusive) of `path` as `revision` has
@@ -48,6 +51,7 @@ impl LogFilter {
             && self.path.is_none()
             && self.code.is_none()
             && self.lines.is_none()
+            && !self.first_parent
     }
 }
 
@@ -223,6 +227,9 @@ impl Repository {
         }
         if let Some(code) = &filter.code {
             args.push(format!("-S{code}"));
+        }
+        if filter.first_parent {
+            args.push("--first-parent".to_owned());
         }
         // Git follows lines from one revision only, so a line range sets
         // where the history starts, and needs no paths.

@@ -50,6 +50,22 @@ fn pages_cover_the_history_in_topological_order() {
     assert_eq!(all[0].parents.len(), 2);
     assert_eq!(all[0].author_name, "Ada");
 
+    let first_parent: Vec<String> = repository
+        .log_filtered(
+            &LogScope::Head,
+            &LogFilter {
+                first_parent: true,
+                ..LogFilter::default()
+            },
+            0,
+            100,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|c| c.summary)
+        .collect();
+    assert_eq!(first_parent, ["Merge feature", "main work", "base"]);
+
     let first = repository.log(&LogScope::All, 0, 2).unwrap();
     let second = repository.log(&LogScope::All, 2, 2).unwrap();
     assert_eq!([first, second].concat(), all);
