@@ -255,6 +255,9 @@ impl Workspace {
             toasts: cx.new(|cx| {
                 let mut toasts = ToastState::new(cx);
                 toasts.set_placement(ToastPlacement::BottomRight, cx);
+                // Float above the bars at the foot of the detail pane, such
+                // as the conflict editor's Save and Continue.
+                toasts.set_inset(px(16.), px(60.), cx);
                 toasts
             }),
             repo_menu: cx.new(|cx| MenuState::new(Vec::new(), cx).width(px(300.))),

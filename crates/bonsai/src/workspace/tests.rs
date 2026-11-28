@@ -1513,6 +1513,51 @@ fn reflog_finds_a_lost_commit_shows_it_and_restores_it(cx: &mut TestAppContext) 
 }
 
 #[gpui_kit::test]
+fn compare_on_the_main_branch_starts_from_its_upstream(cx: &mut TestAppContext) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = repository(dir.path(), "engine");
+    let remote = dir.path().join("remote.git");
+    let git = |cwd: &std::path::Path, args: &[&str]| {
+        let git = Git::locate(None).unwrap();
+        git.run(&git.command(args.iter().copied()).cwd(cwd))
+            .unwrap();
+    };
+    git(
+        dir.path(),
+        &["init", "-q", "--bare", "-b", "main", "remote.git"],
+    );
+    for (key, value) in [
+        ("user.name", "Ada Lovelace"),
+        ("user.email", "ada@example.com"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git(&path, &["config", key, value]);
+    }
+    git(&path, &["commit", "-q", "--allow-empty", "-m", "Start"]);
+    git(
+        &path,
+        &["remote", "add", "origin", remote.to_str().unwrap()],
+    );
+    git(&path, &["push", "-q", "-u", "origin", "main"]);
+    git(&path, &["commit", "-q", "--allow-empty", "-m", "Unpushed"]);
+    let session = Session {
+        tabs: vec![path.clone()],
+        ..Session::default()
+    };
+    let (workspace, cx) = setup(cx, session, None);
+    cx.run_until_parked();
+    cx.dispatch_action(commands::ShowCompare);
+    cx.run_until_parked();
+    let compare = workspace.read_with(cx, |w, _| w.compare_view().unwrap());
+    compare.read_with(cx, |compare, _| {
+        assert_eq!(compare.base(), Some("origin/main"));
+        assert_eq!(compare.head(), Some("main"));
+        let comparison = compare.comparison().expect("compares");
+        assert_eq!((comparison.ahead_count, comparison.behind_count), (1, 0));
+    });
+}
+
+#[gpui_kit::test]
 fn compare_lists_both_sides_and_shows_all_changes_or_one_commit(cx: &mut TestAppContext) {
     use crate::compare_view::{CompareView, Selection};
     use bonsai_git::{DiffTarget, Oid};

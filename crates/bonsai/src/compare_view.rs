@@ -181,6 +181,24 @@ impl CompareView {
         };
         match (main, current) {
             (Some(main), Some(current)) if main != current => (Some(main), Some(current)),
+            // On the main branch: what it has that its remote doesn't, and
+            // what's waiting there; failing that, another branch.
+            (Some(main), Some(_)) => {
+                let branch = snapshot.branches.iter().find(|b| b.name == main);
+                let upstream = branch
+                    .and_then(|b| b.upstream.as_ref())
+                    .filter(|u| !u.gone)
+                    .map(|u| u.name.clone());
+                if let Some(upstream) = upstream {
+                    return (Some(upstream), Some(main));
+                }
+                let other = snapshot
+                    .branches
+                    .iter()
+                    .find(|b| b.name != main)
+                    .map(|b| b.name.clone());
+                (Some(main), other)
+            }
             (main, _) => (main, None),
         }
     }
