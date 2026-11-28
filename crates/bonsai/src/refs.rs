@@ -1968,6 +1968,22 @@ impl RefsPanel {
     }
 }
 
+/// A stash's name in the sidebar, and the branch it was made on: Git's
+/// `On main: notes` reads as `notes`, with `main` beside it.
+fn stash_title(message: &str) -> (String, Option<String>) {
+    if let Some(rest) = message.strip_prefix("On ")
+        && let Some((branch, text)) = rest.split_once(": ")
+    {
+        return (text.to_owned(), Some(branch.to_owned()));
+    }
+    if let Some(rest) = message.strip_prefix("WIP on ")
+        && let Some((branch, _)) = rest.split_once(": ")
+    {
+        return ("Untitled stash".to_owned(), Some(branch.to_owned()));
+    }
+    (message.to_owned(), None)
+}
+
 impl RefsPanel {
     fn render_worktrees(
         &self,
@@ -2004,7 +2020,10 @@ impl RefsPanel {
             .iter()
             .find(|w| w.main)
             .map(|w| w.path.clone());
-        for worktree in snapshot.worktrees.iter().filter(|w| !w.bare) {
+        // A repository with just its own work tree has nothing to list; the
+        // heading's + is the way in.
+        let alone = snapshot.worktrees.iter().filter(|w| !w.bare).count() <= 1;
+        for worktree in snapshot.worktrees.iter().filter(|w| !w.bare && !alone) {
             let current = canonical(&worktree.path) == root;
             let label = match (&worktree.branch, &worktree.head) {
                 (Some(branch), _) => branch.clone(),
@@ -2516,9 +2535,19 @@ impl Render for RefsPanel {
                         .child(
                             SidebarItem::new(
                                 SharedString::from(format!("stash:{}", stash.oid)),
-                                stash.message.clone(),
+                                stash_title(&stash.message).0,
                             )
                             .icon(icon(LucideIcon::Archive))
+                            .when_some(stash_title(&stash.message).1, |item, branch| {
+                                item.trailing(
+                                    div()
+                                        .max_w(px(96.))
+                                        .truncate()
+                                        .text_xs()
+                                        .text_color(c.muted_foreground)
+                                        .child(branch),
+                                )
+                            })
                             .on_activate(with(
                                 &this,
                                 move |panel, _, cx| {
@@ -2560,6 +2589,19 @@ mod tests {
     use gpui_kit::TestAppContext;
 
     use super::*;
+
+    #[test]
+    fn stash_titles_drop_gits_prefix() {
+        assert_eq!(
+            stash_title("On main: half-done notes"),
+            ("half-done notes".to_owned(), Some("main".to_owned()))
+        );
+        assert_eq!(
+            stash_title("WIP on fix/a: 1a2b3c4 Fix it"),
+            ("Untitled stash".to_owned(), Some("fix/a".to_owned()))
+        );
+        assert_eq!(stash_title("autostash"), ("autostash".to_owned(), None));
+    }
 
     fn git(dir: &std::path::Path, args: &[&str]) {
         let g = Git::locate(None).unwrap();

@@ -14,6 +14,12 @@ pub enum PullMode {
     FastForwardOnly,
 }
 
+/// The stash message for changes put aside during a pull.
+const PULL_STASH: &str = "Saved before pull";
+
+const PUT_ASIDE_NOTE: &str =
+    "Your uncommitted changes wait in the stash \"Saved before pull\"; apply it once you're done.";
+
 /// Why Git refused a push or pull, with what to do next.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SyncFailure {
@@ -27,6 +33,8 @@ pub enum SyncFailure {
     Diverged,
     /// The current branch has no upstream to pull from.
     NoUpstream,
+    /// A pull stopped on conflicting changes, which wait in Changes.
+    Conflicts,
 }
 
 impl SyncFailure {
@@ -48,9 +56,14 @@ impl SyncFailure {
             Self::NoUpstream => {
                 "This branch doesn't track a remote branch yet. Publish it, or set its upstream."
             }
+            Self::Conflicts => {
+                "Pulled, but some files changed on both sides. Choose what to keep in Changes, then continue."
+            }
         }
     }
 
+    /// Recognizes Git's output; conflicts are reported on stdout, so pass
+    /// both streams.
     pub(crate) fn classify(stderr: &str) -> Option<Self> {
         if stderr.contains("(stale info)") {
             Some(Self::StaleLease)
@@ -62,6 +75,8 @@ impl SyncFailure {
             Some(Self::Diverged)
         } else if stderr.contains("There is no tracking information") {
             Some(Self::NoUpstream)
+        } else if stderr.contains("CONFLICT (") || stderr.contains("could not apply") {
+            Some(Self::Conflicts)
         } else {
             None
         }
@@ -73,7 +88,9 @@ impl Error {
     #[must_use]
     pub fn sync_failure(&self) -> Option<SyncFailure> {
         match self {
-            Self::Failed { record } => SyncFailure::classify(&record.stderr),
+            Self::Failed { record } => {
+                SyncFailure::classify(&format!("{}\n{}", record.stderr, record.stdout))
+            }
             _ => None,
         }
     }
@@ -230,23 +247,104 @@ impl Repository {
         Ok(())
     }
 
-    /// Pulls the current branch's upstream.
+    /// Pulls the current branch's upstream. Uncommitted changes to tracked
+    /// files never block a pull: they're stashed first and put back after,
+    /// staged parts staged again. If the pull stops on conflicts, or the
+    /// changes clash with what came in, they wait in the stash instead.
     pub fn pull(
         &self,
         mode: PullMode,
         progress: Option<Progress>,
         cancel: Option<CancelToken>,
     ) -> Result<()> {
-        let mode = match mode {
+        let flag = match mode {
             PullMode::Merge => "--no-rebase",
             PullMode::Rebase => "--rebase",
             PullMode::FastForwardOnly => "--ff-only",
         };
-        let args = ["pull", "--progress", "--no-edit", mode]
+        let args = ["pull", "--progress", "--no-edit", flag]
             .iter()
             .map(OsString::from)
             .collect();
-        self.network(args, progress, cancel)
+        let saved = self.put_aside_for_pull()?;
+        let pulled = self.network(args, progress, cancel);
+        if !saved {
+            return pulled;
+        }
+        if let Err(error) = pulled {
+            if self.in_progress().is_none() {
+                // Nothing changed: put the work back as it was.
+                self.put_back_after_pull()?;
+                return Err(error);
+            }
+            return Err(match error.sync_failure() {
+                Some(SyncFailure::Conflicts) => Error::Refused(format!(
+                    "{} {PUT_ASIDE_NOTE}",
+                    SyncFailure::Conflicts.message()
+                )),
+                _ => error,
+            });
+        }
+        if self.put_back_after_pull()? {
+            Ok(())
+        } else {
+            Err(Error::Refused(format!(
+                "Pulled, but your uncommitted changes touch the same lines as what came in. Resolve the conflicts in Changes; the stash \"{PULL_STASH}\" keeps a copy."
+            )))
+        }
+    }
+
+    /// Stashes uncommitted changes to tracked files before a pull; returns
+    /// whether there were any.
+    fn put_aside_for_pull(&self) -> Result<bool> {
+        let status = self.git().run(
+            &self
+                .git()
+                .command(["status", "--porcelain", "--untracked-files=no"])
+                .cwd(self.root()),
+        )?;
+        if status.stdout.is_empty() {
+            return Ok(false);
+        }
+        self.git().run(
+            &self
+                .git()
+                .command(["stash", "push", "--quiet", "-m", PULL_STASH])
+                .cwd(self.root()),
+        )?;
+        Ok(true)
+    }
+
+    /// Pops the stash [`Self::put_aside_for_pull`] made, restaging what was
+    /// staged. Returns false, keeping the stash, when it doesn't apply
+    /// cleanly.
+    fn put_back_after_pull(&self) -> Result<bool> {
+        let pop = |index: bool| {
+            let mut args = vec!["stash", "pop", "--quiet"];
+            if index {
+                args.push("--index");
+            }
+            self.git()
+                .run(&self.git().command(args).cwd(self.root()))
+                .is_ok()
+        };
+        if pop(true) {
+            return Ok(true);
+        }
+        // `--index` refuses when the staged parts no longer apply; a plain
+        // pop still brings the work back, unstaged. A pop that conflicts
+        // keeps the stash and leaves markers, which Changes shows.
+        let conflicted = !self
+            .git()
+            .run(
+                &self
+                    .git()
+                    .command(["diff", "--name-only", "--diff-filter=U"])
+                    .cwd(self.root()),
+            )?
+            .stdout
+            .is_empty();
+        Ok(!conflicted && pop(false))
     }
 
     /// Pushes a local branch (CONTEXT.md: Push).

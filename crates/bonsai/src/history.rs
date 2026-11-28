@@ -19,6 +19,7 @@ use gpui_kit::{
 use crate::{
     activity_panel::ago,
     avatar::avatar,
+    blame_view::short_ago,
     refs::{Checkout, RefDialog, RefsPanel},
     repository::{RepositoryEvent, RepositoryModel},
     ui::{
@@ -323,7 +324,9 @@ pub fn labels(snapshot: &Snapshot) -> HashMap<Oid, Vec<GraphLabel>> {
     labels
 }
 
-fn graph_row(commit: &CommitInfo, row: &Row, labels: &HashMap<Oid, Vec<GraphLabel>>) -> GraphRow {
+/// The graph row for a commit. Its ref labels are drawn in the row content
+/// (see [`HistoryView::render_row`]), where they can shrink.
+fn graph_row(commit: &CommitInfo, row: &Row) -> GraphRow {
     let mut graph = GraphRow::new(
         ElementId::Name(commit.oid.as_str().to_owned().into()),
         commit.summary.clone(),
@@ -341,15 +344,69 @@ fn graph_row(commit: &CommitInfo, row: &Row, labels: &HashMap<Oid, Vec<GraphLabe
     for edge in &row.outgoing {
         graph = graph.outgoing(GraphEdge::new(edge.from, edge.to, edge.color));
     }
-    for label in labels
-        .get(&commit.oid)
-        .into_iter()
-        .flatten()
-        .take(MAX_LABELS)
-    {
-        graph = graph.label(label.clone());
-    }
     graph
+}
+
+/// A ref label in a history row: it gives up width before the summary
+/// does, ending in an ellipsis, and names itself in full on hover.
+fn ref_pill(label: &GraphLabel, theme: &UiTheme) -> gpui_kit::AnyElement {
+    let c = &theme.colors;
+    let (icon, background, foreground, border) = match label.kind {
+        GraphLabelKind::Head => (
+            LucideIcon::GitBranch,
+            c.primary,
+            c.primary_foreground,
+            c.primary,
+        ),
+        GraphLabelKind::Branch => (
+            LucideIcon::GitBranch,
+            c.secondary,
+            c.secondary_foreground,
+            c.secondary,
+        ),
+        GraphLabelKind::Remote => (
+            LucideIcon::Cloud,
+            c.background.opacity(0.),
+            c.foreground,
+            c.border,
+        ),
+        GraphLabelKind::Tag => (
+            LucideIcon::Tag,
+            c.background.opacity(0.),
+            c.foreground,
+            c.border,
+        ),
+        GraphLabelKind::Stash => (
+            LucideIcon::Archive,
+            c.background.opacity(0.),
+            c.foreground,
+            c.border,
+        ),
+    };
+    div()
+        .flex()
+        .flex_shrink(1.)
+        .min_w(px(36.))
+        .max_w(px(150.))
+        .items_center()
+        .gap(px(4.))
+        .h(px(20.))
+        .px(px(7.))
+        .rounded(px(9999.))
+        .border_1()
+        .border_color(border)
+        .bg(background)
+        .text_color(foreground)
+        .text_xs()
+        .font_weight(gpui_kit::FontWeight::MEDIUM)
+        .child(
+            gpui_icons::lucide(icon)
+                .size(px(12.))
+                .flex_shrink_0()
+                .text_color(foreground),
+        )
+        .child(div().min_w_0().truncate().child(label.text.clone()))
+        .into_any_element()
 }
 
 /// A menu item's work on the refs panel or on this view.
@@ -693,7 +750,7 @@ impl HistoryView {
         let rows: Vec<GraphRow> = page
             .iter()
             .zip(&laid)
-            .map(|(commit, row)| graph_row(commit, row, &self.labels))
+            .map(|(commit, row)| graph_row(commit, row))
             .collect();
         let first = rows.first().map(|row| row.id.clone());
         // IDs are commit hashes, which a log lists once.
@@ -1471,10 +1528,11 @@ impl HistoryView {
         input
     }
 
-    /// `hidden` is how many ref labels did not fit on the row.
+    /// The summary keeps the room it needs: ref labels shrink first, and
+    /// the author, date and hash columns stay narrow and aligned.
     fn render_row(
         commit: Option<&CommitInfo>,
-        hidden: usize,
+        labels: &[GraphLabel],
         theme: &UiTheme,
     ) -> gpui_kit::AnyElement {
         let Some(commit) = commit else {
@@ -1484,38 +1542,51 @@ impl HistoryView {
         let when = u64::try_from(commit.author_time)
             .ok()
             .map(|s| std::time::UNIX_EPOCH + Duration::from_secs(s))
-            .map(ago)
+            .map(|at| short_ago(&ago(at)))
             .unwrap_or_default();
         let dark = theme.mode == crate::ui::theme::ThemeMode::Dark;
+        let hidden = labels.len().saturating_sub(MAX_LABELS);
         div()
             .w_full()
             .min_w_0()
             .flex()
             .items_center()
             .gap(px(8.))
-            .when(hidden > 0, |this| {
+            .when(!labels.is_empty(), |this| {
                 this.child(
                     div()
-                        .flex_shrink_0()
-                        .px(px(5.))
-                        .rounded(px(8.))
-                        .bg(c.muted)
-                        .text_xs()
-                        .text_color(c.muted_foreground)
-                        .child(format!("+{hidden}")),
+                        .flex()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .max_w(px(220.))
+                        .items_center()
+                        .gap(px(4.))
+                        .children(labels.iter().take(MAX_LABELS).map(|l| ref_pill(l, theme)))
+                        .when(hidden > 0, |this| {
+                            this.child(
+                                div()
+                                    .flex_shrink_0()
+                                    .px(px(5.))
+                                    .rounded(px(8.))
+                                    .bg(c.muted)
+                                    .text_xs()
+                                    .text_color(c.muted_foreground)
+                                    .child(format!("+{hidden}")),
+                            )
+                        }),
                 )
             })
             .child(
                 div()
                     .flex_1()
-                    .min_w_0()
+                    .min_w(px(96.))
                     .truncate()
                     .child(commit.summary.clone()),
             )
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(150.))
+                    .w(px(116.))
                     .flex()
                     .items_center()
                     .gap(px(6.))
@@ -1537,8 +1608,9 @@ impl HistoryView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(84.))
-                    .truncate()
+                    .w(px(30.))
+                    .flex()
+                    .justify_end()
                     .text_xs()
                     .text_color(c.muted_foreground)
                     .child(when),
@@ -1546,7 +1618,7 @@ impl HistoryView {
             .child(
                 div()
                     .flex_shrink_0()
-                    .w(px(56.))
+                    .w(px(54.))
                     .font_family(theme.fonts.mono.clone())
                     .text_xs()
                     .text_color(c.muted_foreground.opacity(0.8))
@@ -1570,13 +1642,7 @@ impl Render for HistoryView {
         let theme = UiTheme::read(cx).clone();
         let c = &theme.colors;
         let commits = self.commits.clone();
-        let label_counts: Rc<HashMap<Oid, usize>> = Rc::new(
-            self.labels
-                .iter()
-                .filter(|(_, labels)| labels.len() > MAX_LABELS)
-                .map(|(oid, labels)| (oid.clone(), labels.len() - MAX_LABELS))
-                .collect(),
-        );
+        let labels: Rc<HashMap<Oid, Vec<GraphLabel>>> = Rc::new(self.labels.clone());
         let row_theme = theme.clone();
         let view = cx.entity().downgrade();
         let len = commits.len();
@@ -1593,11 +1659,10 @@ impl Render for HistoryView {
             &self.graph,
             move |_, row: &ListRow, _, _| {
                 let commit = commits.get(row.index);
-                let hidden = commit
-                    .and_then(|c| label_counts.get(&c.oid))
-                    .copied()
-                    .unwrap_or(0);
-                Self::render_row(commit, hidden, &row_theme)
+                let refs = commit
+                    .and_then(|c| labels.get(&c.oid))
+                    .map_or(&[][..], Vec::as_slice);
+                Self::render_row(commit, refs, &row_theme)
             },
         )
         .empty(
@@ -1970,10 +2035,10 @@ mod tests {
                     view.commits().iter().map(|c| c.summary.as_str()).collect();
                 assert_eq!(summaries, ["Add the b file", "base"]);
                 assert!(view.is_exhausted());
-                let base = view.graph().row(1).unwrap();
-                let names: Vec<&str> = base.labels.iter().map(|l| l.text.as_ref()).collect();
+                let base = &view.labels[&view.commits()[1].oid];
+                let names: Vec<&str> = base.iter().map(|l| l.text.as_ref()).collect();
                 assert_eq!(names, ["main", "v1"]);
-                assert_eq!(base.labels[0].kind, GraphLabelKind::Head);
+                assert_eq!(base[0].kind, GraphLabelKind::Head);
             });
 
             history.update(cx, |view, cx| view.set_search("b file", cx));

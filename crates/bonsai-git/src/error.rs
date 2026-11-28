@@ -71,7 +71,10 @@ fn failure_message(record: &CommandRecord) -> String {
         .then(|| {
             RemoteFailure::classify(stderr)
                 .map(RemoteFailure::message)
-                .or_else(|| crate::SyncFailure::classify(stderr).map(crate::SyncFailure::message))
+                .or_else(|| {
+                    crate::SyncFailure::classify(&format!("{stderr}\n{}", record.stdout))
+                        .map(crate::SyncFailure::message)
+                })
         })
         .flatten();
     if let Some(explanation) = explanation {

@@ -97,6 +97,15 @@ impl Repository {
         Ok(())
     }
 
+    /// Stages every change to a tracked file, leaving untracked files out
+    /// (`git add --update`).
+    pub fn stage_tracked(&self) -> Result<()> {
+        let root = self.work_tree()?;
+        self.git()
+            .run(&self.git().command(["add", "--update"]).cwd(root))?;
+        Ok(())
+    }
+
     /// Unstages these paths, keeping their work tree contents.
     pub fn unstage(&self, paths: &[PathBuf]) -> Result<()> {
         if self.head_is_unborn()? {
