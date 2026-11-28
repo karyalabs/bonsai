@@ -84,14 +84,25 @@ pub struct SyncBar {
     force_request: Option<PushRequest>,
     /// Why the last push did nothing.
     notice: Option<&'static str>,
+    /// The pull in flight that a push follows once it lands.
+    push_after: Option<SharedString>,
     _events: Subscription,
 }
 
 impl SyncBar {
     pub fn new(model: Entity<RepositoryModel>, cx: &mut Context<Self>) -> Self {
         let events = cx.subscribe(&model, |this, _, event: &RepositoryEvent, cx| {
-            if *event == RepositoryEvent::SnapshotChanged {
-                this.rebuild_menus(cx);
+            match event {
+                RepositoryEvent::SnapshotChanged => this.rebuild_menus(cx),
+                RepositoryEvent::OperationFinished { name, error, .. }
+                    if this.push_after.as_ref() == Some(name) =>
+                {
+                    this.push_after = None;
+                    if error.is_none() {
+                        this.push(cx);
+                    }
+                }
+                RepositoryEvent::OperationFinished { .. } => {}
             }
             cx.notify();
         });
@@ -103,6 +114,7 @@ impl SyncBar {
             force: DialogHandle::new(false),
             force_request: None,
             notice: None,
+            push_after: None,
             _events: events,
         };
         this.rebuild_menus(cx);
@@ -126,8 +138,17 @@ impl SyncBar {
         });
     }
 
-    pub fn pull(&mut self, cx: &mut Context<Self>) {
+    /// Pulls, then pushes once the pull lands: the fix for a push the
+    /// remote rejected because it has commits this branch lacks.
+    pub fn pull_then_push(&mut self, cx: &mut Context<Self>) {
+        let name = self.pull(cx);
+        self.push_after = Some(name);
+    }
+
+    /// Pulls the current branch's upstream; returns the operation's name.
+    pub fn pull(&mut self, cx: &mut Context<Self>) -> SharedString {
         self.notice = None;
+        self.push_after = None;
         let mode = if self.rebase {
             PullMode::Rebase
         } else if crate::settings::get(cx).pull == crate::settings::PullSetting::FastForwardOnly {
@@ -149,6 +170,7 @@ impl SyncBar {
                 cx,
             );
         });
+        name.into()
     }
 
     fn run_push(&mut self, request: PushRequest, cx: &mut Context<Self>) {
@@ -441,7 +463,9 @@ impl Render for SyncBar {
                 .child(icon(LucideIcon::ArrowDown))
                 .child(if self.rebase { "Pull (Rebase)" } else { "Pull" })
                 .children(count(behind))
-                .on_click(cx.listener(|this, _, _, cx| this.pull(cx))),
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.pull(cx);
+                })),
                 Menu::new(&self.pull_menu, "Pull options")
                     .trigger_style_with(ghost_trigger(&theme, ButtonSize::IconSm))
                     .trigger(chevron()),

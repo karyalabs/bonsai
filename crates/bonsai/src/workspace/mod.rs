@@ -341,7 +341,11 @@ impl Workspace {
                         quiet: false,
                         undo,
                     } => {
-                        if let Some(notice) = finished_notice(name, undo, &model) {
+                        // A later success makes an earlier failure moot.
+                        if this.message.is_some() && this.message == this.message_details {
+                            this.message = None;
+                        }
+                        if let Some(notice) = finished_notice(name, undo, &model, cx) {
                             this.toasts.update(cx, |toasts, cx| {
                                 toasts.dismiss(&SharedString::from("workspace.done"), cx);
                                 toasts.push("workspace.done", notice, cx);
@@ -1967,7 +1971,9 @@ impl Workspace {
 
     fn on_pull(&mut self, _: &commands::Pull, _: &mut Window, cx: &mut Context<Self>) {
         if let Some(sync) = self.active_sync() {
-            sync.update(cx, SyncBar::pull);
+            sync.update(cx, |sync, cx| {
+                sync.pull(cx);
+            });
         }
     }
 
@@ -2057,13 +2063,40 @@ impl Workspace {
             lines.truncate(3);
             lines.push("…");
         }
-        let description = lines.join("\n");
-        let mut notice = Notice::new(title)
-            .description(description)
-            .persistent()
-            .cancel("Dismiss");
+        // A failure Bonsai recognizes already says what happened and what to
+        // do; Git's raw output stays in Activity.
+        let recognized = {
+            use bonsai_git::SyncFailure as F;
+            [
+                F::Rejected,
+                F::StaleLease,
+                F::Diverged,
+                F::NoUpstream,
+                F::Conflicts,
+            ]
+            .iter()
+            .any(|failure| message.starts_with(failure.message()))
+        };
+        let description = if recognized {
+            // Only what's left of the explanation, which is its first line.
+            split_message(message.lines().next().unwrap_or_default()).1
+        } else {
+            lines.join("\n")
+        };
+        let mut notice = Notice::new(title);
+        if !description.is_empty() {
+            notice = notice.description(description);
+        }
+        let mut notice = notice.persistent().cancel("Dismiss");
         let this = cx.entity().downgrade();
-        if self.message_details.as_ref() == Some(&message) {
+        let rejected = message.starts_with(bonsai_git::SyncFailure::Rejected.message());
+        if rejected && let Some(sync) = self.active_sync() {
+            // Offer the fix itself; the full output stays in Activity.
+            let sync = sync.downgrade();
+            notice = notice.action("Pull and Push", move |_, cx| {
+                let _ = sync.update(cx, SyncBar::pull_then_push);
+            });
+        } else if self.message_details.as_ref() == Some(&message) {
             let this = this.clone();
             notice = notice.action("Show Details", move |_, cx| {
                 let _ = this.update(cx, Self::show_message_details);
@@ -2777,26 +2810,31 @@ fn message_panel(
 
 /// The toast for a finished operation: one that can be undone or redone
 /// offers it, and others worth confirming, such as a push, say they're done.
-fn finished_notice(name: &str, undo: &UndoNote, model: &Entity<RepositoryModel>) -> Option<Notice> {
-    let model = model.downgrade();
+fn finished_notice(
+    name: &str,
+    undo: &UndoNote,
+    model: &Entity<RepositoryModel>,
+    cx: &gpui_kit::App,
+) -> Option<Notice> {
+    let weak = model.downgrade();
     let (label, description): (&str, &str) = match undo {
         UndoNote::Undoable => ("Undo", "Done. Undo with ⌘Z."),
         UndoNote::Redoable => ("Redo", "Done. Redo with ⇧⌘Z."),
         UndoNote::None => {
             return success_title(name).map(|title| {
-                Notice::new(title)
-                    .description("Done.")
-                    .timeout(std::time::Duration::from_secs(3))
+                Notice::new(past_tense(&title)).timeout(std::time::Duration::from_secs(3))
             });
         }
     };
     let redo = *undo == UndoNote::Redoable;
+    let (title, description) = commit_notice(name, model, description, cx)
+        .unwrap_or_else(|| (name.to_owned(), description.to_owned()));
     Some(
-        Notice::new(name.to_owned())
+        Notice::new(title)
             .description(description)
             .timeout(std::time::Duration::from_secs(6))
             .action(label, move |_, cx| {
-                let _ = model.update(
+                let _ = weak.update(
                     cx,
                     |model, cx| {
                         if redo { model.redo(cx) } else { model.undo(cx) }
@@ -2804,6 +2842,32 @@ fn finished_notice(name: &str, undo: &UndoNote, model: &Entity<RepositoryModel>)
                 );
             }),
     )
+}
+
+/// Says where a commit went and which it is, instead of "Commit · Done".
+fn commit_notice(
+    name: &str,
+    model: &Entity<RepositoryModel>,
+    hint: &str,
+    cx: &gpui_kit::App,
+) -> Option<(String, String)> {
+    let verb = match name {
+        "Commit" => "Committed",
+        "Amend commit" => "Amended the last commit",
+        _ => return None,
+    };
+    let bonsai_git::Head::Branch {
+        name: branch,
+        oid: Some(oid),
+    } = &model.read(cx).snapshot()?.head
+    else {
+        return None;
+    };
+    let hint = hint.trim_start_matches("Done. ");
+    Some((
+        format!("{verb} to {branch}"),
+        format!("{} · {hint}", oid.short()),
+    ))
 }
 
 /// The toast for a finished operation worth confirming, such as a push; the
@@ -2828,6 +2892,27 @@ pub fn success_title(operation: &str) -> Option<String> {
         .iter()
         .any(|prefix| operation.starts_with(prefix))
         .then(|| operation.to_owned())
+}
+
+/// "Push main to origin" as "Pushed main to origin": a finished operation
+/// says what happened, so it needs no "Done." under it.
+#[must_use]
+pub fn past_tense(operation: &str) -> String {
+    const VERBS: [(&str, &str); 6] = [
+        ("Fetch all remotes", "Fetched all remotes"),
+        ("Fetch", "Fetched"),
+        ("Pull", "Pulled"),
+        ("Push", "Pushed"),
+        ("Publish", "Published"),
+        ("Force push", "Force pushed"),
+    ];
+    VERBS
+        .iter()
+        .find_map(|(verb, done)| {
+            let rest = operation.strip_prefix(verb)?;
+            (rest.is_empty() || rest.starts_with(' ')).then(|| format!("{done}{rest}"))
+        })
+        .unwrap_or_else(|| operation.to_owned())
 }
 
 /// Splits an error into a short title (its first line, or first sentence)

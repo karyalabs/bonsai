@@ -705,6 +705,16 @@ fn errors_split_into_a_title_and_details() {
         Some("Push main to origin")
     );
     assert_eq!(super::success_title("Stage a.rs"), None);
+    assert_eq!(
+        super::past_tense("Push main to origin"),
+        "Pushed main to origin"
+    );
+    assert_eq!(super::past_tense("Pull with rebase"), "Pulled with rebase");
+    assert_eq!(
+        super::past_tense("Fetch all remotes"),
+        "Fetched all remotes"
+    );
+    assert_eq!(super::past_tense("Pullover"), "Pullover");
 }
 
 mod hosted {

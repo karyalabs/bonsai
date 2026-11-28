@@ -519,7 +519,7 @@ fn plural(count: usize, noun: &str) -> String {
 }
 
 /// "3 weeks ago" as "3w": the annotation column is narrow.
-fn short_ago(text: &str) -> String {
+pub(crate) fn short_ago(text: &str) -> String {
     let mut parts = text.split(' ');
     match (parts.next(), parts.next()) {
         (Some("just"), _) => "now".to_owned(),

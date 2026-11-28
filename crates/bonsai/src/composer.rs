@@ -397,6 +397,21 @@ impl CommitComposer {
             .map_or(0, |s| s.changes.iter().filter(|c| c.is_staged()).count())
     }
 
+    /// Tracked files with unstaged changes, which Commit stages and commits
+    /// when nothing is staged yet.
+    fn tracked_count(&self, cx: &gpui_kit::App) -> usize {
+        self.model
+            .read(cx)
+            .snapshot()
+            .map_or(0, |s| s.changes.iter().filter(|c| c.is_unstaged()).count())
+    }
+
+    /// Whether Commit stages the changed tracked files first, because
+    /// nothing is staged yet.
+    fn commits_all(&self, cx: &gpui_kit::App) -> bool {
+        !self.amend && self.staged_count(cx) == 0 && self.tracked_count(cx) > 0
+    }
+
     /// Why Commit is unavailable, if it is.
     fn blocker(&self, cx: &gpui_kit::App) -> Option<&'static str> {
         if self.pending.is_some() {
@@ -405,8 +420,8 @@ impl CommitComposer {
             Some("Write a summary to commit.")
         } else if self.is_template(cx) {
             Some("Fill in the commit template to commit.")
-        } else if !self.amend && self.staged_count(cx) == 0 {
-            Some("Stage changes to commit them.")
+        } else if !self.amend && self.staged_count(cx) == 0 && self.tracked_count(cx) == 0 {
+            Some("Stage the new files to commit them.")
         } else {
             None
         }
@@ -420,13 +435,19 @@ impl CommitComposer {
         }
         let message = self.message(cx);
         let amend = self.amend;
+        let stage = self.commits_all(cx);
         let name: SharedString = if amend { "Amend commit" } else { "Commit" }.into();
         self.pending = Some(name.clone());
         self.error = None;
         self.model.update(cx, |model, cx| {
             model.run(
                 name,
-                move |repository| repository.commit(&message, amend).map(|_| ()),
+                move |repository| {
+                    if stage {
+                        repository.stage_tracked()?;
+                    }
+                    repository.commit(&message, amend).map(|_| ())
+                },
                 cx,
             );
         });
@@ -484,8 +505,15 @@ impl Render for CommitComposer {
             .branch_name(cx)
             .map(|name| format!(" to {name}"))
             .unwrap_or_default();
+        let all = if self.commits_all(cx) {
+            self.tracked_count(cx)
+        } else {
+            0
+        };
         let label = match (self.amend, staged) {
             (true, _) => "Amend Last Commit".to_owned(),
+            (false, 0) if all == 1 => format!("Commit 1 Changed File{target}"),
+            (false, 0) if all > 1 => format!("Commit All {all} Files{target}"),
             (false, 0) => "Commit".to_owned(),
             (false, 1) => format!("Commit 1 File{target}"),
             (false, n) => format!("Commit {n} Files{target}"),
@@ -627,7 +655,11 @@ impl Render for CommitComposer {
                                     .tooltip(move |_, cx| {
                                         text_tooltip(
                                             blocker
-                                                .unwrap_or("Commit (⌘↩) · Commit and Push (⇧⌘↩)")
+                                                .unwrap_or(if all > 0 {
+                                                    "Nothing is staged, so this stages and commits every changed file. New files aren't included. (⌘↩)"
+                                                } else {
+                                                    "Commit (⌘↩) · Commit and Push (⇧⌘↩)"
+                                                })
                                                 .into(),
                                             cx,
                                         )
@@ -740,6 +772,52 @@ mod tests {
         cx.run_until_parked();
         composer.read_with(cx, |composer, cx| {
             assert_eq!(composer.message(cx), "Change a\n\nTo b.");
+        });
+    }
+
+    #[gpui_kit::test]
+    fn with_nothing_staged_commits_every_changed_tracked_file(cx: &mut TestAppContext) {
+        cx.update(crate::ui::theme::init);
+        let dir = tempfile::tempdir().unwrap();
+        let repository =
+            Repository::init(&Git::locate(None).unwrap(), dir.path(), Some("main")).unwrap();
+        git(dir.path(), &["config", "user.name", "Ada Lovelace"]);
+        git(dir.path(), &["config", "user.email", "ada@example.com"]);
+        git(dir.path(), &["config", "commit.gpgsign", "false"]);
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        git(dir.path(), &["add", "."]);
+        git(dir.path(), &["commit", "-qm", "Start"]);
+        std::fs::write(dir.path().join("a.txt"), "a2").unwrap();
+        std::fs::remove_file(dir.path().join("b.txt")).unwrap();
+        std::fs::write(dir.path().join(".env"), "SECRET=1").unwrap();
+        let model = cx.new(|cx| RepositoryModel::new(repository, false, cx));
+        let (composer, cx) =
+            cx.add_window_view(|window, cx| CommitComposer::new(model.clone(), window, cx));
+        cx.run_until_parked();
+        composer.update_in(cx, |composer, window, cx| {
+            assert!(composer.commits_all(cx));
+            composer.set_message("Update a, drop b", window, cx);
+            assert_eq!(composer.blocker(cx), None);
+            composer.commit(cx);
+        });
+        cx.run_until_parked();
+        let repository = model.read_with(cx, |model, _| model.repository().clone());
+        assert_eq!(
+            repository.recent_messages(5).unwrap()[0],
+            "Update a, drop b"
+        );
+        // The new file stays out of the commit, and now there's nothing
+        // tracked left to commit.
+        let snapshot = repository.snapshot().unwrap();
+        assert_eq!(snapshot.changes.len(), 1);
+        assert_eq!(snapshot.changes[0].path, std::path::PathBuf::from(".env"));
+        composer.update_in(cx, |composer, window, cx| {
+            composer.set_message("Again", window, cx);
+            assert_eq!(
+                composer.blocker(cx),
+                Some("Stage the new files to commit them.")
+            );
         });
     }
 

@@ -136,6 +136,72 @@ fn a_rejected_push_explains_itself_and_pull_combines() {
 }
 
 #[test]
+fn pull_keeps_uncommitted_changes_to_the_files_it_updates() {
+    let s = setup();
+    commit(s.b.root(), "list.txt", "a\nb\nc\nd\ne\n");
+    s.b.push(&PushRequest::new("origin", "main"), None, None)
+        .unwrap();
+    s.a.pull(PullMode::FastForwardOnly, None, None).unwrap();
+
+    for (mode, theirs) in [(PullMode::Merge, "A"), (PullMode::Rebase, "B")] {
+        let first = format!("{theirs}\nb\nc\nd\ne\n");
+        commit(s.b.root(), "list.txt", &first);
+        s.b.push(&PushRequest::new("origin", "main"), None, None)
+            .unwrap();
+        // Unsaved work at the other end of the file the pull changes, and
+        // a staged change to another file, which stays staged.
+        let ours = std::fs::read_to_string(s.a.root().join("list.txt"))
+            .unwrap()
+            .replace('e', "mine");
+        std::fs::write(s.a.root().join("list.txt"), ours).unwrap();
+        std::fs::write(s.a.root().join("one.txt"), theirs).unwrap();
+        run(s.a.root(), &["add", "one.txt"]);
+
+        s.a.pull(mode, None, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(s.a.root().join("list.txt")).unwrap(),
+            format!("{theirs}\nb\nc\nd\nmine\n")
+        );
+        assert_eq!(run(s.a.root(), &["stash", "list"]), "");
+        assert_eq!(
+            run(s.a.root(), &["status", "--porcelain"]),
+            " M list.txt\nM  one.txt\n"
+        );
+        run(s.a.root(), &["reset", "-q", "--hard"]);
+    }
+}
+
+#[test]
+fn a_pull_that_stops_on_conflicts_says_so() {
+    let s = setup();
+    commit(s.b.root(), "one.txt", "theirs");
+    s.b.push(&PushRequest::new("origin", "main"), None, None)
+        .unwrap();
+    commit(s.a.root(), "one.txt", "ours");
+    let error = s.a.pull(PullMode::Merge, None, None).unwrap_err();
+    assert_eq!(error.sync_failure(), Some(SyncFailure::Conflicts));
+    assert!(error.to_string().starts_with("Pulled, but"), "{error}");
+}
+
+#[test]
+fn changes_that_clash_with_a_pull_wait_in_the_stash() {
+    let s = setup();
+    commit(s.b.root(), "one.txt", "theirs");
+    s.b.push(&PushRequest::new("origin", "main"), None, None)
+        .unwrap();
+    std::fs::write(s.a.root().join("one.txt"), "mine").unwrap();
+    let error = s.a.pull(PullMode::Merge, None, None).unwrap_err();
+    assert!(error.to_string().contains("keeps a copy"), "{error}");
+    assert_eq!(upstream(&s.a, "main"), Some(("origin/main".into(), 0, 0)));
+    assert!(run(s.a.root(), &["stash", "list"]).contains("Saved before pull"));
+    assert!(
+        std::fs::read_to_string(s.a.root().join("one.txt"))
+            .unwrap()
+            .contains("<<<<<<<")
+    );
+}
+
+#[test]
 fn force_push_with_lease_refuses_unseen_commits() {
     let s = setup();
     // b rewrites history and force pushes.
