@@ -5,6 +5,53 @@ notes come from its section here, so a version bump must add one (see
 docs/releasing.md). Write for people using Bonsai: what they can do now and
 what got fixed, grouped by feature, with the pull requests in brackets.
 
+## 0.25.0 (2026-11-28)
+
+A release about making everyday Git feel effortless, from a close look at
+how a normal day in Bonsai goes.
+
+### Pull and push
+
+- **Pull with uncommitted changes.** Pulling no longer stops because you
+  have edits in progress. Bonsai sets them aside, pulls, and puts them
+  back, with what you staged still staged. If your edits touch the same
+  lines as what came in, they wait in a "Saved before pull" stash and the
+  conflicts show in Changes. (#128)
+- **Pull and Push.** When the remote rejects a push because it has commits
+  you don't, the message now has a Pull and Push button that does both.
+  (#128)
+- **Clearer messages.** A pull that stops on conflicts says so instead of
+  "git pull failed". Recognized problems show just the explanation, with
+  Git's output still in Activity. An error clears itself once a later
+  action succeeds, and messages no longer cover the buttons at the bottom
+  of the conflict editor. (#128)
+
+### Commit
+
+- **Commit without staging.** With nothing staged, Commit commits every
+  changed file Git already tracks, for example "Commit All 3 Files to
+  main". New files stay out, so a stray `.env` isn't swept in. (#128)
+- **Messages that say what happened.** "Committed to main · a3e498b",
+  "Pushed main to origin", "Pulled". (#128)
+
+### History
+
+- **Commit titles always show.** Branch and tag labels shrink, ending in an
+  ellipsis, instead of squeezing out the commit's title. Dates are compact
+  ("2d", "3w") and the author, date and hash columns line up. (#128)
+
+### Compare
+
+- **Starts somewhere useful.** On your main branch, Compare opens with it
+  against its remote: what you haven't pushed and what's waiting to be
+  pulled. (#128)
+
+### Sidebar
+
+- **Tidier.** Worktrees doesn't list your only work tree. Stashes read as
+  their message, with the branch beside them, instead of "On main: …".
+  (#128)
+
 ## 0.24.0 (2026-11-25)
 
 ### Rewriting commits

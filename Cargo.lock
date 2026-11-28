@@ -699,7 +699,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "bonsai-git",
  "bonsai-graph",
@@ -719,7 +719,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-git"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "rustix",
  "tempfile",
@@ -728,11 +728,11 @@ dependencies = [
 
 [[package]]
 name = "bonsai-graph"
-version = "0.24.0"
+version = "0.25.0"
 
 [[package]]
 name = "bonsai-keychain"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "security-framework",
  "tempfile",
@@ -741,7 +741,7 @@ dependencies = [
 
 [[package]]
 name = "bonsai-providers"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "base64 0.22.1",
  "futures",
